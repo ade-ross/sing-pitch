@@ -33,6 +33,7 @@ BAND_COLOUR = {Band.GREEN: "#2ecc71", Band.YELLOW: "#f1c40f", Band.RED: "#e74c3c
 UNSCORED_COLOUR = "#8a8a8a"   # sung where the Reference has nothing reliable: shown, never scored
 BRUSH = {b: pg.mkBrush(c) for b, c in BAND_COLOUR.items()}
 BRUSH[None] = pg.mkBrush(UNSCORED_COLOUR)
+UNSCORED_SPAN_BRUSH = pg.mkBrush(138, 138, 138, 70)   # Unscored stretch of the Melody, greyed on the plot
 REFERENCE_PEN = pg.mkPen("#5dade2", width=4)
 
 
@@ -55,7 +56,7 @@ def describe(record: TakeRecord) -> str:
         return f"Take {record.id}: no voiced sound heard. Saved."
     key = f"{record.key}   |   {s.out_of_key_count} out of key   |   " if record.reference_kind == "key" else ""
     if record.reference_kind == "melody":
-        key = f"{record.song_id}   |   "
+        key = f"{record.song_id}   |   octave shift {s.octave_shift:+d}   |   "
     return (
         f"{key}In tune {s.pct_in_tune:.0f}%   |   median {s.median_abs_cents:.0f} cents off   |   "
         f"tends {s.tendency}   |   {steadiness_text(s)}   |   range {s.lowest_note}-{s.highest_note}   |   "
@@ -133,6 +134,9 @@ class MainWindow(QtWidgets.QWidget):
         plot.setMouseEnabled(False, False)
         plot.hideButtons()
         plot.showGrid(y=True, alpha=0.35)
+        self._unscored = pg.BarGraphItem(x0=[], x1=[], y0=[], y1=[], brush=UNSCORED_SPAN_BRUSH, pen=None)
+        self._unscored.setZValue(-5)
+        plot.addItem(self._unscored)
         self._ref_curve = plot.plot(pen=REFERENCE_PEN, connect="finite")
         self._curve = plot.plot(pen=pg.mkPen("#777777", width=1), connect="finite")
         self._dots = pg.ScatterPlotItem(size=6, pen=None)
@@ -274,6 +278,7 @@ class MainWindow(QtWidgets.QWidget):
         self._melody = reference if reference.kind == "melody" else None
         self._melody_latency = latency_s
         self._ref_curve.setData([], [])
+        self._unscored.setOpts(x0=[], x1=[], y0=[], y1=[])
         if self._melody is not None:
             _, midi = self._melody.midi_line()
             if np.isfinite(midi).any():
@@ -402,6 +407,10 @@ class MainWindow(QtWidgets.QWidget):
         x = t + latency
         keep = (x >= t_end - WINDOW_S) & (x <= t_end + 1.0)
         self._ref_curve.setData(x[keep], midi[keep])
+        spans = [(a + latency, b + latency) for a, b in self._melody.unscored_spans()
+                 if b + latency >= t_end - WINDOW_S and a + latency <= t_end + 1.0]
+        self._unscored.setOpts(x0=[a for a, _ in spans], x1=[b for _, b in spans],
+                               y0=[0.0] * len(spans), y1=[127.0] * len(spans))
 
     def tick(self, drain_only: bool = False) -> None:
         if self._runner is not None:

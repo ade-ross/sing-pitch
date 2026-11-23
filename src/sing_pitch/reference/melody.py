@@ -10,13 +10,38 @@ from ..music import A4_MIDI
 from ..config import A4_HZ
 from .base import Target
 
-MIN_CONFIDENCE = 0.3      # RMVPE activation below this = reference unreliable (04-rmvpe notes); ticket #7 refines
+MIN_CONFIDENCE = 0.3      # RMVPE activation below this = reference unreliable (04-rmvpe notes)
+FILL_GAP_S = 0.12         # a dip shorter than this between two reliable frames is a consonant, not a stretch
+MIN_SCORED_S = 0.12       # a reliable run shorter than this is a blip: too short to judge a voice against
 
 
-def scored_mask(line: ReferenceLine, min_confidence: float = MIN_CONFIDENCE) -> np.ndarray:
-    """Which reference frames are scored. For now a plain confidence threshold.
-    Ticket #7 replaces this with Unscored stretches (pass its mask to Melody(scored=...))."""
-    return np.asarray(line.confidence) >= min_confidence
+def _runs(flags: np.ndarray) -> list[tuple[int, int, bool]]:
+    """(start, end, value) of each run of equal values, end exclusive."""
+    edges = np.flatnonzero(np.diff(flags.astype(np.int8))) + 1
+    starts = np.concatenate([[0], edges])
+    ends = np.concatenate([edges, [len(flags)]])
+    return [(int(a), int(b), bool(flags[a])) for a, b in zip(starts, ends)]
+
+
+def scored_mask(
+    line: ReferenceLine, min_confidence: float = MIN_CONFIDENCE, fill_gap_s: float = FILL_GAP_S,
+    min_scored_s: float = MIN_SCORED_S,
+) -> np.ndarray:
+    """Which reference frames are scored; the rest are Unscored stretches. Confidence >= min_confidence, then
+    smoothed so the mask does not flicker: low-confidence gaps shorter than fill_gap_s between two reliable
+    frames count as reliable, then reliable runs shorter than min_scored_s count as unreliable."""
+    mask = np.asarray(line.confidence) >= min_confidence
+    if len(mask) < 2:
+        return mask
+    hop = float(np.median(np.diff(np.asarray(line.t, dtype=np.float64))))
+    runs = _runs(mask)
+    for start, end, value in runs:
+        if not value and start > 0 and end < len(mask) and (end - start) * hop < fill_gap_s:
+            mask[start:end] = True
+    for start, end, value in _runs(mask):
+        if value and (end - start) * hop < min_scored_s:
+            mask[start:end] = False
+    return mask
 
 
 class Melody:
@@ -37,6 +62,14 @@ class Melody:
     @classmethod
     def from_song(cls, song) -> Melody:
         return cls(song.load_reference(), song.id)
+
+    def unscored_spans(self) -> list[tuple[float, float]]:
+        """(start, end) in song time of every Unscored stretch: what the live and replay views grey out."""
+        if not len(self._t):
+            return []
+        hop = self._tolerance / 1.5
+        return [(float(self._t[a] - hop / 2), float(self._t[b - 1] + hop / 2))
+                for a, b, scored in _runs(self.scored) if not scored]
 
     def midi_line(self) -> tuple[np.ndarray, np.ndarray]:
         """(song time, MIDI) of the line, NaN where unscored: what the live view draws."""

@@ -24,6 +24,10 @@ class ScoreConfig:
     steadiness_min_note_s: float = 0.5
     steadiness_trim_s: float = 0.12
     steadiness_trim_fraction: float = 0.15   # the larger of trim_s and this share of the note is cut each end
+    # Octave shift: whole-octave offsets tried, and how many scored frames (~2 s of singing) the LIVE view
+    # waits before it stops re-estimating and keeps its octave for the rest of the Take
+    octave_shifts: tuple[int, ...] = (0, -1, 1, -2, 2)     # tie-break order: the smaller shift wins
+    octave_live_lock_frames: int = 125
 
 
 DEFAULT_SCORE_CONFIG = ScoreConfig()
