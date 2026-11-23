@@ -31,3 +31,13 @@ def data_dir() -> Path:
     if override:
         return Path(override)
     return Path.home() / "Library" / "Application Support" / "sing-pitch"
+
+
+def models_dir() -> Path:
+    """Where the downloaded models live (rmvpe.onnx, audio-separator/). SING_PITCH_MODELS overrides."""
+    override = os.environ.get("SING_PITCH_MODELS")
+    return Path(override) if override else data_dir() / "models"
+
+
+# Vocal separator for song import: best open vocal RoFormer (MelBand, vocals SDR 12.6). Simone judges by listening.
+DEFAULT_SEPARATOR_MODEL = "vocals_mel_band_roformer.ckpt"
