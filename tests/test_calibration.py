@@ -125,3 +125,14 @@ def test_the_calibrate_command_measures_and_stores_the_latency_for_the_output(tm
     assert calibrate_main([], make_run=make_run, output_name="WF-1000XM5", home=tmp_path, wait=lambda s: None) == 0
     assert abs(Settings.load(tmp_path).latency_for("WF-1000XM5") - 0.15) < 0.008
     assert "WF-1000XM5" in capsys.readouterr().out
+
+
+def test_an_output_with_no_name_is_calibrated_and_looked_up_under_one_default_key(tmp_path):
+    s = Settings.load(tmp_path)
+    s.set_latency("WF-1000XM5", 0.31)
+    assert not s.is_calibrated(None)                        # another output's calibration is not this one's
+    s.set_latency(None, 0.12)
+    s.save()
+    again = Settings.load(tmp_path)
+    assert again.is_calibrated(None) and again.latency_for(None) == 0.12
+    assert not again.is_calibrated("Scarlett 2i2 USB") and again.latency_for("Scarlett 2i2 USB") == 0.12   # most recent

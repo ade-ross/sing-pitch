@@ -151,3 +151,40 @@ def test_replaying_a_key_take_flags_the_out_of_key_note_again(qtbot, tmp_path):
     win.toggle(), qtbot.wait(100), win.toggle()
     win.toggle_replay()
     qtbot.waitUntil(lambda: any(win._out), timeout=3000)
+
+
+def test_replaying_a_take_whose_pitch_line_cannot_be_read_explains_instead_of_crashing(qtbot, tmp_path):
+    from sing_pitch.ui import MainWindow
+
+    audio = np.concatenate([quiet(0.3), harmonic(hz_at(10), 0.6), quiet(0.3)])
+    win = MainWindow(SwiftF0Tracker(), home=tmp_path, input_factory=lambda _i: ArrayInput(audio, SR, 256))
+    qtbot.addWidget(win)
+    win.toggle(), qtbot.wait(100), win.toggle()
+    for f in (tmp_path / "takes").glob("*.npz"):
+        f.write_bytes(b"not an npz")                      # a damaged file is not a ValueError
+    win.toggle_replay()
+    assert "Cannot replay" in win.summary_label.text()
+    assert win.button.isEnabled() and win.replay_button.text() == "Replay last Take"
+
+
+def test_a_crash_in_the_tracker_during_a_take_stops_it_and_shows_the_error(qtbot, tmp_path):
+    from sing_pitch.ui import MainWindow
+
+    class CrashingTracker:
+        def reset(self):
+            pass
+
+        def push(self, chunk, sample_rate):
+            raise RuntimeError("tracker blew up")
+
+        def flush(self):
+            return []
+
+    win = MainWindow(CrashingTracker(), home=tmp_path, input_factory=lambda _i: ArrayInput(quiet(0.5), SR, 256))
+    qtbot.addWidget(win)
+    win.toggle()
+    qtbot.waitUntil(lambda: win.button.text() == "Start", timeout=3000)       # the timer noticed and stopped the Take
+    assert "tracker blew up" in win.summary_label.text()
+    assert win._runner is None and win.replay_button.isEnabled() and win.device_box.isEnabled()
+    assert not (tmp_path / "takes.csv").exists()
+

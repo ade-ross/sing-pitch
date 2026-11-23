@@ -58,7 +58,7 @@ def calibrate_main(argv: list[str], make_run=None, output_name: str | None = Non
     import time
 
     from .calibration import CalibrationRun
-    from .settings import Settings
+    from .settings import DEFAULT_OUTPUT, Settings
 
     argparse.ArgumentParser(prog="sing-pitch calibrate",
                             description="Measure the headphone-to-mic latency used by Melody Takes.").parse_args(argv)
@@ -68,7 +68,7 @@ def calibrate_main(argv: list[str], make_run=None, output_name: str | None = Non
 
         output_name = default_output_name()
         make_run = lambda: CalibrationRun(SoundDeviceInput(pick_input(list_inputs())))   # noqa: E731
-    output = output_name or "default output"
+    output = output_name or DEFAULT_OUTPUT
     print(f"Output: {output}. In 1.5 s, 8 clicks: clap or sing 'ta' exactly on each one.", flush=True)
     run = make_run()
     run.start()
