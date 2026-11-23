@@ -6,7 +6,7 @@ from dataclasses import dataclass
 from pathlib import Path
 
 SAMPLE_RATE = 48_000          # input stream rate; the tracker resamples to 16 kHz itself
-BLOCKSIZE = 512               # small blocks keep display lag down (input latency ~42 ms)
+BLOCKSIZE = 256               # small blocks keep display lag down (input latency ~36 ms)
 A4_HZ = 440.0
 
 
