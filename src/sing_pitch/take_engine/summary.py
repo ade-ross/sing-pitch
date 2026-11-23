@@ -9,6 +9,7 @@ from ..config import ScoreConfig
 from ..music import note_name
 from ..pitch import PitchFrame
 from ..reference import Band, Reference
+from .steadiness import steadiness_cents
 
 
 @dataclass(frozen=True)
@@ -72,4 +73,5 @@ def summarise(scores: Sequence, frames: Sequence[PitchFrame], config: ScoreConfi
         lowest_note=note_name(round(min(midis))),
         highest_note=note_name(round(max(midis))),
         out_of_key_count=count_out_of_key(scores),
+        steadiness_cents=steadiness_cents(scores, config),
     )

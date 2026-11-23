@@ -2,6 +2,7 @@
 from __future__ import annotations
 
 from collections import deque
+import time
 from pathlib import Path
 from typing import Callable
 
@@ -16,7 +17,9 @@ from ..music import NOTE_NAMES, note_name
 from ..pitch import PitchTracker
 from ..playback import DronePlayer
 from ..reference import Band, Key, NearestNote, Reference
-from ..take_engine import FrameScore, TakeRecord
+from ..replay import Replay
+from ..take_engine import FrameScore, TakeRecord, replay_scores
+from ..take_store import last_take_id, load_frames, saved_reference
 
 WINDOW_S = 10.0       # seconds of line on screen
 TICK_MS = 33          # ~30 Hz redraw
@@ -27,6 +30,12 @@ BRUSH = {b: pg.mkBrush(c) for b, c in BAND_COLOUR.items()}
 pg.setConfigOptions(antialias=False)
 
 
+def steadiness_text(s) -> str:
+    if s.steadiness_cents is None:
+        return "steadiness: no held note"
+    return f"steadiness {s.steadiness_cents:.0f} cents"
+
+
 def describe(record: TakeRecord) -> str:
     s = record.summary
     if s.n_scored == 0:
@@ -34,7 +43,7 @@ def describe(record: TakeRecord) -> str:
     key = f"{record.key}   |   {s.out_of_key_count} out of key   |   " if record.reference_kind == "key" else ""
     return (
         f"{key}In tune {s.pct_in_tune:.0f}%   |   median {s.median_abs_cents:.0f} cents off   |   "
-        f"tends {s.tendency}   |   range {s.lowest_note}-{s.highest_note}   |   "
+        f"tends {s.tendency}   |   {steadiness_text(s)}   |   range {s.lowest_note}-{s.highest_note}   |   "
         f"{s.n_scored * 0.016:.1f} s sung   |   saved as {record.id}"
     )
 
@@ -54,6 +63,8 @@ class MainWindow(QtWidgets.QWidget):
         self._drone_factory = drone_factory
         self._drone: DronePlayer | None = None
         self._runner: LiveRunner | None = None
+        self._replay: Replay | None = None
+        self._replay_started = 0.0
         self._t: deque[float] = deque()
         self._midi: deque[float] = deque()
         self._band: deque[Band | None] = deque()
@@ -72,6 +83,11 @@ class MainWindow(QtWidgets.QWidget):
         self._reference_changed()
         self.button = QtWidgets.QPushButton("Start")
         self.button.clicked.connect(self.toggle)
+        self.replay_button = QtWidgets.QPushButton("Replay last Take")
+        self.replay_button.clicked.connect(self.toggle_replay)
+        self.history_button = QtWidgets.QPushButton("History")
+        self.history_button.clicked.connect(self.open_history)
+        self.history_window = None
         self.note_label = QtWidgets.QLabel("-")
         self.note_label.setStyleSheet("font-size: 40px; font-weight: bold;")
         self.summary_label = QtWidgets.QLabel("Press Start and sing.")
@@ -90,7 +106,7 @@ class MainWindow(QtWidgets.QWidget):
 
         top = QtWidgets.QHBoxLayout()
         for w in (QtWidgets.QLabel("Input"), self.device_box, QtWidgets.QLabel("Reference"), self.reference_box,
-                  self.key_box, self.drone_box, self.button):
+                  self.key_box, self.drone_box, self.button, self.replay_button, self.history_button):
             top.addWidget(w)
         top.addStretch(1)
         top.addWidget(self.note_label)
@@ -132,7 +148,42 @@ class MainWindow(QtWidgets.QWidget):
         ticks = [(m, f"{NOTE_NAMES[m % 12]}{m // 12 - 1}") for m in range(lo - 1, hi + 2)]
         self._plot.getAxis("left").setTicks([ticks])
 
+    def toggle_replay(self) -> None:
+        """Play the most recent saved Take's pitch line back through the live view."""
+        if self._replay is not None:
+            self._end_replay()
+            return
+        take_id = last_take_id(self._home)
+        if take_id is None:
+            self.summary_label.setText("No saved Take to replay yet.")
+            return
+        self._replay = Replay(replay_scores(load_frames(self._home, take_id), saved_reference(self._home, take_id)))
+        self._replay_started = time.monotonic()
+        self._t.clear(), self._midi.clear(), self._band.clear(), self._out.clear()
+        self.replay_button.setText("Stop replay")
+        self.button.setEnabled(False)
+        self.summary_label.setText(f"Replaying Take {take_id}...")
+        self._timer.start(TICK_MS)
+
+    def _end_replay(self) -> None:
+        self._timer.stop()
+        self._replay = None
+        self.replay_button.setText("Replay last Take")
+        self.button.setEnabled(True)
+
+    def open_history(self) -> None:
+        from .history_view import HistoryView
+
+        if self.history_window is None:
+            self.history_window = HistoryView(self._home)
+        else:
+            self.history_window.reload()
+        self.history_window.show()
+        self.history_window.raise_()
+
     def toggle(self) -> None:
+        if self._replay is not None:
+            return
         if self._runner is None:
             self._start()
         else:
@@ -152,6 +203,7 @@ class MainWindow(QtWidgets.QWidget):
         self.button.setText("Stop")
         for w in (self.device_box, self.reference_box, self.key_box, self.drone_box):
             w.setEnabled(False)
+        self.replay_button.setEnabled(False)
         self.summary_label.setText("Singing...")
         if reference.kind == "key" and self.drone_box.isChecked():
             try:
@@ -174,6 +226,7 @@ class MainWindow(QtWidgets.QWidget):
         self.device_box.setEnabled(True)
         self.reference_box.setEnabled(True)
         self._reference_changed()
+        self.replay_button.setEnabled(True)
         self.summary_label.setText(describe(record))
 
     def ingest(self, scores: list[FrameScore]) -> None:
@@ -199,6 +252,8 @@ class MainWindow(QtWidgets.QWidget):
     def tick(self, drain_only: bool = False) -> None:
         if self._runner is not None:
             self.ingest(self._runner.drain())
+        elif self._replay is not None:
+            self.ingest(self._replay.advance(time.monotonic() - self._replay_started))
         if not self._t:
             return
         t, midi = np.fromiter(self._t, float), np.fromiter(self._midi, float)
@@ -210,3 +265,6 @@ class MainWindow(QtWidgets.QWidget):
                            symbol=["x" if o else "o" for o in out],   # out-of-key notes are drawn as big crosses
                            size=[11 if o else 6 for o in out])
         self._plot.setXRange(t[-1] - WINDOW_S, t[-1], padding=0)
+        if self._replay is not None and self._replay.finished:
+            self._end_replay()
+            self.summary_label.setText("Replay finished.")

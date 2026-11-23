@@ -42,6 +42,14 @@ def score_frame(frame: PitchFrame, voiced: bool, reference: Reference, config: S
     return FrameScore(frame.t, midi, cents, band_for(cents, config), note_name(round(target.midi)), target.in_key)
 
 
+def replay_scores(
+    frames: Sequence[PitchFrame], reference: Reference, config: ScoreConfig = DEFAULT_SCORE_CONFIG
+) -> list[FrameScore]:
+    """A saved Take's line as live-view scores, one per frame, under the full gate (what the summary counted)."""
+    mask = voiced_mask(frames, config)
+    return [score_frame(f, v, reference, config) for f, v in zip(frames, mask)]
+
+
 def score_take(
     frames: Sequence[PitchFrame], reference: Reference, config: ScoreConfig = DEFAULT_SCORE_CONFIG
 ) -> TakeSummary:
