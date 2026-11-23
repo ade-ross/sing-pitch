@@ -5,6 +5,10 @@ import sys
 
 def main(argv: list[str] | None = None) -> int:
     argv = sys.argv[1:] if argv is None else argv
+    if argv[:1] == ["import"]:
+        from .cli import import_main
+
+        return import_main(argv[1:])
     from PySide6 import QtCore, QtWidgets
 
     from .pitch.swiftf0 import SwiftF0Tracker
