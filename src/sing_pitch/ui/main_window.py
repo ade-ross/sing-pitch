@@ -71,6 +71,9 @@ class MainWindow(QtWidgets.QWidget):
         self.button.clicked.connect(self.toggle)
         self.replay_button = QtWidgets.QPushButton("Replay last Take")
         self.replay_button.clicked.connect(self.toggle_replay)
+        self.history_button = QtWidgets.QPushButton("History")
+        self.history_button.clicked.connect(self.open_history)
+        self.history_window = None
         self.note_label = QtWidgets.QLabel("-")
         self.note_label.setStyleSheet("font-size: 40px; font-weight: bold;")
         self.summary_label = QtWidgets.QLabel("Press Start and sing.")
@@ -88,7 +91,7 @@ class MainWindow(QtWidgets.QWidget):
         self._set_y(self._centre)
 
         top = QtWidgets.QHBoxLayout()
-        for w in (QtWidgets.QLabel("Input"), self.device_box, self.button, self.replay_button):
+        for w in (QtWidgets.QLabel("Input"), self.device_box, self.button, self.replay_button, self.history_button):
             top.addWidget(w)
         top.addStretch(1)
         top.addWidget(self.note_label)
@@ -142,6 +145,16 @@ class MainWindow(QtWidgets.QWidget):
         self._replay = None
         self.replay_button.setText("Replay last Take")
         self.button.setEnabled(True)
+
+    def open_history(self) -> None:
+        from .history_view import HistoryView
+
+        if self.history_window is None:
+            self.history_window = HistoryView(self._home)
+        else:
+            self.history_window.reload()
+        self.history_window.show()
+        self.history_window.raise_()
 
     def toggle(self) -> None:
         if self._replay is not None:
