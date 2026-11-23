@@ -26,7 +26,7 @@ class TakeSummary:
     highest_note: str | None
     steadiness_cents: float | None = None    # ticket #2
     octave_shift: int = 0                    # ticket #7
-    out_of_key_count: int = 0                # ticket #4
+    out_of_key_count: int = 0                # Key Takes: out-of-key notes sung (a held note counts once)
 
 
 @dataclass(frozen=True)
@@ -39,6 +39,16 @@ class TakeRecord:
     key: str | None = None
     song_id: str | None = None
     latency_offset_s: float = 0.0
+
+
+def count_out_of_key(scores: Sequence) -> int:
+    """Out-of-key notes: runs of consecutive out-of-key frames. Silence or an in-key frame ends a run."""
+    count, inside = 0, False
+    for s in scores:
+        out = s.midi is not None and s.in_key is False
+        count += out and not inside
+        inside = out
+    return count
 
 
 def summarise(scores: Sequence, frames: Sequence[PitchFrame], config: ScoreConfig) -> TakeSummary:
@@ -62,5 +72,6 @@ def summarise(scores: Sequence, frames: Sequence[PitchFrame], config: ScoreConfi
         tendency=tendency,
         lowest_note=note_name(round(min(midis))),
         highest_note=note_name(round(max(midis))),
+        out_of_key_count=count_out_of_key(scores),
         steadiness_cents=steadiness_cents(scores, config),
     )

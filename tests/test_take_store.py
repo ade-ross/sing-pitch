@@ -83,3 +83,15 @@ def test_rescoring_with_new_bands_changes_the_row_in_the_table(tmp_path):
     assert float(rows[record.id]["pct_in_tune"]) == 100.0
     assert float(rows["20261123-210941"]["pct_in_tune"]) == 100.0
     assert len(rows) == 2 and rows[record.id]["started_at"] == "2026-11-23T21:05:09"
+
+
+def test_a_key_take_rescores_and_replays_against_its_own_key_without_being_told_the_key(tmp_path):
+    from sing_pitch.reference import Key
+    from sing_pitch.take_store import rescore_take, saved_reference
+
+    engine = TakeEngine(Key.parse("C major"), started_at=datetime(2026, 11, 23, 21, 5, 9))
+    engine.push(sung(hz_at(-300), 1.0))                       # F#4: out of key in C major
+    saved = save_take(tmp_path, engine.stop())
+    assert saved_reference(tmp_path, saved.id) == Key.parse("C major")
+    again = rescore_take(tmp_path, saved.id)
+    assert again.summary.out_of_key_count == 1 and again.key == "C major"

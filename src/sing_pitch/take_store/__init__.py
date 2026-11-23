@@ -11,7 +11,7 @@ import numpy as np
 from .. import __version__
 from ..config import DEFAULT_SCORE_CONFIG, ScoreConfig
 from ..pitch import PitchFrame
-from ..reference import NearestNote, Reference
+from ..reference import Key, NearestNote, Reference
 from ..take_engine import TakeRecord, score_take
 
 # The ONE summary table. Columns for later tickets (steadiness, octave shift, key, song) exist from the start
@@ -96,6 +96,19 @@ def last_take_id(home: Path) -> str | None:
     return rows[-1]["id"] if rows else None
 
 
+def _reference_for(row: dict) -> Reference:
+    """Rebuild a saved Take's Reference from its table row. Melody Takes need the song, so are not handled here."""
+    if row["reference"] == "nearest":
+        return NearestNote()
+    if row["reference"] == "key" and row["key"]:
+        return Key.parse(row["key"])
+    raise ValueError(f"re-scoring a {row['reference']} Take needs its Reference")
+
+
+def saved_reference(home: Path, take_id: str) -> Reference:
+    return _reference_for(next(r for r in _rows(home) if r["id"] == take_id))
+
+
 def rescore_take(
     home: Path,
     take_id: str,
@@ -109,9 +122,7 @@ def rescore_take(
     rows = _rows(home)
     row = next(r for r in rows if r["id"] == take_id)
     if reference is None:
-        if row["reference"] != "nearest":
-            raise ValueError(f"re-scoring a {row['reference']} Take needs its Reference")
-        reference = NearestNote()
+        reference = _reference_for(row)
     frames = load_frames(home, take_id)
     record = TakeRecord(
         id=take_id,
