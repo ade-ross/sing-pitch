@@ -73,3 +73,26 @@ def test_runner_makes_a_take_from_start_to_stop_and_saves_it(tracker, tmp_path):
     assert record.summary.tendency == "sharp"
     assert (tmp_path / "takes.csv").exists()
     assert len(load_frames(tmp_path, record.id)) == len(record.frames) > 100
+
+
+def test_key_take_from_synthesised_voice_flags_the_out_of_key_note_and_saves_the_key(tracker, tmp_path):
+    from sing_pitch.reference import Key
+    from sing_pitch.take_store import load_frames, save_take, summary_path
+
+    # C major: E4 15 cents flat (in key, green) then F#4 (out of key)
+    audio = np.concatenate([quiet(0.3), harmonic(hz_at(-515), 1.2), quiet(0.3), harmonic(hz_at(-300), 1.2), quiet(0.3)])
+    take = LiveTake(tracker, Key.parse("C major"), SR)
+    scores = []
+    for i in range(0, len(audio), 512):
+        scores += take.feed(audio[i : i + 512])
+    record = take.finish()
+    in_e = {(s.in_key, s.band) for s in scores if 0.8 <= s.t <= 1.3 and s.band is not None}
+    in_fs = {s.in_key for s in scores if 1.9 <= s.t <= 2.5 and s.band is not None}
+    assert in_e == {(True, Band.GREEN)}
+    assert in_fs == {False}
+    assert record.summary.out_of_key_count == 1
+    save_take(tmp_path, record)
+    import csv
+
+    row = next(csv.DictReader(open(summary_path(tmp_path))))
+    assert (row["reference"], row["key"], row["out_of_key_count"]) == ("key", "C major", "1")

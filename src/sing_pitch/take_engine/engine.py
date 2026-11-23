@@ -21,6 +21,7 @@ class FrameScore:
     cents: float | None
     band: Band | None
     note_name: str | None
+    in_key: bool | None = None      # Key Reference only: False = the sung note is outside the key
 
 
 def band_for(cents: float, config: ScoreConfig) -> Band:
@@ -38,7 +39,7 @@ def score_frame(frame: PitchFrame, voiced: bool, reference: Reference, config: S
     midi = hz_to_midi(frame.hz)
     target = reference.target(frame.t, midi)
     cents = 100.0 * (midi - target.midi)
-    return FrameScore(frame.t, midi, cents, band_for(cents, config), note_name(round(target.midi)))
+    return FrameScore(frame.t, midi, cents, band_for(cents, config), note_name(round(target.midi)), target.in_key)
 
 
 def score_take(
@@ -78,4 +79,5 @@ class TakeEngine:
             reference_kind=self._reference.kind,
             frames=tuple(self._frames),
             summary=score_take(self._frames, self._reference, self._config),
+            key=getattr(self._reference, "name", None) if self._reference.kind == "key" else None,
         )
