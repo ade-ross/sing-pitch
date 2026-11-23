@@ -5,7 +5,8 @@ from frames import hz_at, silence, sung
 
 from sing_pitch.reference import NearestNote
 from sing_pitch.take_engine import TakeEngine, score_take
-from sing_pitch.take_store import load_frames, save_take, summary_path
+from sing_pitch.config import ScoreConfig
+from sing_pitch.take_store import load_frames, rescore_take, save_take, summary_path
 
 
 def make_take(started_at, cents=30):
@@ -53,3 +54,32 @@ def test_two_takes_in_the_same_second_never_overwrite_each_other(tmp_path):
     b = save_take(tmp_path, make_take(t, cents=10))
     assert a.id != b.id
     assert len(list((tmp_path / "takes").iterdir())) == 2
+
+
+def test_the_summary_row_carries_steadiness_tendency_and_range(tmp_path):
+    from steadiness_helpers import vibrato
+
+    engine = TakeEngine(NearestNote(), started_at=datetime(2026, 11, 23, 21, 5, 9))
+    engine.push(vibrato(25, 6.0, 2.0, centre=20))
+    save_take(tmp_path, engine.stop())
+    row = next(csv.DictReader(open(summary_path(tmp_path))))
+    assert abs(float(row["steadiness_cents"]) - 17.7) < 2.0
+    assert row["tendency"] == "sharp"
+    assert row["lowest_note"] == row["highest_note"] == "A4"
+
+
+def test_rescoring_a_saved_take_gives_the_numbers_it_was_scored_with(tmp_path):
+    record = save_take(tmp_path, make_take(datetime(2026, 11, 23, 21, 5, 9)))
+    assert rescore_take(tmp_path, record.id).summary == record.summary
+
+
+def test_rescoring_with_new_bands_changes_the_row_in_the_table(tmp_path):
+    record = save_take(tmp_path, make_take(datetime(2026, 11, 23, 21, 5, 9), cents=30))   # +30: yellow
+    save_take(tmp_path, make_take(datetime(2026, 11, 23, 21, 9, 41), cents=10))
+    wider = ScoreConfig(green_cents=35.0)
+    updated = rescore_take(tmp_path, record.id, wider, write=True)
+    assert updated.summary.pct_in_tune == 100.0
+    rows = {r["id"]: r for r in csv.DictReader(open(summary_path(tmp_path)))}
+    assert float(rows[record.id]["pct_in_tune"]) == 100.0
+    assert float(rows["20261123-210941"]["pct_in_tune"]) == 100.0
+    assert len(rows) == 2 and rows[record.id]["started_at"] == "2026-11-23T21:05:09"
