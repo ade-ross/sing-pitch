@@ -56,3 +56,20 @@ def test_tracker_lag_stays_inside_the_display_budget(tracker):
         if got and got[-1].t > 0.6:
             lags.append((i + 512) / SR - got[-1].t)
     assert lags and max(lags) < 0.25
+
+
+def test_runner_makes_a_take_from_start_to_stop_and_saves_it(tracker, tmp_path):
+    from sing_pitch.audio_input import ArrayInput
+    from sing_pitch.live import LiveRunner
+    from sing_pitch.take_store import load_frames
+
+    audio = np.concatenate([quiet(0.4), harmonic(hz_at(30), 2.0), quiet(0.4)])
+    runner = LiveRunner(ArrayInput(audio, SR, chunk=256), tracker, NearestNote(), home=tmp_path)
+    runner.start()                      # ArrayInput delivers everything at once
+    record = runner.stop()
+
+    live = runner.drain()               # the scores the UI would have drawn
+    assert {s.band for s in live if s.band} == {Band.YELLOW}
+    assert record.summary.tendency == "sharp"
+    assert (tmp_path / "takes.csv").exists()
+    assert len(load_frames(tmp_path, record.id)) == len(record.frames) > 100
