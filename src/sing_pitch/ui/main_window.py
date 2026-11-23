@@ -58,6 +58,9 @@ class MainWindow(QtWidgets.QWidget):
         self._fill_devices()
         self.button = QtWidgets.QPushButton("Start")
         self.button.clicked.connect(self.toggle)
+        self.history_button = QtWidgets.QPushButton("History")
+        self.history_button.clicked.connect(self.open_history)
+        self.history_window = None
         self.note_label = QtWidgets.QLabel("-")
         self.note_label.setStyleSheet("font-size: 40px; font-weight: bold;")
         self.summary_label = QtWidgets.QLabel("Press Start and sing.")
@@ -75,7 +78,7 @@ class MainWindow(QtWidgets.QWidget):
         self._set_y(self._centre)
 
         top = QtWidgets.QHBoxLayout()
-        for w in (QtWidgets.QLabel("Input"), self.device_box, self.button):
+        for w in (QtWidgets.QLabel("Input"), self.device_box, self.button, self.history_button):
             top.addWidget(w)
         top.addStretch(1)
         top.addWidget(self.note_label)
@@ -106,6 +109,16 @@ class MainWindow(QtWidgets.QWidget):
         self._plot.setYRange(lo, hi, padding=0)
         ticks = [(m, f"{NOTE_NAMES[m % 12]}{m // 12 - 1}") for m in range(lo - 1, hi + 2)]
         self._plot.getAxis("left").setTicks([ticks])
+
+    def open_history(self) -> None:
+        from .history_view import HistoryView
+
+        if self.history_window is None:
+            self.history_window = HistoryView(self._home)
+        else:
+            self.history_window.reload()
+        self.history_window.show()
+        self.history_window.raise_()
 
     def toggle(self) -> None:
         if self._runner is None:
