@@ -64,20 +64,21 @@ class RmvpeExtractor:
                              confidence=np.asarray(confidence, np.float32))
 
 
+def _yt_dlp():
+    try:
+        import yt_dlp
+    except ImportError as e:
+        raise SongImportError("the import extra is missing: run `uv sync --extra import`") from e
+    return yt_dlp
+
+
 class YtDlpDownloader:
     _OPTS = {"noplaylist": True, "quiet": True, "no_warnings": True, "noprogress": True}
 
-    def _ydl(self, **extra):
-        try:
-            import yt_dlp
-        except ImportError as e:
-            raise SongImportError("the import extra is missing: run `uv sync --extra import`") from e
-        return yt_dlp.YoutubeDL({**self._OPTS, **extra})
-
     def probe(self, url: str) -> SourceInfo:
-        import yt_dlp
+        yt_dlp = _yt_dlp()
         try:
-            with self._ydl() as ydl:
+            with yt_dlp.YoutubeDL({**self._OPTS}) as ydl:
                 info = ydl.extract_info(url, download=False)
         except yt_dlp.utils.DownloadError as e:
             raise SongImportError(f"could not read that link: {e}") from e
@@ -85,12 +86,12 @@ class YtDlpDownloader:
                           is_playlist=info.get("_type") == "playlist")
 
     def download(self, url: str, dest_dir: Path) -> Path:
-        import yt_dlp
+        yt_dlp = _yt_dlp()
         require_ffmpeg()
         opts = dict(format="bestaudio/best", outtmpl=f"{dest_dir}/%(id)s.%(ext)s",
                     postprocessors=[{"key": "FFmpegExtractAudio", "preferredcodec": "wav"}])
         try:
-            with self._ydl(**opts) as ydl:
+            with yt_dlp.YoutubeDL({**self._OPTS, **opts}) as ydl:
                 info = ydl.extract_info(url, download=True)
         except yt_dlp.utils.DownloadError as e:
             raise SongImportError(f"download failed: {e}") from e

@@ -49,8 +49,11 @@ class Importer:
         if not path.is_file():
             raise SongImportError(f"not a file: {path}")
         key = file_key(path)
-        return self._existing(key, force) or self._build(
-            title=path.stem, source=path, fields=dict(source_kind="file", source_key=key))
+        existing = self.library.find_by_source(key)
+        if existing and not force:
+            return existing
+        return self._build(title=path.stem, source=path, fields=dict(source_kind="file", source_key=key),
+                           replacing=existing)
 
     def import_url(self, url: str, *, force: bool = False, max_duration_s: float = MAX_DURATION_S) -> Song:
         if self.downloader is None:
@@ -64,14 +67,14 @@ class Importer:
         if info.duration_s and info.duration_s > max_duration_s:
             raise SongImportError(f"that video is too long for a song ({info.duration_s / 60:.0f} min)")
         key = f"youtube:{info.id}"
-        existing = self._existing(key, force)
-        if existing:
+        existing = self.library.find_by_source(key)
+        if existing and not force:
             return existing
         with tempfile.TemporaryDirectory(prefix="sing-pitch-dl-") as tmp:
             self.progress(f"downloading {info.title} ...")
             audio = self.downloader.download(url, Path(tmp))
             return self._build(title=info.title, source=audio, fields=dict(
-                source_kind="youtube", source_key=key, source_url=url, duration_s=info.duration_s))
+                source_kind="youtube", source_key=key, source_url=url, duration_s=info.duration_s), replacing=existing)
 
     def import_stems(self, folder: Path, *, force: bool = False) -> Song:
         folder = Path(folder)
@@ -80,8 +83,8 @@ class Importer:
         except logic_stems.StemsError as e:
             raise SongImportError(str(e)) from e
         key = logic_stems.stems_key([lead, *others])
-        existing = self._existing(key, force)
-        if existing:
+        existing = self.library.find_by_source(key)
+        if existing and not force:
             return existing
         staging = self.library.new_staging()
         try:
@@ -91,19 +94,13 @@ class Importer:
             return self.library.commit(staging, dict(
                 source_kind="logic-stems", source_key=key, stems_from="logic", separator_model=None,
                 extractor_model=self.extractor.model_name,
-                imported_at=datetime.now().isoformat(timespec="seconds")), folder.name)
+                imported_at=datetime.now().isoformat(timespec="seconds")), folder.name,
+                replacing=existing.id if existing else None)
         except BaseException:
             self.library.discard(staging)
             raise
 
-    def _existing(self, key: str, force: bool) -> Song | None:
-        song = self.library.find_by_source(key)
-        if song and force:
-            self.library.remove(song.id)
-            return None
-        return song
-
-    def _build(self, *, title: str, source: Path, fields: dict) -> Song:
+    def _build(self, *, title: str, source: Path, fields: dict, replacing: Song | None = None) -> Song:
         staging = self.library.new_staging()
         try:
             kept = staging / f"source{source.suffix.lower()}"
@@ -116,7 +113,7 @@ class Importer:
             return self.library.commit(staging, dict(
                 imported_at=datetime.now().isoformat(timespec="seconds"), stems_from="separated",
                 separator_model=self.separator.model_name, extractor_model=self.extractor.model_name,
-                source_file=kept.name, **fields), title)
+                source_file=kept.name, **fields), title, replacing=replacing.id if replacing else None)
         except BaseException:
             self.library.discard(staging)
             raise

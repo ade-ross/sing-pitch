@@ -30,18 +30,38 @@ def scored_mask(
     """Which reference frames are scored; the rest are Unscored stretches. Confidence >= min_confidence, then
     smoothed so the mask does not flicker: low-confidence gaps shorter than fill_gap_s between two reliable
     frames count as reliable, then reliable runs shorter than min_scored_s count as unreliable."""
-    mask = np.asarray(line.confidence) >= min_confidence
+    mask = _reliable(line, min_confidence)
     if len(mask) < 2:
         return mask
     hop = float(np.median(np.diff(np.asarray(line.t, dtype=np.float64))))
-    runs = _runs(mask)
-    for start, end, value in runs:
-        if not value and start > 0 and end < len(mask) and (end - start) * hop < fill_gap_s:
+    # compare whole frames: the float32 hop (0.0099999998) would put a 12-frame run just under 0.12 s
+    fill_frames, min_frames = round(fill_gap_s / hop), round(min_scored_s / hop)
+    for start, end, value in _runs(mask):
+        if not value and start > 0 and end < len(mask) and end - start < fill_frames:
             mask[start:end] = True
     for start, end, value in _runs(mask):
-        if value and (end - start) * hop < min_scored_s:
+        if value and end - start < min_frames:
             mask[start:end] = False
     return mask
+
+
+def _reliable(line: ReferenceLine, min_confidence: float) -> np.ndarray:
+    """Frames whose own Hz can be trusted: confident, and a real positive frequency."""
+    hz = np.asarray(line.hz, dtype=np.float64)
+    with np.errstate(invalid="ignore"):
+        return (np.asarray(line.confidence) >= min_confidence) & np.isfinite(hz) & (hz > 0)
+
+
+def _midi_line(line: ReferenceLine, min_confidence: float = MIN_CONFIDENCE) -> np.ndarray:
+    """MIDI per frame from the reliable frames only. RMVPE's Hz at low confidence is arbitrary (99 to 1316 Hz on
+    silence plus noise; 04-rmvpe notes), so frames the smoothing filled are interpolated between their reliable
+    neighbours and held at the edges, never read from their own Hz. NaN when no frame is reliable."""
+    ok = _reliable(line, min_confidence)
+    if not ok.any():
+        return np.full(len(ok), np.nan)
+    hz = np.asarray(line.hz, dtype=np.float64)
+    midi = A4_MIDI + 12.0 * np.log2(hz[ok] / A4_HZ)
+    return np.interp(np.arange(len(ok)), np.flatnonzero(ok), midi)
 
 
 class Melody:
@@ -54,7 +74,7 @@ class Melody:
         self.line = line
         self.song_id = song_id
         self._t = np.asarray(line.t, dtype=np.float64)
-        self._midi = A4_MIDI + 12.0 * np.log2(np.maximum(np.asarray(line.hz, dtype=np.float64), 1e-6) / A4_HZ)
+        self._midi = _midi_line(line)
         self.scored = scored_mask(line) if scored is None else np.asarray(scored, dtype=bool)
         hop = float(np.median(np.diff(self._t))) if len(self._t) > 1 else 0.01
         self._tolerance = 1.5 * hop
@@ -81,6 +101,6 @@ class Melody:
         j = int(np.searchsorted(self._t, t))
         if j == len(self._t) or (j > 0 and t - self._t[j - 1] < self._t[j] - t):
             j -= 1
-        if abs(self._t[j] - t) > self._tolerance or not self.scored[j]:
+        if abs(self._t[j] - t) > self._tolerance or not self.scored[j] or not np.isfinite(self._midi[j]):
             return Target(None)
         return Target(float(self._midi[j]))

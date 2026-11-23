@@ -6,6 +6,8 @@ import json
 from dataclasses import dataclass, field
 from pathlib import Path
 
+DEFAULT_OUTPUT = "default output"     # the key of an output whose name cannot be read
+
 DEFAULT_LATENCY_S = 0.08     # uncalibrated guess: ~40 ms input + ~40 ms output (02-audio-io); calibrate once
 
 
@@ -32,17 +34,19 @@ class Settings:
         (self.home / "settings.json").write_text(json.dumps(data, indent=2) + "\n")
 
     def is_calibrated(self, output: str | None) -> bool:
-        return output in self.latency_s
+        return (output or DEFAULT_OUTPUT) in self.latency_s
 
     def latency_for(self, output: str | None) -> float:
         """Calibrated latency of this output; else the most recent calibration; else the default guess."""
+        output = output or DEFAULT_OUTPUT
         if output in self.latency_s:
             return self.latency_s[output]
         if self.last_calibrated in self.latency_s:
             return self.latency_s[self.last_calibrated]
         return DEFAULT_LATENCY_S
 
-    def set_latency(self, output: str, latency_s: float) -> None:
+    def set_latency(self, output: str | None, latency_s: float) -> None:
+        output = output or DEFAULT_OUTPUT
         self.latency_s[output] = round(float(latency_s), 4)
         self.last_calibrated = output
 

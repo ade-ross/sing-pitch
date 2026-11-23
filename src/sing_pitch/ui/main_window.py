@@ -21,7 +21,7 @@ from ..playback import BackingPlayer, DronePlayer
 from ..playback.outputs import OutputKind, default_output_name, headphone_warning, output_kind
 from ..reference import Band, Key, Melody, NearestNote, Reference
 from ..replay import Replay
-from ..settings import Settings
+from ..settings import DEFAULT_OUTPUT, Settings
 from ..take_engine import FrameScore, TakeRecord, replay_scores
 from ..take_store import last_take_id, load_frames, saved_latency, saved_reference
 
@@ -236,12 +236,13 @@ class MainWindow(QtWidgets.QWidget):
             self.summary_label.setText("No saved Take to replay yet.")
             return
         try:
-            reference = saved_reference(self._home, take_id)
-        except ValueError as exc:           # e.g. a Melody Take whose song was removed from the library
+            reference = saved_reference(self._home, take_id)       # a Melody Take whose song was removed raises here
+            latency = saved_latency(self._home, take_id)
+            replay = Replay(replay_scores(load_frames(self._home, take_id), reference, latency_s=latency))
+        except Exception as exc:
             self.summary_label.setText(f"Cannot replay Take {take_id}: {exc}")
             return
-        latency = saved_latency(self._home, take_id)
-        self._replay = Replay(replay_scores(load_frames(self._home, take_id), reference, latency_s=latency))
+        self._replay = replay
         self._replay_started = time.monotonic()
         self._show_melody(reference, latency)
         self._t.clear(), self._midi.clear(), self._band.clear(), self._out.clear()
@@ -329,9 +330,13 @@ class MainWindow(QtWidgets.QWidget):
         if self._drone is not None:
             self._drone.stop()
             self._drone = None
-        record = self._runner.stop()
+        try:
+            record, error = self._runner.stop(), None
+            self._backing = None
+            self.tick(drain_only=True)
+        except Exception as exc:        # the worker thread crashed: the Take is lost, say why
+            record, error = None, exc
         self._backing = None
-        self.tick(drain_only=True)
         self._runner = None
         self.button.setText("Start")
         self.device_box.setEnabled(True)
@@ -339,7 +344,7 @@ class MainWindow(QtWidgets.QWidget):
         self.calibrate_button.setEnabled(True)
         self._reference_changed()
         self.replay_button.setEnabled(True)
-        self.summary_label.setText(describe(record))
+        self.summary_label.setText(describe(record) if record else f"The Take failed: {error}")
 
     def ingest(self, scores: list[FrameScore]) -> None:
         for s in scores:
@@ -390,10 +395,10 @@ class MainWindow(QtWidgets.QWidget):
         if result.latency_s is None:
             self.summary_label.setText(f"Calibration failed: heard {result.matched} of 8 answers. Try again, louder.")
             return
-        self._settings.set_latency(output or "default output", result.latency_s)
+        self._settings.set_latency(output, result.latency_s)
         self._settings.save()
         self.summary_label.setText(
-            f"Latency for {output or 'default output'}: {1000 * result.latency_s:.0f} ms "
+            f"Latency for {output or DEFAULT_OUTPUT}: {1000 * result.latency_s:.0f} ms "
             f"({result.matched}/8 answers, spread {1000 * result.spread_s:.0f} ms). Saved as the default.")
 
     def _draw_melody(self, t_end: float) -> None:
@@ -414,7 +419,11 @@ class MainWindow(QtWidgets.QWidget):
 
     def tick(self, drain_only: bool = False) -> None:
         if self._runner is not None:
-            self.ingest(self._runner.drain())
+            try:
+                self.ingest(self._runner.drain())
+            except Exception:           # the worker thread died: stop() ends the Take and reports why
+                self._stop()
+                return
             b = self._backing
             if b is not None and not drain_only and getattr(b, "finished", False) \
                     and b.position_s() > b.duration_s + END_GRACE_S:

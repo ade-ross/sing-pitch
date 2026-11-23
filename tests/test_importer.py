@@ -103,6 +103,11 @@ def test_playlists_and_very_long_videos_are_refused_before_downloading(tmp_path,
     assert dl.downloads == []
 
 
+def both(mono):
+    """A mono stem as the stereo Backing holds it: the same signal in both channels."""
+    return np.stack([mono, mono], axis=1)
+
+
 def logic_folder(tmp_path, names=("Vocals", "Drums", "Bass"), sr_by_name=None):
     d = tmp_path / "Hello Stems"
     d.mkdir()
@@ -124,7 +129,7 @@ def test_a_folder_of_logic_stems_is_imported_without_separating(tmp_path, parts)
     backing, sr = sf.read(str(song.backing_path), dtype="float32")
     drums, _ = sf.read(str(folder / "Drums.wav"), dtype="float32")
     bass, _ = sf.read(str(folder / "Bass.wav"), dtype="float32")
-    np.testing.assert_allclose(backing, drums + bass, atol=2e-4)       # Backing = everything that is not the vocal
+    np.testing.assert_allclose(backing, both(drums + bass), atol=2e-4)       # Backing = everything that is not the vocal
     np.testing.assert_allclose(vocals, sf.read(str(folder / "Vocals.wav"), dtype="float32")[0], atol=2e-4)
 
 
@@ -140,7 +145,7 @@ def test_logic_stems_prefer_a_ready_made_backing_file(tmp_path, parts):
     song = make_importer(tmp_path / "home", parts).import_stems(folder)
     backing, _ = sf.read(str(song.backing_path), dtype="float32")
     ready, _ = sf.read(str(folder / "Backing.wav"), dtype="float32")
-    np.testing.assert_allclose(backing, ready, atol=2e-4)
+    np.testing.assert_allclose(backing, both(ready), atol=2e-4)
 
 
 def test_logic_stems_without_a_vocal_file_say_so(tmp_path, parts):
@@ -157,7 +162,7 @@ def test_backing_vocals_in_logic_stems_stay_in_the_backing_not_the_lead(tmp_path
     np.testing.assert_allclose(vocals, lead, atol=2e-4)
     backing, _ = sf.read(str(song.backing_path), dtype="float32")
     expected = sum(sf.read(str(folder / f"{n}.wav"), dtype="float32")[0] for n in ("Backing Vocals", "Drums"))
-    np.testing.assert_allclose(backing, expected, atol=2e-4)       # the drums are in the Backing too
+    np.testing.assert_allclose(backing, both(expected), atol=2e-4)       # the drums are in the Backing too
 
 
 def test_importing_a_known_youtube_link_again_works_offline(tmp_path, parts):
@@ -167,3 +172,83 @@ def test_importing_a_known_youtube_link_again_works_offline(tmp_path, parts):
     dl.probe = lambda url: (_ for _ in ()).throw(RuntimeError("offline"))
     assert imp.import_url("https://youtu.be/abc12345678?t=5").id == first.id
     assert imp.import_url("https://www.youtube.com/shorts/abc12345678").id == first.id
+
+
+def test_a_failed_force_reimport_keeps_the_stored_song_untouched(tmp_path, parts):
+    sep, _, dl = parts
+    home = tmp_path / "home"
+    audio = song_file(tmp_path / "a.wav")
+    first = make_importer(home, parts).import_file(audio)
+    before = first.vocals_path.read_bytes()
+
+    class Boom(FakeExtractor):
+        def extract(self, vocals):
+            raise RuntimeError("model crashed")
+
+    with pytest.raises(RuntimeError):
+        Importer(Library(home), sep, Boom(), dl).import_file(audio, force=True)
+    kept = Library(home).get(first.id)
+    assert kept.vocals_path.read_bytes() == before and kept.load_reference().hz.size > 0
+    assert [p.name for p in (home / "songs").iterdir()] == [first.id]        # no staging folder left behind
+
+
+def test_a_successful_force_reimport_replaces_the_song_under_the_same_id(tmp_path, parts):
+    sep, _, _ = parts
+    home = tmp_path / "home"
+    imp = make_importer(home, parts)
+    audio = song_file(tmp_path / "a.wav")
+    first = imp.import_file(audio)
+    renamed = audio.rename(tmp_path / "different name.wav")                  # same bytes, other title
+    again = imp.import_file(renamed, force=True)
+    assert again.id == first.id and len(sep.calls) == 2
+    assert [s.id for s in Library(home).list_songs()] == [first.id]
+    assert [p.name for p in (home / "songs").iterdir()] == [first.id]
+    assert Library(home).get(first.id).meta.title == "different name"
+
+
+def test_a_failed_force_reimport_of_stems_and_links_keeps_the_stored_song(tmp_path, parts):
+    sep, _, dl = parts
+    home = tmp_path / "home"
+
+    class Boom(FakeExtractor):
+        def extract(self, vocals):
+            raise RuntimeError("model crashed")
+
+    folder = logic_folder(tmp_path)
+    good = make_importer(home, parts)
+    stems_song, url_song = good.import_stems(folder), good.import_url(URL)
+    bad = Importer(Library(home), sep, Boom(), dl)
+    for call in (lambda: bad.import_stems(folder, force=True), lambda: bad.import_url(URL, force=True)):
+        with pytest.raises(RuntimeError):
+            call()
+    assert {s.id for s in Library(home).list_songs()} == {stems_song.id, url_song.id}
+    assert all(s.vocals_path.exists() for s in Library(home).list_songs())
+
+
+def test_a_no_vocals_backing_stem_is_the_backing_and_not_a_second_lead_vocal(tmp_path, parts):
+    for name in ("Song no vocals", "Song (No Vocals)", "Song_no_vocals", "Song without vocals"):
+        folder = tmp_path / name.replace(" ", "-")
+        folder.mkdir()
+        for stem, hz in (("Lead Vocals", 220.0), (name, 150.0), ("Drums", 300.0)):
+            write_wav(folder / f"{stem}.wav", harmonic(hz, 1.0, amp=0.2, sr=44100), 44100)
+        song = make_importer(tmp_path / f"home-{folder.name}", parts).import_stems(folder)
+        backing, _ = sf.read(str(song.backing_path), dtype="float32")
+        ready, _ = sf.read(str(folder / f"{name}.wav"), dtype="float32")
+        np.testing.assert_allclose(backing, both(ready), atol=2e-4)          # not summed with the drums
+
+
+def test_the_backing_is_stereo_even_when_the_lead_vocal_is_mono_and_keeps_both_channels(tmp_path, parts):
+    folder = tmp_path / "Mixed Stems"
+    folder.mkdir()
+    n = 44100
+    left, right = harmonic(200.0, 1.0, amp=0.2, sr=44100), harmonic(300.0, 1.0, amp=0.2, sr=44100)
+    write_wav(folder / "Vocals.wav", harmonic(220.0, 1.0, sr=44100), 44100)                 # mono lead
+    write_wav(folder / "Drums.wav", np.stack([left, right], axis=1), 44100)                # stereo
+    bass = harmonic(100.0, 1.0, amp=0.1, sr=44100)
+    write_wav(folder / "Bass.wav", bass, 44100)                                             # mono
+    song = make_importer(tmp_path / "home", parts).import_stems(folder)
+    backing, _ = sf.read(str(song.backing_path), dtype="float32", always_2d=True)
+    assert backing.shape == (n, 2)
+    np.testing.assert_allclose(backing[:, 0], left + bass, atol=2e-4)
+    np.testing.assert_allclose(backing[:, 1], right + bass, atol=2e-4)
+    assert sf.info(str(song.vocals_path)).channels == 1

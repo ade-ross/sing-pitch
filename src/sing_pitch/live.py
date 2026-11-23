@@ -70,37 +70,58 @@ class LiveRunner:
         self._scores: queue.SimpleQueue = queue.SimpleQueue()
         self._take: LiveTake | None = None
         self._thread: threading.Thread | None = None
+        self._error: Exception | None = None      # what killed the worker, if anything
 
     def start(self) -> None:
+        """Open the Backing and the input, then start the worker: a Start that fails leaves no thread behind."""
+        self._error = None
         self._take = LiveTake(self._tracker, self._reference, self._source.sample_rate, self._latency_s)
-        self._thread = threading.Thread(target=self._work, name="sing-pitch-tracker", daemon=True)
-        self._thread.start()
         if self._backing is None:
-            self._source.start(self._chunks.put)
-            return
-        self._backing.start()
-        first = True
+            on_chunk = self._chunks.put
+        else:
+            try:
+                self._backing.start()
+            except Exception:
+                self._quietly(self._backing.stop)
+                raise
+            first = True
 
-        def on_chunk(chunk: np.ndarray) -> None:      # PortAudio thread: one read, one assignment
-            nonlocal first
-            if first:
-                first = False
-                song_at_zero = self._backing.position_s() - len(chunk) / self._source.sample_rate
-                self._chunks.put(("align", self._latency_s - song_at_zero))
-            self._chunks.put(chunk)
+            def on_chunk(chunk: np.ndarray) -> None:      # PortAudio thread: one read, one assignment
+                nonlocal first
+                if first:
+                    first = False
+                    song_at_zero = self._backing.position_s() - len(chunk) / self._source.sample_rate
+                    self._chunks.put(("align", self._latency_s - song_at_zero))
+                self._chunks.put(chunk)
 
         try:
             self._source.start(on_chunk)
         except Exception:
-            self._backing.stop()
+            self._quietly(self._source.stop)
+            if self._backing is not None:
+                self._quietly(self._backing.stop)
             raise
+        self._thread = threading.Thread(target=self._work, name="sing-pitch-tracker", daemon=True)
+        self._thread.start()          # chunks that arrived meanwhile wait in the queue
+
+    @staticmethod
+    def _quietly(cleanup) -> None:
+        try:
+            cleanup()
+        except Exception:
+            pass
 
     def _work(self) -> None:
         while (chunk := self._chunks.get()) is not None:
-            if isinstance(chunk, tuple):            # ("align", latency): set before the first frame is scored
-                self._take.latency_s = chunk[1]
+            if self._error is not None:       # crashed earlier: keep emptying the queue until stop() ends us
                 continue
-            self._scores.put(self._take.feed(chunk))
+            try:
+                if isinstance(chunk, tuple):            # ("align", latency): set before the first frame is scored
+                    self._take.latency_s = chunk[1]
+                else:
+                    self._scores.put(self._take.feed(chunk))
+            except Exception as exc:
+                self._error = exc
 
     @property
     def latency_s(self) -> float | None:
@@ -113,7 +134,10 @@ class LiveRunner:
             try:
                 out += self._scores.get_nowait()
             except queue.Empty:
-                return out
+                break
+        if not out and self._error is not None:       # the scores made before the crash are shown first
+            raise self._error
+        return out
 
     def stop(self) -> TakeRecord:
         self._source.stop()
@@ -121,4 +145,6 @@ class LiveRunner:
             self._backing.stop()
         self._chunks.put(None)
         self._thread.join()
+        if self._error is not None:
+            raise self._error
         return save_take(self._home, self._take.finish())

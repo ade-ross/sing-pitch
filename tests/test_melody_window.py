@@ -167,3 +167,34 @@ def test_the_summary_of_a_melody_take_shows_its_octave_shift(qtbot, tmp_path):
     win.toggle()
     assert song.id in win.summary_label.text() and "octave shift -1" in win.summary_label.text()
     assert next(csv.DictReader(open(tmp_path / "takes.csv")))["octave_shift"] == "-1"
+
+
+def test_calibrating_an_output_with_no_name_is_remembered_for_the_next_melody_take(qtbot, tmp_path):
+    from test_calibration import performance
+
+    from sing_pitch.calibration import click_track
+
+    class Player:
+        def __init__(self, audio, rate):
+            pass
+
+        def start(self):
+            pass
+
+        def position_s(self):
+            return 256 / SR
+
+        def stop(self):
+            pass
+
+    _, times = click_track(SR)
+    library_song(tmp_path, reference_line(NOTES))
+    win = window(qtbot, tmp_path, performance(times, 0.27, times[-1] + 1.5), output=(None, "unknown"),
+                 calibration_player_factory=Player)
+    win.start_calibration()
+    win.finish_calibration()
+    assert "Saved as the default" in win.summary_label.text()
+    win.reference_box.setCurrentText("Melody")
+    win.toggle()
+    assert "not calibrated" not in win.summary_label.text()
+    assert abs(win._runner.latency_s - 0.27) < 0.05 if win._runner else True
