@@ -50,3 +50,11 @@ def library_song(home: Path, line: ReferenceLine, title: str = "Do Re Mi", secon
     save_reference(staging / REFERENCE, line)
     return lib.commit(staging, dict(source_kind="file", source_key=f"sha256:{title}", imported_at="2026-11-23T20:00:00",
                                     stems_from="separated", separator_model="fake", extractor_model="fake"), title)
+
+
+def with_confidence(line: ReferenceLine, start_s: float, end_s: float, value: float) -> ReferenceLine:
+    """The same line with the extractor's confidence set to value between start_s and end_s: an injected
+    unreliable stretch (hz stays plausible, as RMVPE always gives one)."""
+    conf = np.array(line.confidence, copy=True)
+    conf[(line.t >= start_s) & (line.t < end_s)] = value
+    return ReferenceLine(line.t, line.hz, conf)

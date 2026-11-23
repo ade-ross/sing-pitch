@@ -135,3 +135,35 @@ def test_calibration_in_the_window_saves_the_latency_for_the_output_device(qtbot
     assert "Saved as the default" in win.summary_label.text()
     assert abs(Settings.load(tmp_path).latency_for("WF-1000XM5") - 0.27) < 0.008
     assert win.button.isEnabled()
+
+
+def test_unscored_stretches_of_the_reference_are_greyed_on_the_live_plot_and_the_replay(qtbot, tmp_path):
+    from melody_helpers import with_confidence
+
+    line = with_confidence(reference_line(NOTES), 0.6, 1.2, 0.05)
+    library_song(tmp_path, line)
+    audio = np.concatenate([quiet(0.2)] + [harmonic(hz_at(c), d) for c, d in NOTES] + [quiet(0.4)])
+    win = window(qtbot, tmp_path, audio)
+    win.reference_box.setCurrentText("Melody")
+    win.toggle()
+    qtbot.waitUntil(lambda: len(win._t) > 20, timeout=3000)
+    win.tick()
+    x0, latency = win._unscored.opts["x0"], win._runner.latency_s
+    assert len(x0) == 1 and abs(x0[0] - (0.6 + latency)) < 0.02
+    win.toggle()
+    win.toggle_replay()
+    qtbot.waitUntil(lambda: len(win._t) > 20, timeout=3000)
+    win.tick()
+    assert len(win._unscored.opts["x0"]) == 1
+
+
+def test_the_summary_of_a_melody_take_shows_its_octave_shift(qtbot, tmp_path):
+    song = library_song(tmp_path, reference_line(NOTES))
+    audio = np.concatenate([quiet(0.2)] + [harmonic(hz_at(c - 1200), d) for c, d in NOTES] + [quiet(0.4)])
+    win = window(qtbot, tmp_path, audio)
+    win.reference_box.setCurrentText("Melody")
+    win.toggle()
+    qtbot.waitUntil(lambda: len(win._t) > 80, timeout=3000)
+    win.toggle()
+    assert song.id in win.summary_label.text() and "octave shift -1" in win.summary_label.text()
+    assert next(csv.DictReader(open(tmp_path / "takes.csv")))["octave_shift"] == "-1"

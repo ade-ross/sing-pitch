@@ -62,7 +62,7 @@ def summarise(scores: Sequence, frames: Sequence[PitchFrame], config: ScoreConfi
         tendency = "centred"
     else:
         tendency = "sharp" if signed > 0 else "flat"
-    midis = [s.midi for s in voiced]
+    midis = [s.midi for s in scored]          # the range is what was judged: unscored stretches are left out
     return TakeSummary(
         n_voiced=len(voiced),
         n_scored=len(scored),
