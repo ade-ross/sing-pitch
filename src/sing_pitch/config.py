@@ -20,6 +20,10 @@ class ScoreConfig:
     gate_min_loudness_db: float = -50.0
     min_voiced_run_frames: int = 3  # voiced runs shorter than this (48 ms) are breaths/clicks: not scored
     tendency_deadband_cents: float = 5.0
+    # Steadiness: only held notes, with attack and release left out (Dai & Dixon 2019)
+    steadiness_min_note_s: float = 0.5
+    steadiness_trim_s: float = 0.12
+    steadiness_trim_fraction: float = 0.15   # the larger of trim_s and this share of the note is cut each end
 
 
 DEFAULT_SCORE_CONFIG = ScoreConfig()
