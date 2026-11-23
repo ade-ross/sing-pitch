@@ -11,7 +11,7 @@ import numpy as np
 from .. import __version__
 from ..config import DEFAULT_SCORE_CONFIG, ScoreConfig
 from ..pitch import PitchFrame
-from ..reference import Key, NearestNote, Reference
+from ..reference import Key, Melody, NearestNote, Reference
 from ..take_engine import TakeRecord, score_take
 
 # The ONE summary table. Columns for later tickets (steadiness, octave shift, key, song) exist from the start
@@ -96,17 +96,31 @@ def last_take_id(home: Path) -> str | None:
     return rows[-1]["id"] if rows else None
 
 
-def _reference_for(row: dict) -> Reference:
-    """Rebuild a saved Take's Reference from its table row. Melody Takes need the song, so are not handled here."""
+def _reference_for(row: dict, home: Path) -> Reference:
+    """Rebuild a saved Take's Reference from its table row (Melody: the song is read from the library).
+    Raises ValueError when it cannot be rebuilt (e.g. the song was removed from the library)."""
     if row["reference"] == "nearest":
         return NearestNote()
     if row["reference"] == "key" and row["key"]:
         return Key.parse(row["key"])
+    if row["reference"] == "melody" and row["song_id"]:
+        from ..library import Library
+
+        try:
+            return Melody.from_song(Library(home).get(row["song_id"]))
+        except KeyError as e:
+            raise ValueError(f"song {row['song_id']!r} of this Take is no longer in the library") from e
     raise ValueError(f"re-scoring a {row['reference']} Take needs its Reference")
 
 
 def saved_reference(home: Path, take_id: str) -> Reference:
-    return _reference_for(next(r for r in _rows(home) if r["id"] == take_id))
+    return _reference_for(next(r for r in _rows(home) if r["id"] == take_id), home)
+
+
+def saved_latency(home: Path, take_id: str) -> float:
+    """The latency offset the Take was scored with (0 for Nearest note and Key)."""
+    row = next(r for r in _rows(home) if r["id"] == take_id)
+    return float(row["latency_offset_s"] or 0.0)
 
 
 def rescore_take(
@@ -118,21 +132,22 @@ def rescore_take(
 ) -> TakeRecord:
     """Score a saved Take again from its raw pitch line (Bands or gate may have changed since).
     write=True also replaces the Take's row in the summary table. Nearest note rebuilds itself from the row;
-    Key and Melody Takes need their Reference passed in."""
+    Key and Melody Takes rebuild theirs from the row (Melody via the song id in the library)."""
     rows = _rows(home)
     row = next(r for r in rows if r["id"] == take_id)
     if reference is None:
-        reference = _reference_for(row)
+        reference = _reference_for(row, home)
     frames = load_frames(home, take_id)
+    latency = float(row["latency_offset_s"] or 0.0)
     record = TakeRecord(
         id=take_id,
         started_at=datetime.fromisoformat(row["started_at"]),
         reference_kind=row["reference"],
         frames=tuple(frames),
-        summary=score_take(frames, reference, config),
+        summary=score_take(frames, reference, config, latency),
         key=row["key"] or None,
         song_id=row["song_id"] or None,
-        latency_offset_s=float(row["latency_offset_s"] or 0.0),
+        latency_offset_s=latency,
     )
     if write:
         rows = [_row(record) if r["id"] == take_id else r for r in rows]

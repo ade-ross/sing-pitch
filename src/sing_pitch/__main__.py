@@ -9,6 +9,10 @@ def main(argv: list[str] | None = None) -> int:
         from .cli import import_main
 
         return import_main(argv[1:])
+    if argv[:1] == ["calibrate"]:
+        from .cli import calibrate_main
+
+        return calibrate_main(argv[1:])
     from PySide6 import QtCore, QtWidgets
 
     from .pitch.swiftf0 import SwiftF0Tracker

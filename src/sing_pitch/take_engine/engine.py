@@ -33,30 +33,36 @@ def band_for(cents: float, config: ScoreConfig) -> Band:
     return Band.RED
 
 
-def score_frame(frame: PitchFrame, voiced: bool, reference: Reference, config: ScoreConfig) -> FrameScore:
+def score_frame(
+    frame: PitchFrame, voiced: bool, reference: Reference, config: ScoreConfig, latency_s: float = 0.0
+) -> FrameScore:
+    """latency_s: how late the voice arrives on the Take clock relative to the Reference (Melody only).
+    The voice frame at t is scored against the Reference at t - latency_s."""
     if not voiced:
         return FrameScore(frame.t, None, None, None, None)
     midi = hz_to_midi(frame.hz)
-    target = reference.target(frame.t, midi)
+    target = reference.target(frame.t - latency_s, midi)
+    if target.midi is None:       # sung, but the Reference has nothing reliable here: shown, never scored
+        return FrameScore(frame.t, midi, None, None, None, target.in_key)
     cents = 100.0 * (midi - target.midi)
     return FrameScore(frame.t, midi, cents, band_for(cents, config), note_name(round(target.midi)), target.in_key)
 
 
 def replay_scores(
-    frames: Sequence[PitchFrame], reference: Reference, config: ScoreConfig = DEFAULT_SCORE_CONFIG
+    frames: Sequence[PitchFrame], reference: Reference, config: ScoreConfig = DEFAULT_SCORE_CONFIG,
+    latency_s: float = 0.0,
 ) -> list[FrameScore]:
     """A saved Take's line as live-view scores, one per frame, under the full gate (what the summary counted)."""
     mask = voiced_mask(frames, config)
-    return [score_frame(f, v, reference, config) for f, v in zip(frames, mask)]
+    return [score_frame(f, v, reference, config, latency_s) for f, v in zip(frames, mask)]
 
 
 def score_take(
-    frames: Sequence[PitchFrame], reference: Reference, config: ScoreConfig = DEFAULT_SCORE_CONFIG
+    frames: Sequence[PitchFrame], reference: Reference, config: ScoreConfig = DEFAULT_SCORE_CONFIG,
+    latency_s: float = 0.0,
 ) -> TakeSummary:
     """Final numbers for a whole Take. Also the re-score path: raw frames in, same numbers out."""
-    mask = voiced_mask(frames, config)
-    scores = [score_frame(f, v, reference, config) for f, v in zip(frames, mask)]
-    return summarise(scores, frames, config)
+    return summarise(replay_scores(frames, reference, config, latency_s), frames, config)
 
 
 class TakeEngine:
@@ -67,7 +73,11 @@ class TakeEngine:
         reference: Reference,
         config: ScoreConfig = DEFAULT_SCORE_CONFIG,
         started_at: datetime | None = None,
+        latency_s: float = 0.0,
     ):
+        """latency_s: total delay of the voice behind the Reference on the Take clock (Melody: calibrated
+        input + output latency, plus the playback start offset). Settable until the first push()."""
+        self.latency_s = latency_s
         self._reference = reference
         self._config = config
         self._gate = VoicingGate(config)
@@ -78,7 +88,7 @@ class TakeEngine:
         """Live scoring, one FrameScore per frame. Uses the streaming gate (no look-ahead, no lag);
         stop() applies the full gate, which also drops runs shorter than 48 ms."""
         self._frames.extend(frames)
-        return [score_frame(f, self._gate.step(f), self._reference, self._config) for f in frames]
+        return [score_frame(f, self._gate.step(f), self._reference, self._config, self.latency_s) for f in frames]
 
     def stop(self) -> TakeRecord:
         return TakeRecord(
@@ -86,6 +96,8 @@ class TakeEngine:
             started_at=self._started_at,
             reference_kind=self._reference.kind,
             frames=tuple(self._frames),
-            summary=score_take(self._frames, self._reference, self._config),
+            summary=score_take(self._frames, self._reference, self._config, self.latency_s),
             key=getattr(self._reference, "name", None) if self._reference.kind == "key" else None,
+            song_id=getattr(self._reference, "song_id", None) if self._reference.kind == "melody" else None,
+            latency_offset_s=self.latency_s,
         )
