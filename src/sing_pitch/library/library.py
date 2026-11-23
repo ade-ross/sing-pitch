@@ -96,13 +96,24 @@ class Library:
         d.mkdir(parents=True)
         return d
 
-    def commit(self, staging: Path, meta_fields: dict, title: str) -> Song:
-        """Name the song, write meta.json and move the staging folder into place."""
-        song_id = self._free_id(slugify(title))
+    def commit(self, staging: Path, meta_fields: dict, title: str, replacing: str | None = None) -> Song:
+        """Name the song, write meta.json and move the staging folder into place. With replacing=<song id> the new
+        song takes that id and the old folder is deleted only after the new one is in place."""
+        song_id = replacing or self._free_id(slugify(title))
         meta = SongMeta(id=song_id, title=title, **meta_fields)
         (staging / META).write_text(json.dumps(dataclasses.asdict(meta), indent=2) + "\n")
         final = self.root / song_id
-        staging.rename(final)
+        if replacing is None:
+            staging.rename(final)
+            return Song(meta, final)
+        old = self.root / f".old-{uuid.uuid4().hex[:8]}"
+        final.rename(old)
+        try:
+            staging.rename(final)
+        except BaseException:
+            old.rename(final)
+            raise
+        shutil.rmtree(old, ignore_errors=True)
         return Song(meta, final)
 
     def discard(self, staging: Path) -> None:

@@ -167,3 +167,54 @@ def test_importing_a_known_youtube_link_again_works_offline(tmp_path, parts):
     dl.probe = lambda url: (_ for _ in ()).throw(RuntimeError("offline"))
     assert imp.import_url("https://youtu.be/abc12345678?t=5").id == first.id
     assert imp.import_url("https://www.youtube.com/shorts/abc12345678").id == first.id
+
+
+def test_a_failed_force_reimport_keeps_the_stored_song_untouched(tmp_path, parts):
+    sep, _, dl = parts
+    home = tmp_path / "home"
+    audio = song_file(tmp_path / "a.wav")
+    first = make_importer(home, parts).import_file(audio)
+    before = first.vocals_path.read_bytes()
+
+    class Boom(FakeExtractor):
+        def extract(self, vocals):
+            raise RuntimeError("model crashed")
+
+    with pytest.raises(RuntimeError):
+        Importer(Library(home), sep, Boom(), dl).import_file(audio, force=True)
+    kept = Library(home).get(first.id)
+    assert kept.vocals_path.read_bytes() == before and kept.load_reference().hz.size > 0
+    assert [p.name for p in (home / "songs").iterdir()] == [first.id]        # no staging folder left behind
+
+
+def test_a_successful_force_reimport_replaces_the_song_under_the_same_id(tmp_path, parts):
+    sep, _, _ = parts
+    home = tmp_path / "home"
+    imp = make_importer(home, parts)
+    audio = song_file(tmp_path / "a.wav")
+    first = imp.import_file(audio)
+    renamed = audio.rename(tmp_path / "different name.wav")                  # same bytes, other title
+    again = imp.import_file(renamed, force=True)
+    assert again.id == first.id and len(sep.calls) == 2
+    assert [s.id for s in Library(home).list_songs()] == [first.id]
+    assert [p.name for p in (home / "songs").iterdir()] == [first.id]
+    assert Library(home).get(first.id).meta.title == "different name"
+
+
+def test_a_failed_force_reimport_of_stems_and_links_keeps_the_stored_song(tmp_path, parts):
+    sep, _, dl = parts
+    home = tmp_path / "home"
+
+    class Boom(FakeExtractor):
+        def extract(self, vocals):
+            raise RuntimeError("model crashed")
+
+    folder = logic_folder(tmp_path)
+    good = make_importer(home, parts)
+    stems_song, url_song = good.import_stems(folder), good.import_url(URL)
+    bad = Importer(Library(home), sep, Boom(), dl)
+    for call in (lambda: bad.import_stems(folder, force=True), lambda: bad.import_url(URL, force=True)):
+        with pytest.raises(RuntimeError):
+            call()
+    assert {s.id for s in Library(home).list_songs()} == {stems_song.id, url_song.id}
+    assert all(s.vocals_path.exists() for s in Library(home).list_songs())
