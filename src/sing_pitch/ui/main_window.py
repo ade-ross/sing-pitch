@@ -20,7 +20,7 @@ from ..pitch import PitchTracker
 from ..playback import BackingPlayer, DronePlayer
 from ..playback.transport import LEAD_IN_S, Loop
 from ..playback.stretch import SpeedCache, Stretcher, time_stretch
-from ..playback.outputs import OutputKind, default_output_name, headphone_warning, output_kind
+from ..playback.outputs import OutputKind, default_output_name, headphone_warning, list_outputs, output_kind
 from ..reference import Band, Key, Melody, NearestNote, Reference
 from ..reference.melody import NotesMelody
 from ..reference.notes import PER_PHRASE, format_length
@@ -121,6 +121,9 @@ class MainWindow(QtWidgets.QWidget):
         output_info: Callable[[], tuple[str | None, OutputKind]] = _default_output,
         calibration_player_factory: Callable | None = None,
         stretcher: Stretcher = time_stretch,
+        input_devices: Callable[[], list[dict]] = list_inputs,
+        output_devices: Callable[[], list[dict]] = list_outputs,
+        output_kind_of: Callable[[str], OutputKind] = output_kind,
     ):
         super().__init__()
         self.setWindowTitle("sing-pitch")
@@ -130,7 +133,8 @@ class MainWindow(QtWidgets.QWidget):
         self._drone: DronePlayer | None = None
         self._backing_factory = backing_factory
         self._backing: Playback | None = None
-        self._output_info = output_info
+        self._output_info = output_info                  # the system default output: (name, kind)
+        self._input_devices, self._output_devices, self._output_kind_of = input_devices, output_devices, output_kind_of
         self._calibration_player_factory = calibration_player_factory
         self._calibration: CalibrationRun | None = None
         self._speed_ready: tuple[str, int, tuple] | None = None   # (song id, percent, stems) loaded for the chosen Speed
@@ -161,7 +165,13 @@ class MainWindow(QtWidgets.QWidget):
         self._centre = 60.0
 
         self.device_box = QtWidgets.QComboBox()
-        self._fill_devices()
+        self.output_box = QtWidgets.QComboBox()
+        self.output_box.setToolTip("Where you hear the Backing, Guide vocal and Drone. Fixed during a Take.")
+        self.refresh_button = QtWidgets.QPushButton("Refresh")
+        self.refresh_button.setToolTip("Look for newly connected inputs and outputs")
+        self.refresh_button.clicked.connect(self.refresh_devices)
+        self.refresh_devices()
+        self.output_box.currentIndexChanged.connect(self._output_changed)       # after the first fill: no save at startup
         self.reference_box = QtWidgets.QComboBox()
         self.reference_box.addItems(["Nearest note", "Key", "Melody"])
         self.key_box = QtWidgets.QComboBox()
@@ -290,7 +300,8 @@ class MainWindow(QtWidgets.QWidget):
         self._set_now(0.0)
 
         top = QtWidgets.QHBoxLayout()
-        for w in (QtWidgets.QLabel("Input"), self.device_box, QtWidgets.QLabel("Reference"), self.reference_box,
+        for w in (QtWidgets.QLabel("Input"), self.device_box, QtWidgets.QLabel("Output"), self.output_box,
+                  self.refresh_button, QtWidgets.QLabel("Reference"), self.reference_box,
                   self.key_box, self.drone_box, self.song_box, self.button, self.replay_button, self.history_button,
                   self.calibrate_button):
             top.addWidget(w)
@@ -323,17 +334,64 @@ class MainWindow(QtWidgets.QWidget):
         self._timer.setTimerType(QtCore.Qt.PreciseTimer)
         self._timer.timeout.connect(self.tick)
 
-    def _fill_devices(self) -> None:
+    def refresh_devices(self) -> None:
+        """List the inputs and outputs again (a headset connected since the start). Each keeps its selection by name:
+        device indices move when devices come and go. The remembered Output stays in settings while it is unplugged."""
+        kept_input = self.device_box.currentText()
+        self.device_box.blockSignals(True), self.output_box.blockSignals(True)
         try:
-            devices = list_inputs()
+            self._fill_inputs(kept_input)
+            self._fill_outputs()
+        finally:
+            self.device_box.blockSignals(False), self.output_box.blockSignals(False)
+        if hasattr(self, "output_label"):               # not yet built when the first fill runs
+            self.update_output_warning()
+
+    def _fill_inputs(self, kept: str) -> None:
+        self.device_box.clear()
+        try:
+            devices = self._input_devices()
         except Exception as exc:  # PortAudio missing or no devices: the window still opens
             self.device_box.addItem(f"no input ({exc})", None)
             return
         for d in devices:
             self.device_box.addItem(d["name"], d["index"])
-        best = pick_input(devices)
-        if best is not None:
+        at = self.device_box.findText(kept) if kept else -1
+        if at >= 0:
+            self.device_box.setCurrentIndex(at)
+        elif (best := pick_input(devices)) is not None:
             self.device_box.setCurrentIndex(self.device_box.findData(best))
+
+    def _fill_outputs(self) -> None:
+        self.output_box.clear()
+        name, _ = self._output_info()
+        self.output_box.addItem(f"System default ({name})" if name else "System default", None)
+        try:
+            devices = self._output_devices()
+        except Exception:             # the box then offers the system default only
+            return
+        for d in devices:
+            self.output_box.addItem(d["name"], d["index"])
+        at = self.output_box.findText(self._settings.output_device) if self._settings.output_device else -1
+        self.output_box.setCurrentIndex(max(at, 0))
+
+    def _output_changed(self, *_) -> None:
+        """Simone chose an Output: remember it by name (None = the system default) and judge it for headphones."""
+        self._settings.output_device = None if self.output_box.currentData() is None else self.output_box.currentText()
+        self._settings.save()
+        self.update_output_warning()
+
+    def _current_output(self) -> tuple[str | None, OutputKind]:
+        """(name, kind) of the Output that Backing, Guide vocal, Drone and the calibration use."""
+        if self.output_box.currentData() is None:
+            return self._output_info()
+        name = self.output_box.currentText()
+        return name, self._output_kind_of(name)
+
+    def _output_kwargs(self) -> dict:
+        """device= for a player's stream when a specific Output is chosen; nothing for the system default."""
+        index = self.output_box.currentData()
+        return {} if index is None else {"device": index}
 
     def reload_songs(self) -> None:
         self.song_box.clear()
@@ -673,7 +731,7 @@ class MainWindow(QtWidgets.QWidget):
         """Melody only: warn when the Backing would go to speakers (it leaks into the mic)."""
         text = None
         if self.reference_box.currentText() == "Melody":
-            name, kind = self._output_info()
+            name, kind = self._current_output()
             if not self._settings.headphones_confirmed(name):
                 text = headphone_warning(kind, name)
         self.output_label.setText(text or "")
@@ -681,7 +739,7 @@ class MainWindow(QtWidgets.QWidget):
         self.headphones_button.setVisible(bool(text) and "Cannot tell" in (text or ""))
 
     def confirm_headphones(self) -> None:
-        name, _ = self._output_info()
+        name, _ = self._current_output()
         if name:
             self._settings.confirm_headphones(name)
             self._settings.save()
@@ -795,7 +853,7 @@ class MainWindow(QtWidgets.QWidget):
         backing, latency = None, 0.0
         try:
             if reference.kind == "melody":
-                output, _ = self._output_info()
+                output, _ = self._current_output()
                 latency = self._settings.latency_for(output)
                 percent = self.speed_box.value()
                 stems = None if percent == 100 else self._stems_for_start(reference.song_id, percent)
@@ -803,7 +861,7 @@ class MainWindow(QtWidgets.QWidget):
                     self.summary_label.setText(f"Cannot start yet: preparing {percent} %…")
                     return
                 song = Library(self._home).get(reference.song_id)
-                backing = self._backing_factory(song.backing_path, song.vocals_path)
+                backing = self._backing_factory(song.backing_path, song.vocals_path, **self._output_kwargs())
                 backing.set_gains(*self._gains())
                 if self._loop() is not None:                 # the Take starts on the Section's Lead-in, as Pass 1
                     backing.set_loop(self._loop())
@@ -825,16 +883,16 @@ class MainWindow(QtWidgets.QWidget):
         self._oct_known = False
         self._set_now(0.0)
         self.button.setText("Stop")
-        for w in (self.device_box, self.reference_box, self.key_box, self.drone_box, self.song_box,
-                  self.octave_box, self.notes_box, self.note_length_slider, self.calibrate_button):
+        for w in (self.device_box, self.output_box, self.refresh_button, self.reference_box, self.key_box, self.drone_box,
+                  self.song_box, self.octave_box, self.notes_box, self.note_length_slider, self.calibrate_button):
             w.setEnabled(False)
         self.replay_button.setEnabled(False)
         self.summary_label.setText("Singing...")
-        if reference.kind == "melody" and not self._settings.is_calibrated(self._output_info()[0]):
+        if reference.kind == "melody" and not self._settings.is_calibrated(self._current_output()[0]):
             self.summary_label.setText(f"Singing... (latency not calibrated for this output: using {latency:.2f} s)")
         if reference.kind == "key" and self.drone_box.isChecked():
             try:
-                self._drone = self._drone_factory()
+                self._drone = self._drone_factory(**self._output_kwargs())
                 self._drone.start(reference)
             except Exception as exc:  # the Take goes on without the Drone
                 self._drone = None
@@ -857,6 +915,8 @@ class MainWindow(QtWidgets.QWidget):
         self.pause_button.setEnabled(False)
         self.button.setText("Start")
         self.device_box.setEnabled(True)
+        self.output_box.setEnabled(True)
+        self.refresh_button.setEnabled(True)
         self.reference_box.setEnabled(True)
         self.calibrate_button.setEnabled(True)
         self._reference_changed()
@@ -893,7 +953,8 @@ class MainWindow(QtWidgets.QWidget):
         if self._runner is not None or self._replay is not None or self._calibration is not None:
             return
         try:
-            kwargs = {"player_factory": self._calibration_player_factory} if self._calibration_player_factory else {}
+            kwargs = {"player_factory": self._calibration_player_factory} if self._calibration_player_factory else \
+                {"output_device": self.output_box.currentData()}
             self._calibration = CalibrationRun(self._input_factory(self.device_box.currentData()), **kwargs)
             self._calibration.start()
         except Exception as exc:
@@ -912,7 +973,7 @@ class MainWindow(QtWidgets.QWidget):
         result = run.finish()
         for w in (self.button, self.replay_button, self.calibrate_button):
             w.setEnabled(True)
-        output, _ = self._output_info()
+        output, _ = self._current_output()
         if result.latency_s is None:
             self.summary_label.setText(f"Calibration failed: heard {result.matched} of 8 answers. Try again, louder.")
             return
