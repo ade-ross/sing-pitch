@@ -48,4 +48,35 @@ def test_the_file_mic_starts_with_the_output_and_hears_it_delay_late():
     rest = SR - round(0.25 * SR)
     assert np.all(np.diff(heard[delay : delay + rest]) == 1)          # in real time, no gap or repeat
     assert np.all(heard[delay + rest :] == 0)                         # the file ended: silence
-    assert set(out_frames) == {1024}
+    assert set(out_frames) == {STEP}                                  # just in time, one step per call
+
+
+def test_the_file_mic_is_late_by_exactly_the_latency_the_window_assumes():
+    """The window maps input frame i to output frame i + (rendered at the first chunk - chunk) - latency (live.py,
+    calibration.py). The file mic must sing the file on that same mapping, else a perfect singer scores as early."""
+    from sing_pitch.playback import BackingPlayer
+
+    hub = FakeAudioHub(time_scale=20.0)
+    song = np.arange(2 * SR, dtype=np.float32)        # song sample value = its song frame
+    player = BackingPlayer(song, SR, sample_rate=SR, stream_factory=hub.open_output)
+    chunks, first = [], []
+
+    def on_chunk(chunk):
+        if not first:
+            first.append(round(player.song_log.rendered_s * SR) - len(chunk))
+        chunks.append(chunk)
+
+    latency = round(0.1 * SR)
+    try:
+        with hub.held():
+            player.start()
+            mic = FakeMic(hub, song, delay_s=latency / SR)
+            mic.start(on_chunk)
+        while len(chunks) < 100:
+            time.sleep(0.01)
+        mic.stop(), player.stop()
+    finally:
+        hub.close()
+    heard = np.concatenate(chunks)
+    i = np.arange(latency + 1000, len(heard))
+    assert np.array_equal(heard[i], (i + first[0] - latency).astype(np.float32))

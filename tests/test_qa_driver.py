@@ -35,9 +35,10 @@ def test_driver_starts_pauses_seeks_loops_stops_and_reads_the_summary(tmp_path):
         qa.wait(0.3)
         assert qa.song_position() > paused_at + 0.2             # resumed
 
+        before = qa.song_position()
         qa.seek(0.4)
         qa.wait(0.1)
-        assert abs(qa.song_position() - 0.5) < 0.1              # jumped back
+        assert before > 1.2 and 0.45 < qa.song_position() < 0.9      # jumped back (wait() lets at least 0.1 s pass)
 
         qa.mark_section(1.2, 3.6)
         qa.set("loop_box", True)

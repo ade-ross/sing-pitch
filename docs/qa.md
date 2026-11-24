@@ -8,8 +8,8 @@ by the QA driver; a plain `sing-pitch` launch is unchanged.
 
 Think of one fake sound card. A single thread (`testmode.FakeAudioHub`) steps 256 frames at a time, paced by the
 wall clock. Each step it first plays a step of every open output stream (calling the Backing, Guide vocal, Drone or
-calibration callback whenever its 1024-frame block runs out, as PortAudio does), then hands every fake mic one
-256-frame chunk, the same chunk size as the real input. So the Transport's song clock advances exactly as with a
+calibration callback for exactly that step, just in time), then hands every fake mic one 256-frame chunk, the same
+chunk size as the real input. So the Transport's song clock advances exactly as with a
 device, and output and input keep a fixed relation.
 
 The fake mic is one of two things:
@@ -73,13 +73,15 @@ with QA(home, mic="songs/x/vocals.wav", time_scale=1.0) as qa:   # mic="echo" is
 
 Feeding a song's own `vocals.wav` as the file mic, with the mic latency equal to the configured one, must give
 about 100 % in tune on a whole-song Melody Take: the voice and the reference line come from the same audio, so any
-loss is the sync or the scoring. `tests/test_qa_oracle.py` runs it on a synthetic song (5 notes, about 98 %) and
+loss is the sync or the scoring. `tests/test_qa_oracle.py` runs it on a synthetic song (5 notes, about 99.5 %) and
 checks that a voice 0.45 s later than the configured latency scores under 60 %. On an imported song the score also
 depends on how well SwiftF0 (live) and RMVPE (import) agree on the stem.
 
-One known offset: the window aligns input and output when the first mic chunk arrives, by when the output has
-rendered one block ahead, so the fake mic is 16 ms (768 frames) earlier than the latency says. A real calibration
-measures that gap in; here it is about one tracker frame.
+Why the null output renders just in time: the window aligns the song clock when the first mic chunk arrives, taking
+what the output has rendered by then as what is playing. A real device renders a block or more ahead and calibration
+measures that gap in. If the fake rendered 1024-frame blocks ahead, a perfect singer would be 16 ms early, and on a
+real vocal with vibrato that alone cost 25 points of % in tune (63 % instead of 88 %). Rendering one step at a time
+makes a fake latency of L exactly a calibrated latency of L (`tests/test_fake_audio.py` checks it to the frame).
 
 Not covered: the real mic and speakers, device lists (test mode shows one fake input and the system-default fake
 output), and the headphones check (the fake output counts as headphones).

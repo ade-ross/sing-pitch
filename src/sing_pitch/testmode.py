@@ -1,8 +1,7 @@
 """Test mode: a fake mic and a null output so the real app runs end to end without a microphone or speakers.
 
 One FakeAudioHub thread is the audio hardware. Every step (BLOCKSIZE frames of app time) it first lets each open
-output stream play a step (calling its callback whenever its block runs out, like PortAudio), then gives each fake
-mic one chunk. Steps are paced by the wall clock times `time_scale`, so the Transport's song clock advances exactly
+output stream play a step (calling its callback for that step), then gives each fake mic one chunk. Steps are paced by the wall clock times `time_scale`, so the Transport's song clock advances exactly
 as it would with a device. Because one thread drives both sides, output and input stay in a fixed relation:
 
 - FakeMic(wav) reads the wav from `offset_s`, starting at the moment the open output stream started (or the mic's
@@ -35,7 +34,11 @@ ECHO_KEEP_S = 5.0                  # the longest echo delay
 
 
 class FakeOutputStream:
-    """A null sounddevice.OutputStream: the hub consumes its blocks at real-time pace. Same kwargs as the real one."""
+    """A null sounddevice.OutputStream: the hub consumes its audio at real-time pace. Same kwargs as the real one.
+    The callback is asked for one hub step (256 frames) at a time, just in time, whatever `blocksize` says: then
+    what is rendered when a mic chunk arrives is what is playing, which is how the window aligns the song clock
+    (live.py), so a fake latency of L is exactly a calibrated latency of L. A real device renders ahead; calibration
+    measures that in."""
 
     def __init__(self, hub: FakeAudioHub, callback: Callable, channels: int = 2, blocksize: int = 1024,
                  samplerate: int = SAMPLE_RATE, dtype: str = "float32", device=None, **_):
@@ -63,10 +66,10 @@ class FakeOutputStream:
         done = 0
         while done < frames:
             if self._at >= len(self._block):
-                block = np.zeros((self.blocksize, self.channels), np.float32)
+                block = np.zeros((frames - done, self.channels), np.float32)
                 if self.failed is None:
                     try:
-                        self._callback(block, self.blocksize, None, None)
+                        self._callback(block, len(block), None, None)
                     except Exception as exc:    # PortAudio would abort the stream: stay silent, say why once
                         self.failed = exc
                         print(f"fake output: callback failed: {exc!r}", file=sys.stderr)
