@@ -995,20 +995,25 @@ class MainWindow(QtWidgets.QWidget):
 
     def _note_bars(self, x: np.ndarray, song: np.ndarray, midi: np.ndarray, octaves: np.ndarray,
                    shift: np.ndarray) -> np.ndarray:
-        """Notes mode: the sampled notes as separate bars (the line blanked just before each new note, or a new Octave
-        shift, so neighbouring bars never join into a staircase), each labelled with its note name at its start, the
-        left edge of the plot for a bar already under way."""
+        """Notes mode: the sampled notes as separate bars (the line blanked just before a bar that follows a different
+        note, or a new Octave shift, so neighbouring bars never join into a staircase), each labelled with its note
+        name at its start, the left edge of the plot for a bar already under way. An Unscored dip inside a note breaks
+        its line but neither trims the bar before it nor labels the note again after it."""
         index = self._melody.note_index_at(song)
         index[~np.isfinite(midi)] = -1
         midi = midi.copy()
-        new = np.flatnonzero((index[1:] != index[:-1]) | (octaves[1:] != octaves[:-1])) + 1
-        for i in new:
-            if index[i - 1] >= 0:
+        on = np.flatnonzero(index >= 0)                  # the samples that belong to a note
+        if not len(on):
+            self._show_labels([])
+            return midi
+        different = (index[on][1:] != index[on][:-1]) | (octaves[on][1:] != octaves[on][:-1])    # vs the previous note sample
+        for i, j in zip(on[1:][different], on[:-1][different]):
+            if i == j + 1:                               # bars side by side: break the line (not across a dip, already NaN)
                 midi[max(0, i - NOTE_GAP_SAMPLES):i] = np.nan
-        starts = np.concatenate([[0], new]) if len(index) else new
+        starts = np.concatenate([[on[0]], on[1:][different]])
         notes = self._melody.note_list
         labels = [(x[i], notes[index[i]].midi + shift[i], note_name(int(round(notes[index[i]].midi + shift[i]))))
-                  for i in starts if index[i] >= 0]
+                  for i in starts]
         self._show_labels(labels)
         return midi
 

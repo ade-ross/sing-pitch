@@ -353,6 +353,20 @@ def test_live_the_melody_is_drawn_as_labelled_bars_on_exact_semitones_in_both_ha
         assert text == note_name(57 + k) and abs(ly - (57 + k)) < 1.0
 
 
+def test_an_unscored_dip_inside_a_note_neither_doubles_its_label_nor_trims_the_bar(qtbot, tmp_path):
+    win, _, _ = notes_window(qtbot, tmp_path, 3, start=False)
+    win._melody = win._reference()
+    x = np.arange(0.0, 3.0, 0.01)                                     # notes 57, 58, 59: one second each
+    midi, _ = win._melody.sample(x)
+    midi[120:140] = np.nan                                            # 1.2-1.4 s unscored, inside the second note
+    zeros = np.zeros(len(x))
+    out = win._note_bars(x, x, midi, zeros, zeros)
+    from sing_pitch.music import note_name
+    assert [t for t, _, _ in visible_labels(win)] == [note_name(57), note_name(58), note_name(59)]   # B-flat once
+    assert np.isfinite(out[100:120]).all() and np.isnan(out[120:140]).all() and np.isfinite(out[140:190]).all()
+    assert np.isnan(out[99]) and np.isfinite(out[90])                 # still broken just before the next note (1.0 s)
+
+
 def test_label_items_are_reused_not_created_every_frame(qtbot, tmp_path):
     win, _, log = notes_window(qtbot, tmp_path, 3)
     log.append(round(10 * SR), 0.0)
