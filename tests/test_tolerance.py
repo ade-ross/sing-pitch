@@ -72,3 +72,37 @@ def test_the_new_columns_go_at_the_end_of_the_table():
     from sing_pitch.take_store import COLUMNS
 
     assert COLUMNS[-3:] == ("tolerance_cents", "timing_window_s", "note_scoring")
+
+
+# --- History --------------------------------------------------------------------------------------------------------
+from test_history import row as history_row, write_table  # noqa: E402
+
+from sing_pitch.history import load_history  # noqa: E402
+
+
+def tolerance_table(home):
+    write_table(home, [history_row("a", 1, pct="40"),                                  # before #41: ±25
+                       history_row("b", 2, pct="70", tolerance_cents="50.0"),
+                       history_row("c", 3, pct="60", tolerance_cents="25.0")])
+
+
+def test_history_filters_by_tolerance_old_rows_reading_as_25(tmp_path):
+    tolerance_table(tmp_path)
+    h = load_history(tmp_path)
+    assert h.tolerances == [25.0, 50.0]
+    assert h.series(tolerance=25.0).pct_in_tune == [40.0, 60.0]
+    assert h.series(tolerance=50.0).pct_in_tune == [70.0]
+    assert h.series().tolerance_cents == [25.0, 50.0, 25.0]
+
+
+def test_the_history_view_has_a_tolerance_filter_and_its_legend_says_the_tolerance(qtbot, tmp_path):
+    from sing_pitch.ui.history_view import HistoryView
+
+    tolerance_table(tmp_path)
+    v = HistoryView(tmp_path)
+    qtbot.addWidget(v)
+    assert v.tolerance_box.isEnabled() and v.tolerance_box.toolTip()
+    assert "mixed" in v.pct_label()
+    v.tolerance_box.setCurrentIndex(v.tolerance_box.findData(50.0))
+    assert list(v.pct_curve.getData()[1]) == [70.0]
+    assert v.pct_label() == "% in tune (±50 c)"

@@ -361,4 +361,4 @@ def test_every_control_of_the_history_window_has_a_tooltip(qtbot, tmp_path):
     view = HistoryView(tmp_path)
     qtbot.addWidget(view)
     controls = controls_of(view)
-    assert len(controls) == 7 and [w for w in controls if not w.toolTip().strip()] == []
+    assert len(controls) == 8 and [w for w in controls if not w.toolTip().strip()] == []
