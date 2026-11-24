@@ -87,7 +87,7 @@ def segment_notes(t, midi, scored, min_note_s: float, phrase_gap_s: float = PHRA
     midi = np.asarray(midi, dtype=np.float64)
     ok = np.asarray(scored, dtype=bool) & np.isfinite(midi)
     hop = float(np.median(np.diff(t))) if len(t) > 1 else 0.01
-    min_frames = min_note_s / hop if math.isfinite(min_note_s) else math.inf
+    min_frames = round(min_note_s / hop) if math.isfinite(min_note_s) else math.inf     # whole frames, as scored_mask
     notes = []
     for idx in _phrases(t, ok, phrase_gap_s):
         semis = np.round(midi[idx]).astype(np.int64)

@@ -47,6 +47,12 @@ def test_a_long_minimum_merges_them_into_one():
     assert [n.midi for n in notes] == [G4]
 
 
+def test_a_note_exactly_as_long_as_the_minimum_is_kept_despite_the_float32_hop():
+    # the line's times are float32: a hop of 0.0099999998 s must not make a 30-frame (0.3 s) note shorter than 0.3 s
+    line = reference_line([(-500, 1.0), (-200, 0.3), (-500, 1.0)])
+    assert [n.midi for n in notes_of(line, 0.3)] == [E4, G4, E4]
+
+
 def test_per_phrase_gives_one_note_per_reference_phrase():
     # two Phrases (a 0.8 s pause between them), each with three notes
     first = [(-500, 0.3), (-200, 0.6), (-400, 0.3)]
