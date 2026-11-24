@@ -351,6 +351,12 @@ class LiveRunner:
             raise self._error
         return out
 
+    def _pop_error(self) -> Exception:
+        """The worker's exception, no longer kept here and in no local of the raising frame: its traceback holds
+        frames whose `self` is this runner, so keeping it is a cycle only gc would free, on any thread (ui/gui_gc.py)."""
+        error, self._error = self._error, None
+        return error
+
     def stop(self) -> TakeRecord:
         self._source.stop()
         if self._backing is not None:
@@ -358,7 +364,7 @@ class LiveRunner:
         self._chunks.put(None)
         self._thread.join()
         if self._error is not None:
-            raise self._error
+            raise self._pop_error()
         record = self._with_settings(self._take.finish())
         if self._saved and _too_short(record, self._reference, self._take.pass_tag):
             return self._saved[-1]

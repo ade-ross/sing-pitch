@@ -104,11 +104,12 @@ class World:
         self.voice = harmonic(220.0, SONG_S + 5.0)
         self.received = 0            # mic samples delivered
 
-        def make(path, vocals=None):
-            self.players.append(Player(path, vocals, self.log))
-            return self.players[-1]
+        players, log, mic = self.players, self.log, self.mic    # not self: World <-> window would be a cycle
 
-        mic = self.mic
+        def make(path, vocals=None):
+            players.append(Player(path, vocals, log))
+            return players[-1]
+
         self.win = MainWindow(self.tracker, home=tmp_path, input_factory=lambda _i: mic, backing_factory=make,
                               output_info=lambda: ("WF-1000XM5", "headphones"))
         qtbot.addWidget(self.win)

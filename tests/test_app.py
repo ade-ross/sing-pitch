@@ -3,6 +3,7 @@ import subprocess
 import sys
 
 import numpy as np
+import pytest
 from audio import SR, harmonic, quiet
 from frames import hz_at
 
@@ -189,21 +190,104 @@ def test_a_crash_in_the_tracker_during_a_take_stops_it_and_shows_the_error(qtbot
     assert not (tmp_path / "takes.csv").exists()
 
 
+_UI_THREAD_GC_PROBE = """
+import gc, sys, tempfile, threading, weakref
+from PySide6 import QtCore, QtWidgets
+app = QtWidgets.QApplication([])
+assert gc.isenabled()
+from sing_pitch.pitch.swiftf0 import SwiftF0Tracker
+from sing_pitch.ui import MainWindow
+win = MainWindow(SwiftF0Tracker(), home=tempfile.mkdtemp())
+ran_on = []
+gc.callbacks.append(lambda phase, info: phase == 'start' and ran_on.append(threading.current_thread().name))
+class Node: pass
+nodes = [Node() for _ in range(5000)]
+for a, b in zip(nodes, nodes[1:] + nodes[:1]):
+    a.next = b
+probe = weakref.ref(nodes[0])
+del nodes, a, b
+worker = threading.Thread(target=lambda: [[{} for _ in range(100)] for _ in range(2000)], name='worker')
+worker.start(); worker.join()
+QtCore.QTimer.singleShot(2500, app.quit)
+app.exec()
+print(gc.isenabled(), probe() is None, sorted(set(ran_on)))
+"""
 
-def test_a_dropped_window_is_freed_at_once_not_left_to_the_cycle_collector(qapp, tmp_path):
-    """A window in a reference cycle is freed by gc, which can run on any thread that allocates (the tracker
-    worker). PySide then defers deleting its QWidgets to the UI thread, and that crashed the suite (exit 139)."""
+
+def test_the_window_moves_the_cycle_collector_to_the_ui_thread_and_it_still_frees_cycles(tmp_path):
+    """The app's own guarantee, in a fresh interpreter (the suite installs the same policy for every test)."""
+    env = {**os.environ, "QT_QPA_PLATFORM": "offscreen"}
+    done = subprocess.run([sys.executable, "-c", _UI_THREAD_GC_PROBE], env=env, capture_output=True, text=True,
+                          timeout=60, stdin=subprocess.DEVNULL)
+    assert done.returncode == 0, done.stderr
+    assert done.stdout.split("\n")[-2] == "False True ['MainThread']"     # off, cycles freed, only on the UI thread
+
+
+def _built_window(qtbot, tmp_path):
+    from sing_pitch.ui import MainWindow
+
+    return MainWindow(SwiftF0Tracker(), home=tmp_path)
+
+
+def _window_after_a_take_its_replay_and_the_history(qtbot, tmp_path):
+    from sing_pitch.ui import MainWindow
+
+    audio = np.concatenate([quiet(0.3), harmonic(hz_at(10), 0.6), quiet(0.3)])
+    win = MainWindow(SwiftF0Tracker(), home=tmp_path, input_factory=lambda _i: ArrayInput(audio, SR, 256))
+    win.toggle(), qtbot.wait(100), win.toggle()
+    win.toggle_replay(), qtbot.wait(50), win.toggle_replay()
+    win.open_history()
+    return win
+
+
+def _window_after_a_melody_take_paused_sought_and_stopped(qtbot, tmp_path):
+    from test_view_follows_the_song_heard import World
+
+    world = World(qtbot, tmp_path)        # the real path: LiveRunner, worker thread, Backing, Timeline, sections
+    world.advance(1.0)
+    world.win.toggle_pause(), world.advance(1.5), world.win.toggle_pause()
+    world.win.seek(5.0), world.advance(2.0)
+    world.win.toggle()
+    return world.win
+
+
+def _timeline(qtbot, tmp_path):
+    from sing_pitch.ui.timeline import Timeline
+
+    strip = Timeline()
+    strip.set_duration(10.0)
+    return strip
+
+
+def _history(qtbot, tmp_path):
+    from sing_pitch.ui.history_view import HistoryView
+
+    return HistoryView(tmp_path)
+
+
+@pytest.mark.parametrize("build", [_built_window, _window_after_a_take_its_replay_and_the_history,
+                                   _window_after_a_melody_take_paused_sought_and_stopped, _timeline, _history],
+                         ids=lambda f: f.__name__.strip("_"))
+def test_a_dropped_widget_is_freed_at_once_not_left_to_the_cycle_collector(qtbot, tmp_path, build):
+    """A widget in a reference cycle is freed only by the cycle collector, which can run on any thread that allocates
+    (the tracker worker). PySide then hands the C++ deletion to the UI thread, and that crashed the suite twice
+    (exit 139): a cycle through MainWindow (#14), then one through the Timeline's view box and the test World (#22).
+    With the collector off, dropping the last reference must free the widget AND every live Qt object under it."""
     import gc
     import weakref
 
-    from sing_pitch.ui import MainWindow
+    from qt_leaks import collect_and_report_live_qt_garbage
 
-    gc.collect()
+    was_enabled = gc.isenabled()
+    collect_and_report_live_qt_garbage()
     gc.disable()
     try:
-        win = MainWindow(SwiftF0Tracker(), home=tmp_path)
-        ref = weakref.ref(win)
-        del win
-        assert ref() is None, gc.get_referrers(ref())
+        widget = build(qtbot, tmp_path)
+        widget.close()
+        ref = weakref.ref(widget)
+        del widget
+        assert ref() is None, [type(r).__name__ for r in gc.get_referrers(ref())]
+        assert collect_and_report_live_qt_garbage() == {}
     finally:
-        gc.enable()
+        if was_enabled:
+            gc.enable()

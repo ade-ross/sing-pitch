@@ -30,6 +30,7 @@ from ..take_engine import (AUTO, FrameScore, LinearClock, PauseFold, SampledCloc
                            project_song_time, replay_scores)
 from ..take_store import (last_take_id, load_frames, saved_clock_times, saved_latency, saved_octave,
                           saved_reference, saved_song_times)
+from .gui_gc import collect_on_the_ui_thread_only
 from .timeline import Timeline
 from .speed_prep import SpeedPreparer
 
@@ -126,6 +127,7 @@ class MainWindow(QtWidgets.QWidget):
         output_kind_of: Callable[[str], OutputKind] = output_kind,
     ):
         super().__init__()
+        collect_on_the_ui_thread_only()       # the worker threads below must never finalise a Qt object (gui_gc.py)
         self.setWindowTitle("sing-pitch")
         self.resize(1000, 620)
         self._tracker, self._home, self._input_factory = tracker, home or data_dir(), input_factory
@@ -909,7 +911,7 @@ class MainWindow(QtWidgets.QWidget):
             self._backing = None
             self.tick(drain_only=True)
         except Exception as exc:        # the worker thread crashed: the Take is lost, say why
-            record, error = None, exc
+            record, error = None, str(exc)    # the text, not exc: a local holding it is a cycle via its traceback
         self._backing = None
         self._runner = None
         self.pause_button.setEnabled(False)

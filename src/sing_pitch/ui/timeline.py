@@ -8,6 +8,8 @@ dragged, and whose body can be dragged as a whole). A finished drag emits `secti
 edit of the shown Section `section_changed(start, end)`; the window decides what they mean (save, loop). A click outside the Section still seeks."""
 from __future__ import annotations
 
+import weakref
+
 import numpy as np
 import pyqtgraph as pg
 from PySide6 import QtCore
@@ -26,8 +28,13 @@ class _TimelineView(pg.ViewBox):
 
     def __init__(self, owner: Timeline):
         super().__init__(enableMenu=False)
-        self._owner = owner
+        # weak: the strip owns this box, so a strong ref back is a cycle that only gc frees (ui/gui_gc.py: why not)
+        self._owner_ref = weakref.ref(owner)
         self.setMouseEnabled(False, False)
+
+    @property
+    def _owner(self) -> Timeline:
+        return self._owner_ref()
 
     def mouseClickEvent(self, ev) -> None:
         if ev.button() == QtCore.Qt.LeftButton:
