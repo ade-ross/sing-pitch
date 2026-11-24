@@ -117,17 +117,28 @@ he does not play guitar while using it.
     cents, Larrouy-Maestri group, abstracts only). Simone sets the Tolerance with a slider (±10 to ±100 cents, 5-cent
     steps; #41). It applies to every Reference, is remembered in settings.json, is locked during a Take and is saved
     with each Take (`tolerance_cents`); the summary, the History legend and a History filter show it.
-  - **Timing window (Melody, #41):** a voice frame is compared with the scored reference frames within ±100 ms of the
-    song time it answers, and the one closest to the voice counts. It forgives timing, not pitch: a voice 40 cents
-    sharp stays out of green. Whether a frame is scored at all does not change: a frame answering an Unscored stretch
-    stays unscored. The Octave shift is still chosen on the frame at its own song time, and so is the held note for
-    Steadiness. Saved as `timing_window_s`.
+  - **Timing window (Melody, QA #44):** each Phrase gets one timing shift, how late (+) or early (−) the voice is,
+    searched from −100 to +100 ms in 10 ms steps. It is chosen together with the Phrase's Octave shift, in one search:
+    the pair (k, shift) whose Reference, the line at song time − shift plus 12 k, gives the smallest median absolute
+    error over the Phrase's scored frames (ties within 0.5 c go to the smaller mean error with each frame capped at
+    300 c, then the smaller |k|, then the smaller |shift|; a pinned Octave searches the shift only). Every frame of the
+    Phrase is then scored strictly at that shift, so it forgives timing, not pitch: a voice 40 cents sharp the whole
+    time scores ~7 % in tune and shows ~40 c. The line is read between its 10 ms frames where two neighbours are within
+    a semitone (a glide or vibrato), at the nearest frame across a note change and on Notes-mode bars. A shift never
+    moves a frame across an Unscored stretch (it is held at the edge of the scored run), so whether a frame is scored
+    does not change. The held note for Steadiness is still read at the frame's own song time. Live, the open Phrase's
+    pair is re-estimated as it grows; after ~2 s of scored singing its octave is kept and its shift re-estimated each
+    time the Phrase's scored frames double; the summary uses whole-Phrase pairs. Saved as `timing_window_s` and
+    `timing_shift_ms` (the Take's median shift over its scored frames). History of the rule: #41 took, per frame, the
+    reference frame within ±100 ms closest to the voice; on a vocal with vibrato that hid a constant 40 c error (75 %
+    in tune, 8 c). Rows without `timing_shift_ms` re-score with that #41 rule.
   - **% in tune:** green time divided by voiced, scored time. Notes mode (#41): the green share of the sung notes'
     length, each note judged once (see spec-practice-controls.md, Notes mode).
   - **Median cents off:** median of the absolute error. **Tendency:** sign of the median signed error. In Notes mode
     both are the length-weighted medians over the notes' verdicts.
   - **Old Takes:** a row without `tolerance_cents` (saved before #41) is re-scored as it was scored: ±25 cents, no
-    Timing window, Notes mode frame by frame (`take_store.row_config`), so its numbers stay as saved. A replay and a
+    Timing window, Notes mode frame by frame (`take_store.row_config`), so its numbers stay as saved. A row with
+    `timing_window_s` but no `timing_shift_ms` (saved by #41) re-scores with the per-frame window. A replay and a
     re-score always use the Take's saved scoring, never the slider.
   - **Steadiness:** SD in cents around the note's own median, over held notes longer than about 0.5 s, with the first
     and last ~120 ms or 15% removed (Dai & Dixon 2019).

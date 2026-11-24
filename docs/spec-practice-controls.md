@@ -107,7 +107,11 @@ Melody Takes get a practice transport:
   at the next Pass.
 - **Sections:** stored per song in the library as name, start and end (original-tempo seconds). Unnamed marks are
   kept until replaced.
-- **Per-song player settings:** Guide vocal on/off, the two volumes, and the last Speed and Section, stored per song.
+- **Per-song player settings:** Guide vocal on/off, the two volumes, and the last Speed and Section, stored per song;
+  also the Loop tick (QA #32: the Section comes back looping, `loop` in player.json).
+- **Start while a Speed is prepared (QA #32):** Start waits, saying "Starting when 70 % is ready… (Start again to
+  cancel)", and the Take starts by itself when the stems are ready. A Speed change meanwhile waits for the new one; a
+  failed stretch, a replay, or no song any more gives up and says so.
 - **Take record:** new summary-table columns `guide_vocal` (on, off or mixed when it changed mid-Take), `guide_gain`,
   `speed_pct`, `section_name` (or start–end), `pass_index`. Existing rows read as guide off, speed 100, no section.
 - **UI:** a timeline widget with the reference melody, playhead, click to seek, drag for a Section and handles for its
@@ -167,12 +171,15 @@ target is the note's semitone (the Octave shift applies as before), so live scor
 bars and reproduce the numbers; the segmentation is cached per song and length.
 
 **Per-note scoring (#41).** Each note is scored once, on the voice's median pitch over it: the frames scored against
-that note's bar (after the ±100 ms Timing window), their cents from the bar, the median of those; green within the
+that note's bar (at the Phrase's timing shift, see spec.md Timing window), their cents from the bar, the median of those; green within the
 Tolerance, yellow to twice it. % in tune is the share of the sung notes (notes with at least one scored frame), by note
 length, that are green; median cents off and tendency are the length-weighted medians of the notes' cents. Steadiness
 and Range still come from the frames. On screen the dots still colour per frame against the bar; once the song is past
 a note's end plus the Timing window its bar turns the verdict's colour (live and on replay, `take_engine.NoteTally`;
-the summary uses the same verdicts). Takes record `note_scoring` (`note`); Notes rows saved before #41 re-score frame by
+the summary uses the same verdicts). The verdict is final once given (QA #45): the window closes notes at the song time
+of the newest frame it has tallied, not of the song heard now (the tracker's frames lag it), and frames of a closed
+note that still arrive are left out. Live and summary use the same verdicts unless the live Phrase's Octave or timing
+shift, estimated on the first seconds, differs from the whole Phrase's. Takes record `note_scoring` (`note`); Notes rows saved before #41 re-score frame by
 frame. Limit, measured on TULIP 0:30–2:00 with the perfect singer: a bar that merges several sung notes is judged on the
 voice's median against the most-held semitone, so the ceiling falls with the Minimum note length (the original's own
 median is within ±25 c of its bar for 86 % of the note length at 0.1 s, 75 % at 0.5 s, 49 % at 1.5 s, 34 % per Phrase).
@@ -196,7 +203,8 @@ extra, through audio-separator) and stores `<song>/tempo.json` = `{bpm, beats_s}
 reference line; for songs imported before, the window does it the first time Count-in is chosen, on a worker thread
 (`ui/tempo_find.py`, ~20 s the first time). Without librosa, or when it fails, the tempo is unknown: the BPM box shows
 "? BPM", the label says "tempo unknown — set BPM (Lead-in until then)", and the Lead-in plays until a BPM is typed.
-The BPM box (editable, 30-300) and the Beats-per-bar box (1-12, default 4) sit beside the choice. A BPM Simone types
+BPM 0 or an empty box means "use the detected tempo" (QA #48): with one known the box goes back to it, says so, and
+forgets his own BPM. A typed BPM under 30 becomes 30 and the label says the range. The BPM box (editable, 30-300) and the Beats-per-bar box (1-12, default 4) sit beside the choice. A BPM Simone types
 is kept in `player.json` (`bpm`; None = the detected one) together with `between` and `beats_per_bar`, and wins over
 the detected tempo. Changing any of the three during a loop restarts it at Pass 1 with the new Count-in.
 Detected for tulip-limited: 143.55 BPM.

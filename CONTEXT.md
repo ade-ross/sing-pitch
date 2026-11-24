@@ -82,7 +82,7 @@ How far from the target pitch still counts as in tune, set by Simone (±10 to ±
 _Avoid_: range, threshold, leniency
 
 **Timing window**:
-The ±100 ms around each moment of the voice within which the closest reference pitch is used, so being slightly early or late is not scored as out of tune.
+How early or late (up to ±100 ms) a Phrase may be sung and still be scored on pitch alone: each Phrase gets one timing shift, chosen with its Octave shift, and every moment of it is scored strictly at that shift.
 _Avoid_: timing tolerance, slack
 
 **Count-in**:
