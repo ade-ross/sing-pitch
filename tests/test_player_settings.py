@@ -134,3 +134,31 @@ def test_a_damaged_between_passes_setting_reads_as_the_defaults(tmp_path):
     (song.dir / "player.json").write_text(json.dumps({"between": "drums", "bpm": -1, "beats_per_bar": 99}))
     saved = Library(tmp_path).player_settings(song.id).load()
     assert (saved.between, saved.bpm, saved.beats_per_bar) == ("lead-in", None, 4)
+
+
+def test_the_loop_tick_is_remembered_per_song_and_comes_back_with_its_section(qtbot, tmp_path):
+    """QA #32: after a restart the Section came back but the Loop box was off."""
+    win, a, b = two_song_window(qtbot, tmp_path)
+    win.song_box.setCurrentIndex(win.song_box.findData(a.id))
+    win.timeline.section_marked.emit(0.5, 1.5)
+    win.section_name_edit.setText("Hook")
+    win.save_section_button.click()
+    win.loop_box.setChecked(True)
+    assert Library(tmp_path).player_settings(a.id).load().loop is True
+    win.song_box.setCurrentIndex(win.song_box.findData(b.id))
+    assert not win.loop_box.isChecked()                          # Song B never looped
+    assert Library(tmp_path).player_settings(a.id).load().loop is True      # untouched by the switch
+
+    other = window(qtbot, tmp_path, quiet(1.0), stretcher=CountingStretcher())      # a new window, a new run
+    other.reference_box.setCurrentText("Melody")
+    other.song_box.setCurrentIndex(other.song_box.findData(a.id))
+    assert other.section_box.currentText() == "Hook" and other.loop_box.isChecked()
+    assert other._loop() is not None and other.loop_label.text() == "Loop · on"
+    other.loop_box.setChecked(False)
+    assert Library(tmp_path).player_settings(a.id).load().loop is False
+
+
+def test_a_damaged_loop_setting_reads_as_off(tmp_path):
+    song = library_song(tmp_path, reference_line(NOTES))
+    (song.dir / "player.json").write_text(json.dumps({"loop": "yes"}))
+    assert Library(tmp_path).player_settings(song.id).load().loop is False

@@ -896,6 +896,7 @@ class MainWindow(QtWidgets.QWidget):
             self.summary_label.setText("Mark a Section on the timeline first (drag across it), then loop it.")
             return
         self._last_pass_pct = None
+        self._remember_player_settings()
         self._apply_loop()
         self._show_loop()
 
@@ -976,7 +977,8 @@ class MainWindow(QtWidgets.QWidget):
                                       self.section_box.currentData(), self.octave_box.currentData(),
                                       self.notes_box.isChecked(), self._note_length(),
                                       between="count-in" if self.between_box.currentText() == "Count-in" else "lead-in",
-                                      bpm=self._own_bpm(), beats_per_bar=self.beats_box.value()))
+                                      bpm=self._own_bpm(), beats_per_bar=self.beats_box.value(),
+                                      loop=self.loop_box.isChecked()))
 
     def _restore_player_settings(self, *_) -> None:
         """Put the chosen song's saved Guide vocal, volumes and Speed on the controls (the Section is picked by
@@ -1014,6 +1016,7 @@ class MainWindow(QtWidgets.QWidget):
         for widget in (self.between_box, self.beats_box):
             widget.blockSignals(False)
         self._set_bpm_box(saved.bpm if saved.bpm is not None else self._detected_bpm)
+        self._set_loop_box(saved.loop)               # unticked again by reload_sections when its Section is gone
         self._find_tempo()
         self._show_tempo()
 
