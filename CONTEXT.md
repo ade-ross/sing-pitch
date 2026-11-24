@@ -77,6 +77,18 @@ Faint copies of the reference melody one octave above and below the active Octav
 How far from the Reference a moment is: green within ±25 cents, yellow 25–50, red beyond ±50.
 _Avoid_: zone, tolerance
 
+**Tolerance**:
+How far from the target pitch still counts as in tune, set by Simone (±10 to ±100 cents, default ±25); it sets the green Band, and yellow reaches twice the Tolerance.
+_Avoid_: range, threshold, leniency
+
+**Timing window**:
+The ±100 ms around each moment of the voice within which the closest reference pitch is used, so being slightly early or late is not scored as out of tune.
+_Avoid_: timing tolerance, slack
+
+**Count-in**:
+The between-Pass option where one bar of metronome clicks at the song's tempo (scaled by Speed) plays before the Section starts, in place of the Lead-in.
+_Avoid_: pre-roll, click track
+
 **In tune**:
 In the green Band. "% in tune" is the share of sung time in green.
 

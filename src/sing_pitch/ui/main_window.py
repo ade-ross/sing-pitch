@@ -227,6 +227,8 @@ class MainWindow(QtWidgets.QWidget):
         self.overwrite_button.clicked.connect(self.overwrite_section)
         self.cancel_overwrite_button = QtWidgets.QPushButton("Cancel")
         self.cancel_overwrite_button.clicked.connect(self._forget_overwrite)
+        self.overwrite_button.setToolTip("Replace the saved Section with this name by the current mark.")
+        self.cancel_overwrite_button.setToolTip("Keep the saved Section; change the name to save the mark separately.")
         self.overwrite_button.hide()
         self.cancel_overwrite_button.hide()
         self.section_name_edit.textChanged.connect(self._forget_overwrite)
