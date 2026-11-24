@@ -200,6 +200,7 @@ class Transport:
                                                             # the last one wins
         self._loop_requests: deque[Loop | None] = deque()   # set_loop calls (any thread); the last one wins
         self._loop: Loop | None = None      # in effect (render thread only)
+        self._loop_next: Loop | None = None  # the same Section with a new Lead-in / Count-in, from the next wrap
         self._pass = 0                      # index of the Pass playing (render thread only)
         self._block0 = 0                    # output frame of the block being rendered (render thread only)
         self._wrap_out_s = 0.0              # output time of the Pass boundary being applied (render thread only)
@@ -238,7 +239,8 @@ class Transport:
         """Loop this Section from the next block (None = stop looping, the song runs on). Turning it on goes straight
         to start - Lead-in (or the Count-in) as Pass 1; at the Section end the song wraps back there and the next Pass
         starts. A seek outside the Section ends the loop; one inside it starts the next Pass there (Pass 1, when the
-        seek comes in the same block as the set_loop). A Section shorter than MIN_LOOP_S or past the song end is first fitted into the song
+        seek comes in the same block as the set_loop). The same Section (start, end, name) with only another Lead-in or
+        Count-in does not restart: the Pass playing goes on and the next one starts with the new Lead-in or Count-in. A Section shorter than MIN_LOOP_S or past the song end is first fitted into the song
         (loop shows the fitted one), so every Pass renders some song."""
         self._loop_requests.append(None if loop is None else self._fit_loop(loop))
 
@@ -248,6 +250,11 @@ class Transport:
             return self._loop_requests[-1]
         except IndexError:
             return self._loop
+
+    @staticmethod
+    def _same_section(a: Loop | None, b: Loop | None) -> bool:
+        """Both loop the same Section: only what plays between Passes may differ."""
+        return a is not None and b is not None and (a.start_s, a.end_s, a.name) == (b.start_s, b.end_s, b.name)
 
     def _fit_loop(self, loop: Loop) -> Loop | None:
         """The loop clamped to the song and at least MIN_LOOP_S long (the whole song if it is shorter); None for a
@@ -336,7 +343,8 @@ class Transport:
             while self._seeks:
                 target, keep = self._seeks.popleft()
             asked = self._loop_after_requests() if self._loop_requests else None
-            if keep and asked is not None and asked.start_s <= target < asked.end_s:
+            if keep and asked is not None and asked.start_s <= target < asked.end_s \
+                    and not self._same_section(asked, self._loop):
                 self._loop_requests.clear()      # a loop asked for, and a seek inside it: its Pass 1 starts there
                 events += self._end_loop(0)
                 self._loop, self._pass = asked, 0
@@ -353,10 +361,13 @@ class Transport:
             loop = None
             while self._loop_requests:
                 loop = self._loop_requests.popleft()
-            events += self._end_loop(0)
-            if loop is not None:
-                self._loop, self._pass = loop, 0
-                events += self._wrap(0)
+            if self._same_section(loop, self._loop):
+                self._loop_next = loop           # only Between Passes changed: from the next wrap, the Passes go on
+            else:
+                events += self._end_loop(0)
+                if loop is not None:
+                    self._loop, self._pass = loop, 0
+                    events += self._wrap(0)
         end = self._gains
         if end != self._applied:
             events += (TransportEvent("gains_changed", self.log.rendered_s, self.position_s, gains=end),)
@@ -413,7 +424,7 @@ class Transport:
         if self._loop is None:
             return ()
         out_s, song_s = (self._block0 + pos) / self._sr, self.position_s
-        index, loop, self._loop, self._pass = self._pass, self._loop, None, 0
+        index, loop, self._loop, self._pass, self._loop_next = self._pass, self._loop, None, 0, None
         return (TransportEvent("pass_ended", out_s, song_s, index, loop),
                 TransportEvent("loop_ended", out_s, song_s, loop=loop))
 
@@ -434,6 +445,8 @@ class Transport:
         if self._pass:
             events = (TransportEvent("pass_ended", out_s, self.position_s, self._pass, self._loop),)
         self._pass += 1
+        if self._loop_next is not None:
+            self._loop, self._loop_next = self._loop_next, None
         self._n = round(self._loop.pass_start_s * self._sr)
         if self._speed_requests:
             events += self._apply_speed()

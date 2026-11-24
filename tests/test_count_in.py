@@ -112,3 +112,22 @@ def test_a_speed_change_asked_with_the_loop_crossfades_against_silence_in_the_co
     audio = np.concatenate([tr.render(256).audio for _ in range(round(1.5 * SR / 256))])
     assert np.abs(audio).max() < 1.0                # only clicks: the song (>= 1000) is never heard
 
+
+
+def test_changing_only_the_between_passes_keeps_the_pass_and_applies_at_the_next_wrap():
+    """Review 5 #5: the tempo found (or the BPM, beats or Between changed) while looping used to restart at Pass 1.
+    The same Section with another Lead-in or Count-in goes on; the next Pass starts with the new one."""
+    tr = Transport(ramp_song(10.0), sample_rate=SR)
+    tr.set_loop(Loop(*SECTION, "Verse"))                           # Lead-in: Passes start at 1.0
+    events = []
+    for _ in range(round(5.5 * SR / 256)):                         # into Pass 2
+        events += tr.render(256).events
+    assert tr.pass_index == 2
+    tr.set_loop(Loop(*SECTION, "Verse", count_in=TEMPO))
+    b = tr.render(256)
+    assert [e.kind for e in b.events] == [] and tr.pass_index == 2
+    started = []
+    for _ in range(round(4.0 * SR / 256)):
+        started += [e for e in tr.render(256).events if e.kind == "pass_started"]
+    assert started[0].pass_index == 3 and started[0].loop.count_in == TEMPO
+    assert np.isclose(started[0].song_t, SECTION[0] - TEMPO.bar_s)

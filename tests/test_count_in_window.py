@@ -154,3 +154,23 @@ def test_the_loop_box_and_the_loop_never_disagree_after_a_click_inside_the_widen
         qa.wait(0.3)
         looping = w._backing.transport.loop is not None
         assert looping and w.loop_box.isChecked() and w._backing.loop is not None and w.timeline.looping
+
+
+def test_editing_the_bpm_while_looping_keeps_the_pass_count(tmp_path):
+    """Review 5 #5: a new BPM (or the tempo detected) while looping swaps the Count-in at the next wrap, and the
+    Passes go on counting."""
+    with echo_singer(tmp_path) as qa:
+        w = qa.window
+        qa.mark_section(4.0, 6.0)
+        qa.set("between_box", "Count-in")
+        qa.start_take()
+        qa.set("loop_box", True)
+        qa.wait_until(lambda: w.loop_label.text().startswith("Loop · Pass 2"), timeout_s=20)
+        qa.set("bpm_box", 90.0)
+        qa.wait(0.2)
+        assert w.loop_label.text().startswith("Loop · Pass 2")
+        qa.wait_until(lambda: w.loop_label.text().startswith("Loop · Pass 3"), timeout_s=20)
+        assert w._backing.transport.loop.count_in.bpm == 90.0
+        qa.stop_take()
+        passes = [r["pass_index"] for r in qa.takes() if r["pass_index"]]
+    assert "1" in passes and passes.count("1") == 1                 # never back at Pass 1
