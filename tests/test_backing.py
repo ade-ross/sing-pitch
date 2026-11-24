@@ -72,3 +72,60 @@ def test_stop_closes_the_stream_and_is_safe_twice():
     player.stop()
     player.stop()
     assert streams[0].closed
+
+
+def player_with_vocal(backing, vocal, **kw):
+    streams = []
+
+    def factory(**k):
+        streams.append(FakeStream(**k))
+        return streams[-1]
+
+    return BackingPlayer(backing, 48000, vocal=vocal, stream_factory=factory, sample_rate=48000, **kw), streams
+
+
+def test_the_guide_vocal_is_off_by_default_and_the_backing_plays_as_before():
+    player, streams = player_with_vocal(np.full((3000, 2), 0.5, np.float32), np.full(3000, 0.25, np.float32))
+    player.start()
+    assert np.allclose(streams[0].pull(1024), 0.5)
+
+
+def test_gains_mix_the_vocal_stem_linearly_with_the_backing():
+    player, streams = player_with_vocal(np.full((8192, 2), 0.5, np.float32), np.full((8192, 2), 0.25, np.float32))
+    player.set_gains(backing=0.5, vocal=2.0)
+    player.start()                                        # start() takes the gains as they are: no ramp from silence
+    assert np.allclose(streams[0].pull(1024), 0.5 * 0.5 + 0.25 * 2.0)
+
+
+def test_a_gain_change_while_playing_applies_from_the_next_block_with_a_ramp_and_no_step():
+    player, streams = player_with_vocal(np.zeros((8192, 2), np.float32), np.ones((8192, 2), np.float32))
+    player.set_gains(backing=1.0, vocal=0.0)
+    player.start()
+    assert np.allclose(streams[0].pull(1024), 0.0)
+    player.set_gains(backing=1.0, vocal=1.0)              # guide vocal switched on mid-Take
+    ramp = streams[0].pull(1024)[:, 0]
+    assert ramp[0] < 0.01 and abs(ramp[-1] - 1.0) < 1e-6 and np.max(np.diff(ramp)) < 0.002
+    assert np.allclose(streams[0].pull(1024), 1.0)
+    player.set_gains(backing=1.0, vocal=0.0)              # and off again: silent after one block
+    down = streams[0].pull(1024)[:, 0]
+    assert abs(down[0] - 1.0) < 0.002 and down[-1] == 0.0
+    assert np.allclose(streams[0].pull(1024), 0.0)
+
+
+def test_the_vocal_stem_is_mono_resampled_and_aligned_to_the_backing():
+    player, streams = player_with_vocal(np.zeros((2000, 2), np.float32), np.ones(1000, np.float32))
+    player.set_gains(backing=1.0, vocal=1.0)
+    player.start()
+    out = streams[0].pull(2048)
+    assert np.allclose(out[:1000], 1.0) and np.allclose(out[1000:], 0.0)       # shorter vocal pads with silence
+    assert np.allclose(out[:, 0], out[:, 1])
+
+
+def test_from_file_loads_the_vocal_stem_beside_the_backing(tmp_path):
+    sf.write(str(tmp_path / "backing.wav"), np.full((4800, 2), 0.5, np.float32), 48000)
+    sf.write(str(tmp_path / "vocals.wav"), np.full(4800, 0.25, np.float32), 48000)
+    player = BackingPlayer.from_file(tmp_path / "backing.wav", tmp_path / "vocals.wav", stream_factory=FakeStream,
+                                     sample_rate=48000)
+    player.set_gains(backing=1.0, vocal=1.0)
+    player.start()
+    assert np.allclose(player._stream.pull(1024), 0.75)

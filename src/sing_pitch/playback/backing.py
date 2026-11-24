@@ -8,6 +8,7 @@ import numpy as np
 
 from ..config import SAMPLE_RATE
 from .drone import _open_output
+from .mix import Gains, mix_block
 
 
 def load_audio(path: Path, sample_rate: int = SAMPLE_RATE) -> np.ndarray:
@@ -24,21 +25,36 @@ def load_audio(path: Path, sample_rate: int = SAMPLE_RATE) -> np.ndarray:
     return np.ascontiguousarray(audio)
 
 
+def _stereo_at(audio: np.ndarray, rate: int, sample_rate: int) -> np.ndarray:
+    audio = np.asarray(audio, dtype=np.float32)
+    if audio.ndim == 1:
+        audio = np.stack([audio, audio], axis=1)
+    if rate != sample_rate:
+        import soxr
+
+        audio = soxr.resample(audio, rate, sample_rate).astype(np.float32)
+    return audio
+
+
 class BackingPlayer:
     """Plays a stereo array once from the start, silence after the end. position_s() = song time rendered so far
-    (read from any thread). The constant gap between rendered and heard is part of the calibrated latency."""
+    (read from any thread). The constant gap between rendered and heard is part of the calibrated latency.
+
+    With a `vocal` stem (the Guide vocal) the output is backing * g_b + vocal * g_v. set_gains() may be called from
+    any thread at any time: the callback ramps from the last block's gains to the new ones within the next block.
+    Defaults: Backing 1.0, Guide vocal 0.0 (off)."""
 
     def __init__(self, audio: np.ndarray, audio_rate: int = SAMPLE_RATE,
                  stream_factory: Callable[..., object] = _open_output, sample_rate: int = SAMPLE_RATE,
-                 device: int | None = None):
-        audio = np.asarray(audio, dtype=np.float32)
-        if audio.ndim == 1:
-            audio = np.stack([audio, audio], axis=1)
-        if audio_rate != sample_rate:
-            import soxr
-
-            audio = soxr.resample(audio, audio_rate, sample_rate).astype(np.float32)
+                 device: int | None = None, vocal: np.ndarray | None = None, vocal_rate: int | None = None):
+        audio = _stereo_at(audio, audio_rate, sample_rate)
+        if vocal is not None:
+            vocal = _stereo_at(vocal, vocal_rate or audio_rate, sample_rate)
+            vocal = np.ascontiguousarray(np.pad(vocal, ((0, max(0, len(audio) - len(vocal))), (0, 0)))[: len(audio)])
         self._audio = audio
+        self._vocal = vocal
+        self._gains: Gains = (1.0, 0.0)          # target, written by set_gains (one atomic assignment)
+        self._applied: Gains = self._gains       # what the last block ended on; callback thread only
         self._sr = sample_rate
         self._factory = stream_factory
         self._device = device
@@ -46,9 +62,14 @@ class BackingPlayer:
         self._stream = None
 
     @classmethod
-    def from_file(cls, path: Path, **kwargs) -> BackingPlayer:
+    def from_file(cls, path: Path, vocals: Path | None = None, **kwargs) -> BackingPlayer:
         rate = kwargs.get("sample_rate", SAMPLE_RATE)
-        return cls(load_audio(Path(path), rate), rate, **kwargs)
+        vocal = None if vocals is None else load_audio(Path(vocals), rate)
+        return cls(load_audio(Path(path), rate), rate, vocal=vocal, vocal_rate=rate, **kwargs)
+
+    def set_gains(self, backing: float, vocal: float) -> None:
+        """Linear amplitude gains. Heard from the next block on, ramped within it (no click)."""
+        self._gains = (float(backing), float(vocal))
 
     @property
     def duration_s(self) -> float:
@@ -64,11 +85,13 @@ class BackingPlayer:
     def start(self) -> None:
         self.stop()
         self._n = 0
+        self._applied = self._gains                # no ramp up from nothing at the very start
 
         def callback(outdata, frames, time_info, status):
-            chunk = self._audio[self._n : self._n + frames]
-            outdata[: len(chunk)] = chunk
-            outdata[len(chunk):] = 0.0
+            end = self._gains
+            vocal = None if self._vocal is None else self._vocal[self._n : self._n + frames]
+            outdata[:] = mix_block(self._audio[self._n : self._n + frames], vocal, self._applied, end, frames)
+            self._applied = end
             self._n += frames
 
         kwargs = dict(channels=2, samplerate=self._sr, blocksize=1024, dtype="float32", callback=callback)

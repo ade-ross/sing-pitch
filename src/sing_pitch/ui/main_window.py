@@ -64,6 +64,15 @@ def describe(record: TakeRecord) -> str:
     )
 
 
+def _volume_slider(tip: str) -> QtWidgets.QSlider:
+    slider = QtWidgets.QSlider(QtCore.Qt.Horizontal)
+    slider.setRange(0, 100)
+    slider.setValue(100)
+    slider.setMaximumWidth(140)
+    slider.setToolTip(tip)
+    return slider
+
+
 class MainWindow(QtWidgets.QWidget):
     def __init__(
         self,
@@ -71,7 +80,7 @@ class MainWindow(QtWidgets.QWidget):
         home: Path | None = None,
         input_factory: Callable[[int], AudioInput] = SoundDeviceInput,
         drone_factory: Callable[[], DronePlayer] = DronePlayer,
-        backing_factory: Callable[[Path], Playback] = BackingPlayer.from_file,
+        backing_factory: Callable[[Path, Path], Playback] = BackingPlayer.from_file,
         output_info: Callable[[], tuple[str | None, OutputKind]] = _default_output,
         calibration_player_factory: Callable | None = None,
     ):
@@ -108,6 +117,11 @@ class MainWindow(QtWidgets.QWidget):
         self.drone_box = QtWidgets.QCheckBox("Drone")
         self.song_box = QtWidgets.QComboBox()
         self.reload_songs()
+        self.guide_box = QtWidgets.QCheckBox("Guide vocal")
+        self.guide_slider = _volume_slider("Guide vocal volume")
+        self.backing_slider = _volume_slider("Backing volume")
+        for w in (self.guide_box, self.guide_slider, self.backing_slider):
+            (w.toggled if w is self.guide_box else w.valueChanged).connect(self._apply_gains)
         self.calibrate_button = QtWidgets.QPushButton("Calibrate latency")
         self.calibrate_button.clicked.connect(self.start_calibration)
         self.output_label = QtWidgets.QLabel("")
@@ -151,11 +165,16 @@ class MainWindow(QtWidgets.QWidget):
             top.addWidget(w)
         top.addStretch(1)
         top.addWidget(self.note_label)
+        mix = QtWidgets.QHBoxLayout()
+        for w in (self.guide_box, self.guide_slider, QtWidgets.QLabel("Backing"), self.backing_slider):
+            mix.addWidget(w)
+        mix.addStretch(1)
         warn = QtWidgets.QHBoxLayout()
         warn.addWidget(self.output_label, 1)
         warn.addWidget(self.headphones_button)
         layout = QtWidgets.QVBoxLayout(self)
         layout.addLayout(top)
+        layout.addLayout(mix)
         layout.addLayout(warn)
         layout.addWidget(self.plot_widget, 1)
         layout.addWidget(self.summary_label)
@@ -189,7 +208,18 @@ class MainWindow(QtWidgets.QWidget):
         self.key_box.setEnabled(is_key)
         self.drone_box.setEnabled(is_key)
         self.song_box.setEnabled(is_melody)
+        for w in (self.guide_box, self.guide_slider, self.backing_slider):
+            w.setEnabled(is_melody)
         self.update_output_warning()
+
+    def _apply_gains(self, *_) -> None:
+        """Slider and checkbox changes reach the player at once, also mid-Take; it ramps them within a block."""
+        if self._backing is not None:
+            self._backing.set_gains(*self._gains())
+
+    def _gains(self) -> tuple[float, float]:
+        """(Backing, Guide vocal) linear gains from the controls; the Guide vocal is 0 while its box is unticked."""
+        return self.backing_slider.value() / 100, self.guide_slider.value() / 100 if self.guide_box.isChecked() else 0.0
 
     def update_output_warning(self) -> None:
         """Melody only: warn when the Backing would go to speakers (it leaks into the mic)."""
@@ -297,7 +327,9 @@ class MainWindow(QtWidgets.QWidget):
             if reference.kind == "melody":
                 output, _ = self._output_info()
                 latency = self._settings.latency_for(output)
-                backing = self._backing_factory(Library(self._home).get(reference.song_id).backing_path)
+                song = Library(self._home).get(reference.song_id)
+                backing = self._backing_factory(song.backing_path, song.vocals_path)
+                backing.set_gains(*self._gains())
             self._runner = LiveRunner(self._input_factory(index), self._tracker, reference, self._home,
                                       backing=backing, latency_s=latency)
             self._runner.start()
