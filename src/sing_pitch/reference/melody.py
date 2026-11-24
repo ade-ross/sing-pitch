@@ -88,6 +88,11 @@ class Melody:
     def from_song(cls, song) -> Melody:
         return cls(song.load_reference(), song.id)
 
+    @property
+    def end_s(self) -> float | None:
+        """Where the line (the vocal stem, as long as the song) ends in song time; None for an empty line."""
+        return float(self._t[-1] + self._tolerance / 1.5) if len(self._t) else None
+
     def unscored_spans(self) -> list[tuple[float, float]]:
         """(start, end) in song time of every Unscored stretch: what the live and replay views grey out."""
         if not len(self._t):

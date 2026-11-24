@@ -219,3 +219,25 @@ def test_setting_the_speed_that_plays_with_the_same_arrays_changes_nothing():
     assert tr.render(100).events == ()
     tr.set_speed(0.5, stretched(song, 0.5))            # new arrays: a real change
     assert [e.kind for e in tr.render(100).events] == ["speed_changed"]
+
+
+def test_the_tail_is_one_consistent_reading_even_when_a_stretch_is_appended_while_it_is_read():
+    from sing_pitch.playback.transport import SongTimeLog
+
+    class AppendsWhenMeasured(list):
+        """The audio thread appends a stretch right after the reader measures the log."""
+        armed = False
+
+        def __len__(self):
+            n = super().__len__()
+            if self.armed:
+                self.armed = False
+                log.append(500, 10.0 * SR, 2.0)
+            return n
+
+    log = SongTimeLog(SR)
+    log.append(1000, 0.0, 0.5)                      # 1 s of output at half Speed: song 0 -> 0.5 s
+    log._start = AppendsWhenMeasured(log._start)
+    log._start.armed = True
+    end_s, song_s, rate = log.tail()
+    assert (end_s, rate) == (1.0, 0.5) and abs(song_s - 0.5) < 1e-9      # all from the first stretch

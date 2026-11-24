@@ -76,6 +76,28 @@ def test_a_saved_takes_clock_follows_its_song_times_across_a_jump_and_a_pause():
     assert abs(clock(-0.2) - 9.8) < 1e-9 and abs(clock(4.5) - (3.0 + 1.9 + 0.6)) < 1e-9      # beyond the ends: slope 1
 
 
+def test_a_saved_takes_clock_goes_on_at_its_last_rate_and_ends_with_the_song():
+    t = [i * 0.1 for i in range(40)]                        # a Take at Speed 50 %: the song advances 0.5 s per second
+    clock = SampledClock(t, [0.5 * x + 10.0 for x in t], song_end_s=13.0)
+    assert abs(clock(3.9) - 11.95) < 1e-9
+    assert abs(clock(5.9) - 12.95) < 1e-9                   # beyond the last frame at 0.5, not 1.0
+    assert clock(6.1) is None                               # past the song end: no song
+    assert abs(SampledClock(t, [0.5 * x + 10.0 for x in t])(5.9) - 12.95) < 1e-9      # rate also read without an end
+
+
+def test_a_projection_from_past_the_loop_end_restarts_at_the_pass_start():
+    from sing_pitch.take_engine import project_song_time
+
+    # the song stands at 10.2 s, just past the Section end (10 s): the wrap is due, so it goes on from the Lead-in (6 s)
+    got = project_song_time(np.array([0.0, 1.0, 5.0]), 10.2, 1.0, loop_end_s=10.0, loop_pass_start_s=6.0)
+    assert np.allclose(got, [6.0, 7.0, 7.0])           # 5 s on: one 4 s Pass later, 1 s into the next
+
+
+def test_a_melody_knows_where_its_line_ends():
+    line = reference_line([(0, 1.0)])
+    assert abs(Melody(line, "x").end_s - 1.0) < 0.011
+
+
 def drag(timeline, from_s, to_s, steps=5):
     """A real left-button drag across the strip (press, moves with the button held, release)."""
     from PySide6 import QtGui, QtWidgets

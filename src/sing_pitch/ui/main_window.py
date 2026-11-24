@@ -240,7 +240,8 @@ class MainWindow(QtWidgets.QWidget):
         self.note_length_label = QtWidgets.QLabel(format_length(player_settings.DEFAULT_MIN_NOTE_S))
         self.note_length_label.setMinimumWidth(70)
         self.notes_box.toggled.connect(self._notes_changed)                # bound methods: a lambda keeps self alive
-        self.note_length_slider.valueChanged.connect(self._notes_changed)
+        self.note_length_slider.valueChanged.connect(self._note_length_moved)
+        self.note_length_slider.sliderReleased.connect(self._notes_changed)
         self.speed_box.valueChanged.connect(self._speed_changed)
         self.speed_box.valueChanged.connect(self._remember_player_settings)
         for key, slot in (("+", self.speed_up), ("=", self.speed_up), ("-", self.speed_down)):
@@ -571,6 +572,12 @@ class MainWindow(QtWidgets.QWidget):
         """The Melody as the controls want it: its Notes-mode bars when Notes is ticked."""
         return melody.notes(self._note_length()) if self.notes_box.isChecked() else melody
 
+    def _note_length_moved(self, *_) -> None:
+        """The slider moved: the label follows at once; while it is being dragged the song is reloaded only on release."""
+        self.note_length_label.setText(format_length(self._note_length()))
+        if not self.note_length_slider.isSliderDown():
+            self._notes_changed()
+
     def _notes_changed(self, *_) -> None:
         self.note_length_label.setText(format_length(self._note_length()))
         self._remember_player_settings()
@@ -719,7 +726,8 @@ class MainWindow(QtWidgets.QWidget):
             scores = replay_scores(frames, reference, song_times=song_times, octave=saved_octave(self._home, take_id))
             replay = Replay(scores)
             octave_k = next((s.octave for s in scores if s.band is not None), 0)      # where the Take was scored
-            replay_clock = SampledClock([f.t for f in frames], saved_clock_times(self._home, take_id))   # + Lead-in
+            replay_clock = SampledClock([f.t for f in frames], saved_clock_times(self._home, take_id),   # + Lead-in
+                                        getattr(reference, "end_s", None))
         except Exception as exc:
             self.summary_label.setText(f"Cannot replay Take {take_id}: {exc}")
             return
@@ -731,6 +739,8 @@ class MainWindow(QtWidgets.QWidget):
         self._set_now(0.0)
         self.replay_button.setText("Stop replay")
         self.button.setEnabled(False)
+        for w in (self.notes_box, self.note_length_slider):       # a replay is drawn as it was scored: they change nothing
+            w.setEnabled(False)
         self.summary_label.setText(f"Replaying Take {take_id}...")
         self._timer.start(TICK_MS)
 
@@ -739,6 +749,9 @@ class MainWindow(QtWidgets.QWidget):
         self._replay = self._replay_clock = None
         self.replay_button.setText("Replay last Take")
         self.button.setEnabled(True)
+        for w in (self.notes_box, self.note_length_slider):
+            w.setEnabled(self.reference_box.currentText() == "Melody")
+        self._preview_song()                                      # the Timeline as the controls now want it
 
     def open_history(self) -> None:
         from .history_view import HistoryView
@@ -982,20 +995,25 @@ class MainWindow(QtWidgets.QWidget):
 
     def _note_bars(self, x: np.ndarray, song: np.ndarray, midi: np.ndarray, octaves: np.ndarray,
                    shift: np.ndarray) -> np.ndarray:
-        """Notes mode: the sampled notes as separate bars (the line blanked just before each new note, or a new Octave
-        shift, so neighbouring bars never join into a staircase), each labelled with its note name at its start, the
-        left edge of the plot for a bar already under way."""
+        """Notes mode: the sampled notes as separate bars (the line blanked just before a bar that follows a different
+        note, or a new Octave shift, so neighbouring bars never join into a staircase), each labelled with its note
+        name at its start, the left edge of the plot for a bar already under way. An Unscored dip inside a note breaks
+        its line but neither trims the bar before it nor labels the note again after it."""
         index = self._melody.note_index_at(song)
         index[~np.isfinite(midi)] = -1
         midi = midi.copy()
-        new = np.flatnonzero((index[1:] != index[:-1]) | (octaves[1:] != octaves[:-1])) + 1
-        for i in new:
-            if index[i - 1] >= 0:
+        on = np.flatnonzero(index >= 0)                  # the samples that belong to a note
+        if not len(on):
+            self._show_labels([])
+            return midi
+        different = (index[on][1:] != index[on][:-1]) | (octaves[on][1:] != octaves[on][:-1])    # vs the previous note sample
+        for i, j in zip(on[1:][different], on[:-1][different]):
+            if i == j + 1:                               # bars side by side: break the line (not across a dip, already NaN)
                 midi[max(0, i - NOTE_GAP_SAMPLES):i] = np.nan
-        starts = np.concatenate([[0], new]) if len(index) else new
+        starts = np.concatenate([[on[0]], on[1:][different]])
         notes = self._melody.note_list
         labels = [(x[i], notes[index[i]].midi + shift[i], note_name(int(round(notes[index[i]].midi + shift[i]))))
-                  for i in starts if index[i] >= 0]
+                  for i in starts]
         self._show_labels(labels)
         return midi
 

@@ -106,11 +106,14 @@ class SongTimeLog:
     def tail(self) -> tuple[float, float | None, float] | None:
         """(output time, song time, rate) at the end of what has been rendered: where the song is going on from, and
         how fast (song seconds per output second). Song time None = paused there; None overall = nothing logged yet."""
+        frames = self._frames                   # read first: a stretch appended after this starts at or after it
         n = len(self._start)
         if n == 0:
             return None
-        end_s = self._frames / self.sample_rate
-        return end_s, self.song_time(end_s), self._rate[n - 1]
+        song0, rate, start = self._song0[n - 1], self._rate[n - 1], self._start[n - 1]      # one stretch, read once
+        frames = max(frames, start)
+        song = None if song0 is None else (song0 + (frames - start) * rate) / self.sample_rate
+        return frames / self.sample_rate, song, rate
 
     def song_time(self, output_s: float) -> float | None:
         """Song time (s) rendered at this output time; None while paused. Before the first stretch it extends the

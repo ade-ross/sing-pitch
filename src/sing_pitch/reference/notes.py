@@ -10,6 +10,7 @@ Unscored stretch inside a note stays unscored (only scored frames take the note'
 the slider) gives one note per Phrase."""
 from __future__ import annotations
 
+import heapq
 import math
 from dataclasses import dataclass
 
@@ -52,32 +53,62 @@ def _merge(a: dict[int, int], b: dict[int, int]) -> dict[int, int]:
 
 
 def _phrase_notes(semis: np.ndarray, min_frames: float) -> list[tuple[int, int, int]]:
-    """(first, last + 1, semitone) in positions of one Phrase's frame list."""
+    """(first, last + 1, semitone) in positions of one Phrase's frame list. Segments sit in a linked list and the
+    shortest is found with a heap (stale entries skipped), so a long Phrase of many short runs costs n log n."""
     edges = np.flatnonzero(np.diff(semis)) + 1
-    starts = np.concatenate([[0], edges])
-    ends = np.concatenate([edges, [len(semis)]])
-    segs = [[int(a), int(b), {int(semis[a]): int(b - a)}] for a, b in zip(starts, ends)]
+    starts = np.concatenate([[0], edges]).tolist()
+    ends = np.concatenate([edges, [len(semis)]]).tolist()
+    n = len(starts)
+    hist: list[dict[int, int]] = [{int(semis[a]): b - a} for a, b in zip(starts, ends)]
     if math.isinf(min_frames):
-        hist: dict[int, int] = {}
-        for s in segs:
-            hist = _merge(hist, s[2])
-        return [(0, len(semis), _mode(hist))]
-    while len(segs) > 1:
-        short = [i for i, s in enumerate(segs) if s[1] - s[0] < min_frames - _EPS]
-        if not short:
+        total: dict[int, int] = {}
+        for h in hist:
+            total = _merge(total, h)
+        return [(0, len(semis), _mode(total))]
+    mode = [_mode(h) for h in hist]
+    prev = list(range(-1, n - 1))
+    nxt = list(range(1, n + 1))
+    stamp = [0] * n
+    alive = n
+    heap = [(ends[i] - starts[i], starts[i], i, 0) for i in range(n)]
+    heapq.heapify(heap)
+
+    def join(lo: int, hi: int) -> None:           # hi (the next segment after lo) is absorbed into lo
+        nonlocal alive
+        ends[lo] = ends[hi]
+        hist[lo] = _merge(hist[lo], hist[hi])
+        mode[lo] = _mode(hist[lo])
+        stamp[hi] = -1
+        stamp[lo] += 1
+        nxt[lo] = nxt[hi]
+        if nxt[hi] < n:
+            prev[nxt[hi]] = lo
+        alive -= 1
+
+    while alive > 1 and heap:
+        length, _, i, version = heap[0]
+        if stamp[i] != version:
+            heapq.heappop(heap)
+            continue
+        if length >= min_frames - _EPS:
             break
-        i = min(short, key=lambda i: (segs[i][1] - segs[i][0], i))
-        me = _mode(segs[i][2])
-        options = [j for j in (i - 1, i + 1) if 0 <= j < len(segs)]
-        j = min(options, key=lambda j: (abs(_mode(segs[j][2]) - me), -(segs[j][1] - segs[j][0]), j))
+        heapq.heappop(heap)
+        left, right = prev[i], nxt[i]
+        options = [j for j in (left, right) if 0 <= j < n]
+        j = min(options, key=lambda j: (abs(mode[j] - mode[i]), -(ends[j] - starts[j]), j))   # left first on a tie
         lo, hi = min(i, j), max(i, j)
-        segs[lo] = [segs[lo][0], segs[hi][1], _merge(segs[lo][2], segs[hi][2])]
-        del segs[hi]
-        for k in (lo + 1, lo):      # a blip merged away: the held note on either side of it is one note again
-            if 0 < k < len(segs) and _mode(segs[k - 1][2]) == _mode(segs[k][2]):
-                segs[k - 1] = [segs[k - 1][0], segs[k][1], _merge(segs[k - 1][2], segs[k][2])]
-                del segs[k]
-    return [(a, b, _mode(h)) for a, b, h in segs]
+        join(lo, hi)
+        if nxt[lo] < n and mode[lo] == mode[nxt[lo]]:   # a blip merged away: the held note on either side of it is
+            join(lo, nxt[lo])                           # one note again
+        if prev[lo] >= 0 and mode[prev[lo]] == mode[lo]:
+            lo = prev[lo]
+            join(lo, nxt[lo])
+        heapq.heappush(heap, (ends[lo] - starts[lo], starts[lo], lo, stamp[lo]))
+    out, k = [], 0
+    while k < n:
+        out.append((starts[k], ends[k], mode[k]))
+        k = nxt[k]
+    return out
 
 
 def segment_notes(t, midi, scored, min_note_s: float, phrase_gap_s: float = PHRASE_GAP_S) -> list[Note]:
@@ -87,7 +118,7 @@ def segment_notes(t, midi, scored, min_note_s: float, phrase_gap_s: float = PHRA
     midi = np.asarray(midi, dtype=np.float64)
     ok = np.asarray(scored, dtype=bool) & np.isfinite(midi)
     hop = float(np.median(np.diff(t))) if len(t) > 1 else 0.01
-    min_frames = min_note_s / hop if math.isfinite(min_note_s) else math.inf
+    min_frames = round(min_note_s / hop) if math.isfinite(min_note_s) else math.inf     # whole frames, as scored_mask
     notes = []
     for idx in _phrases(t, ok, phrase_gap_s):
         semis = np.round(midi[idx]).astype(np.int64)
