@@ -177,6 +177,7 @@ class MainWindow(QtWidgets.QWidget):
         self._tempo_finder = TempoFinder(tempo_detector, self)
         self._tempo_finder.done.connect(self._tempo_found)
         self._detected_bpm: float | None = None      # the chosen song's tempo.json (None = not known yet)
+        self._bpm_note = ""                          # what the BPM box did with a typed value, for the tempo label
         self._settings = Settings.load(self._home)
         self._melody: Melody | None = None           # drawn beside the live line during Melody Takes and replays
         self._melody_latency = 0.0
@@ -287,7 +288,7 @@ class MainWindow(QtWidgets.QWidget):
         self.bpm_box.setSuffix(" BPM")
         self.bpm_box.setKeyboardTracking(False)            # one change when he has typed it, not one per digit
         self.bpm_box.setToolTip("The song's tempo for the Count-in, detected at import; type your own if it is wrong "
-                                "(remembered for this song)")
+                                "(30–300, remembered for this song); 0 or empty goes back to the detected tempo")
         self.bpm_box.editingFinished.connect(self.bpm_box.clearFocus)    # keys go back to the window
         self.beats_box = QtWidgets.QSpinBox()
         self.beats_box.setRange(*player_settings.BEATS_PER_BAR_RANGE)
@@ -829,9 +830,15 @@ class MainWindow(QtWidgets.QWidget):
     def _between_changed(self, *_) -> None:
         if self._replay is not None:                 # a replay shows its Take's settings: nothing reacts
             return
-        if 0 < self.bpm_box.value() < player_settings.BPM_RANGE[0]:      # a slip while typing: the slowest tempo
-            self.bpm_box.setValue(player_settings.BPM_RANGE[0])
+        low, high = player_settings.BPM_RANGE
+        bpm = self.bpm_box.value()
+        if 0 < bpm < low:                            # a slip while typing: the slowest tempo, and say why
+            self._bpm_note = f"BPM is {low:.0f}–{high:.0f}: {bpm:g} became {low:.0f}"
+            self.bpm_box.setValue(low)               # comes back here with the allowed value
             return
+        if bpm == 0 and self._detected_bpm is not None:      # 0 or empty: back to the detected tempo (QA #48)
+            self._set_bpm_box(self._detected_bpm)
+            self._bpm_note = f"0 or empty = the detected tempo ({self._detected_bpm:.1f} BPM)"
         self._find_tempo()
         self._remember_player_settings()
         self._show_tempo()
@@ -855,8 +862,9 @@ class MainWindow(QtWidgets.QWidget):
 
     def _show_tempo(self) -> None:
         song_id = self._speed_song()
+        note, self._bpm_note = self._bpm_note, ""    # what the BPM box just did with a typed value: said once
         if self.between_box.currentText() != "Count-in" or song_id is None or self.bpm_box.value() > 0:
-            self.tempo_label.setText("")
+            self.tempo_label.setText(note if self.between_box.currentText() == "Count-in" else "")
         elif self._tempo_finder.busy(song_id):
             self.tempo_label.setText("finding the tempo…")
         else:

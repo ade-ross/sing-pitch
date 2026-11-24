@@ -4,6 +4,8 @@ Section that keeps it looping. End to end on the QA driver with the echo singer 
 plays, so every Pass scores near 100 %)."""
 import json
 
+import pytest
+
 from audio import quiet
 from melody_helpers import library_song, reference_line
 from qa_helpers import NOTES, configure_latency, singing_song
@@ -90,6 +92,40 @@ def test_his_bpm_wins_over_the_detected_one_and_is_remembered_per_song(qtbot, tm
     again = melody_window(qtbot, tmp_path, FakeDetector())
     assert (again.between_box.currentText(), again.bpm_box.value(), again.beats_box.value()) == ("Count-in", 72.0, 7)
     assert load_tempo(Library(tmp_path).get(song.id).dir).bpm == 144.0     # the detected one is kept as it was
+
+
+def test_bpm_0_or_empty_means_the_detected_tempo_and_forgets_his_own(qtbot, tmp_path):
+    """QA #48: typing 0 (or emptying the box) said 'tempo unknown' and played the Lead-in though tempo.json had one."""
+    song = library_song(tmp_path, reference_line(LINE))
+    save_tempo(song.dir, Tempo(143.55))
+    win = melody_window(qtbot, tmp_path, FakeDetector())
+    win.timeline.section_marked.emit(0.5, 1.5)
+    win.loop_box.setChecked(True)
+    win.between_box.setCurrentText("Count-in")
+    win.bpm_box.setValue(72.0)
+    win.bpm_box.setValue(0.0)
+    assert win.bpm_box.value() == pytest.approx(143.55, abs=0.06)
+    assert win._loop().count_in == CountIn(win.bpm_box.value(), 4)
+    assert "detected tempo" in win.tempo_label.text() and "unknown" not in win.tempo_label.text()
+    assert json.loads((song.dir / "player.json").read_text())["bpm"] is None
+
+
+@pytest.mark.parametrize("typed, kept", [(10.0, 30.0), (29.9, 30.0)])
+def test_a_bpm_below_30_is_raised_to_30_and_says_the_range(qtbot, tmp_path, typed, kept):
+    song = library_song(tmp_path, reference_line(LINE))
+    save_tempo(song.dir, Tempo(120.0))
+    win = melody_window(qtbot, tmp_path, FakeDetector())
+    win.between_box.setCurrentText("Count-in")
+    win.bpm_box.setValue(typed)
+    assert win.bpm_box.value() == kept
+    assert "30" in win.tempo_label.text() and "300" in win.tempo_label.text()
+
+
+def test_the_bpm_box_cannot_go_above_300(qtbot, tmp_path):
+    library_song(tmp_path, reference_line(LINE))
+    win = melody_window(qtbot, tmp_path, FakeDetector())
+    win.bpm_box.setValue(500.0)
+    assert win.bpm_box.value() == 300.0
 
 
 # --- end to end --------------------------------------------------------------------------------------------------
