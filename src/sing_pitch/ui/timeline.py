@@ -5,7 +5,9 @@ and say where it was clicked" is left to the window: the widget only emits `seek
 
 Sections: a left-button drag across the strip marks one (a `pg.LinearRegionItem` whose edges are handles that can be
 dragged, and whose body can be dragged as a whole). A finished drag emits `section_marked(start, end)`, a finished
-edit of the shown Section `section_changed(start, end)`; the window decides what they mean (save, loop). A click outside the Section still seeks."""
+edit of the shown Section `section_changed(start, end)`; the window decides what they mean (save, loop). A click outside the Section still seeks.
+While the Section loops (`set_looping`) it is drawn brighter, with a solid edge. The playhead can be grabbed and dragged: it follows the
+mouse and the drop emits `seek_requested`."""
 from __future__ import annotations
 
 import weakref
@@ -20,6 +22,8 @@ LINE_STEP_S = 0.05          # the strip draws the reference at this resolution, 
 PLAYHEAD_PEN = pg.mkPen("#f5f5f5", width=2)
 LINE_PEN = pg.mkPen("#5dade2", width=2)
 SECTION_BRUSH = pg.mkBrush(241, 196, 15, 50)
+LOOPING_BRUSH = pg.mkBrush(241, 196, 15, 130)       # the Section while it repeats
+LOOPING_EDGE = pg.mkPen(241, 196, 15, width=3)
 MIN_SECTION_S = 0.2         # a shorter drag is a shaky click, not a Section
 
 
@@ -71,14 +75,17 @@ class Timeline(pg.GraphicsLayoutWidget):
         self.plot.hideAxis("left")
         self.plot.getAxis("bottom").setLabel("song time", units="s")
         self._line = self.plot.plot(pen=LINE_PEN, connect="finite")
-        self._playhead = pg.InfiniteLine(pos=0.0, angle=90, movable=False, pen=PLAYHEAD_PEN)
+        self._playhead = pg.InfiniteLine(pos=0.0, angle=90, movable=True, pen=PLAYHEAD_PEN)
         self._playhead.setZValue(10)
         self.plot.addItem(self._playhead)
+        self._playhead.sigPositionChangeFinished.connect(self._playhead_dropped)
         self.region = pg.LinearRegionItem((0.0, 1.0), brush=SECTION_BRUSH, swapMode="sort")
         self.region.setZValue(5)
         self.region.setVisible(False)
         self.plot.addItem(self.region)
         self.region.sigRegionChangeFinished.connect(self._region_edited)
+        self._looping = False
+        self._edge_pen = self.region.lines[0].pen        # the ordinary edge, to go back to
         self._duration = 1.0
         self.set_duration(1.0)
 
@@ -107,7 +114,25 @@ class Timeline(pg.GraphicsLayoutWidget):
         return self._duration
 
     def set_playhead(self, song_s: float) -> None:
-        self._playhead.setPos(song_s)
+        """Follow the song. Ignored while the playhead is being dragged, so the mouse is not fought."""
+        if not self._playhead.moving:
+            self._playhead.setPos(song_s)
+
+    def _playhead_dropped(self, *_) -> None:
+        self.seek_requested.emit(float(min(max(self._playhead.value(), 0.0), self._duration)))
+
+    @property
+    def looping(self) -> bool:
+        return self._looping
+
+    def set_looping(self, on: bool) -> None:
+        """Draw the Section as repeating (brighter, solid edge) or as an ordinary mark."""
+        if bool(on) == self._looping:
+            return
+        self._looping = bool(on)
+        self.region.setBrush(LOOPING_BRUSH if on else SECTION_BRUSH)
+        for line in self.region.lines:
+            line.setPen(LOOPING_EDGE if on else self._edge_pen)
 
     @property
     def playhead_s(self) -> float:

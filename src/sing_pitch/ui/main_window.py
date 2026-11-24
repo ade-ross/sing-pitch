@@ -210,6 +210,7 @@ class MainWindow(QtWidgets.QWidget):
         self.section_name_edit = QtWidgets.QLineEdit()
         self.section_name_edit.setPlaceholderText("Section name")
         self.section_name_edit.setMaximumWidth(140)
+        self.section_name_edit.returnPressed.connect(self.section_name_edit.clearFocus)   # keys go back to the window
         self.save_section_button = QtWidgets.QPushButton("Save")
         self.save_section_button.clicked.connect(self.save_section)
         self.rename_section_button = QtWidgets.QPushButton("Rename")
@@ -221,6 +222,16 @@ class MainWindow(QtWidgets.QWidget):
         self.loop_box.setToolTip(f"Repeat the Section; each Pass starts {LEAD_IN_S:.0f} s early (never scored) and is "
                                  "saved as its own Take")
         self.loop_box.toggled.connect(self._loop_toggled)
+        self.loop_label = QtWidgets.QLabel("")             # "Loop · Pass N · last 92 %" while the Section repeats
+        self.loop_label.setStyleSheet("color: #f1c40f; font-weight: bold;")
+        self.clear_button = QtWidgets.QPushButton("Clear")
+        self.clear_button.setToolTip("Esc. Remove the mark (or the shown Section) from the timeline and stop looping. "
+                                     "Saved Sections stay saved: Delete removes them.")
+        self.clear_button.clicked.connect(self.clear_section)
+        clear_key = QtGui.QShortcut(QtGui.QKeySequence(QtCore.Qt.Key_Escape), self)
+        clear_key.setContext(QtCore.Qt.WindowShortcut)
+        clear_key.activated.connect(self.clear_section)               # bound method: a lambda keeps self alive
+        self._last_pass_pct: float | None = None
         loop_key = QtGui.QShortcut(QtGui.QKeySequence(QtCore.Qt.Key_L), self)
         loop_key.setContext(QtCore.Qt.WindowShortcut)
         loop_key.activated.connect(self.toggle_loop)                  # bound method: a lambda keeps self alive
@@ -317,7 +328,8 @@ class MainWindow(QtWidgets.QWidget):
         mix.addStretch(1)
         sections = QtWidgets.QHBoxLayout()
         for w in (QtWidgets.QLabel("Section"), self.section_box, self.section_name_edit, self.save_section_button,
-                  self.rename_section_button, self.delete_section_button, self.loop_box):
+                  self.rename_section_button, self.delete_section_button, self.clear_button, self.loop_box,
+                  self.loop_label):
             sections.addWidget(w)
         sections.addStretch(1)
         warn = QtWidgets.QHBoxLayout()
@@ -420,7 +432,7 @@ class MainWindow(QtWidgets.QWidget):
         self._preview_song()
         for w in (self.guide_box, self.guide_slider, self.backing_slider, self.speed_box, self.octave_box,
                   self.notes_box, self.note_length_slider, self.section_box, self.section_name_edit, self.save_section_button, self.rename_section_button,
-                  self.delete_section_button, self.loop_box):
+                  self.delete_section_button, self.clear_button, self.loop_box):
             w.setEnabled(is_melody)
         self.update_output_warning()
         self._speed_changed()
@@ -447,6 +459,7 @@ class MainWindow(QtWidgets.QWidget):
         self._backing.seek(song_s)
         self._set_loop_box(False)
         self.timeline.set_playhead(song_s)
+        self._show_loop()
 
     # --- Sections and the loop ---------------------------------------------------------------------------------
     def _sections(self):
@@ -517,6 +530,7 @@ class MainWindow(QtWidgets.QWidget):
             self.summary_label.setText("Mark a Section on the timeline and type its name to save it.")
             return
         store.save(name, *span)
+        self.section_name_edit.clearFocus()          # else L, Space and the arrows keep typing into the field
         self.reload_sections(select=name)
 
     def rename_section(self) -> None:
@@ -529,6 +543,7 @@ class MainWindow(QtWidgets.QWidget):
         except ValueError as exc:
             self.summary_label.setText(f"Cannot rename: {exc}")
             return
+        self.section_name_edit.clearFocus()
         self.reload_sections(select=new)
 
     def delete_section(self) -> None:
@@ -537,6 +552,22 @@ class MainWindow(QtWidgets.QWidget):
             return
         store.delete(name)
         self.reload_sections()
+
+    def clear_section(self) -> None:
+        """Clear / Esc: no mark and no loop. The unsaved mark is forgotten and nothing is shown on the timeline; a saved
+        Section is only taken off the strip (still in the picker, Delete removes it). The song plays on."""
+        if not self.clear_button.isEnabled():
+            return
+        self._set_loop_box(False)
+        store = self._sections()
+        if store is not None:
+            store.set_mark(None)
+        if self.section_box.currentIndex() != 0:
+            self.section_box.setCurrentIndex(0)      # "unsaved mark" = nothing now; shows that and ends the loop
+        else:
+            self._section_chosen()
+        self._apply_loop()
+        self._show_loop()
 
     def toggle_loop(self) -> None:
         if self.loop_box.isEnabled():
@@ -554,7 +585,9 @@ class MainWindow(QtWidgets.QWidget):
             self._set_loop_box(False)
             self.summary_label.setText("Mark a Section on the timeline first (drag across it), then loop it.")
             return
+        self._last_pass_pct = None
         self._apply_loop()
+        self._show_loop()
 
     def _apply_loop(self) -> None:
         """The running Take's player loops what the controls show (a changed Section starts again at Pass 1)."""
@@ -562,6 +595,28 @@ class MainWindow(QtWidgets.QWidget):
             loop = self._loop()
             if loop != getattr(self._backing, "loop", None):
                 self._backing.set_loop(loop)
+        self._show_loop()
+
+    def _show_loop(self) -> None:
+        """Make the loop visible: the Section drawn brighter while it repeats, and "Loop · Pass N" (with the last Pass's
+        result) beside the controls. N is the Pass the Transport is playing, so it counts up on every wrap."""
+        backing = self._backing
+        if backing is not None:
+            looping = getattr(backing, "loop", None) is not None
+        else:
+            looping = self._loop() is not None
+        self.timeline.set_looping(looping)
+        if not looping:
+            self._last_pass_pct = None
+            self.loop_label.setText("")
+            return
+        if backing is None:
+            self.loop_label.setText("Loop · on")
+            return
+        text = f"Loop · Pass {max(1, getattr(backing, 'pass_index', 1))}"
+        if self._last_pass_pct is not None:
+            text += f" · last {self._last_pass_pct:.0f} %"
+        self.loop_label.setText(text)
 
     def _set_loop_box(self, on: bool) -> None:
         self.loop_box.blockSignals(True)
@@ -576,7 +631,9 @@ class MainWindow(QtWidgets.QWidget):
 
     def jump_by(self, seconds: float) -> None:
         if self._backing is not None:
-            self.seek(max(0.0, self._backing.position_s() + seconds))
+            pending = getattr(self._backing, "pending_seek_s", lambda: None)()   # a jump not yet applied: start from it
+            base = self._backing.position_s() if pending is None else pending
+            self.seek(max(0.0, base + seconds))
 
     def toggle_pause(self) -> None:
         """Space: pause or resume the song of the running Melody Take. The Take goes on; the plot stands still while
@@ -886,6 +943,8 @@ class MainWindow(QtWidgets.QWidget):
             self.summary_label.setText(f"Could not open the input or the output: {exc}")
             return
         self._backing, self._paused = backing, False
+        self._last_pass_pct = None
+        self._show_loop()
         self._show_melody(reference, latency, self._octave_setting().k)
         self.pause_button.setText("Pause")
         self.pause_button.setEnabled(backing is not None)
@@ -922,6 +981,7 @@ class MainWindow(QtWidgets.QWidget):
             record, error = None, str(exc)    # the text, not exc: a local holding it is a cycle via its traceback
         self._backing = None
         self._runner = None
+        self._show_loop()
         self.pause_button.setEnabled(False)
         self.button.setText("Start")
         self.device_box.setEnabled(True)
@@ -1051,7 +1111,7 @@ class MainWindow(QtWidgets.QWidget):
                 return song
             song_end, rate = backing.position_s(), getattr(backing, "speed", 1.0)
         x_end = fold.to_view(x_end)                      # paused: the fold the pause stands at
-        ahead = x > x_end
+        ahead = x >= x_end
         duration = getattr(backing, "duration_s", None)
         loop = getattr(backing, "loop", None)
         loop_end = None if loop is None else min(loop.end_s, duration if duration is not None else loop.end_s)
@@ -1140,6 +1200,8 @@ class MainWindow(QtWidgets.QWidget):
             for record in self._runner.drain_saved():
                 self.summary_label.setText(pass_text(record) if record.pass_index is not None
                                            else f"Jumped. Take saved: {describe(record)}")
+                if record.pass_index is not None and record.summary.n_scored:
+                    self._last_pass_pct = record.summary.pct_in_tune
             b = self._backing
             if b is not None and not drain_only and getattr(b, "finished", False) \
                     and b.position_s() > b.duration_s + END_GRACE_S:
@@ -1149,6 +1211,7 @@ class MainWindow(QtWidgets.QWidget):
             self.ingest(self._replay.advance(time.monotonic() - self._replay_started))
         if self._backing is not None and not drain_only:
             self.timeline.set_playhead(self._backing.position_s())
+            self._show_loop()
         if not self._t:
             return
         fold = self._fold()

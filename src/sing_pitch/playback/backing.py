@@ -142,6 +142,15 @@ class BackingPlayer:
     def position_s(self) -> float:
         return self._transport.position_s
 
+    def pending_seek_s(self) -> float | None:
+        """Where a seek not yet applied goes (None if none waits): the base for a second jump pressed at once."""
+        return self._transport.pending_seek_s
+
+    @property
+    def pass_index(self) -> int:
+        """The Pass of the loop playing (counts every wrap, 1 = the first); 0 without a loop."""
+        return self._transport.pass_index
+
     def start(self) -> None:
         """From the song start, with a fresh song-time log; the gains as they are now (no ramp up from silence)."""
         self.stop()

@@ -174,3 +174,19 @@ def test_a_seek_reports_which_loop_its_pass_ended():
     tr.seek(6.0)
     ended = next(e for e in tr.render(100).events if e.kind == "pass_ended")
     assert ended.loop == section and ended.pass_index == 1
+
+
+# --- the Pass counter (ticket #23) ----------------------------------------------------------------------------------
+
+def test_pass_index_counts_every_wrap_and_is_zero_without_a_loop():
+    tr = Transport(ramp_song(10000), sample_rate=SR)
+    assert tr.pass_index == 0
+    tr.set_loop(Loop(3.0, 4.0, lead_in_s=2.0))      # a Pass: song 1.0 .. 4.0 = 3000 frames
+    seen = []
+    for _ in range(20):
+        tr.render(500)
+        seen.append(tr.pass_index)
+    assert seen[0] == 1 and seen[-1] == 4 and seen == sorted(seen) and set(seen) == {1, 2, 3, 4}
+    tr.set_loop(None)
+    tr.render(100)
+    assert tr.pass_index == 0
