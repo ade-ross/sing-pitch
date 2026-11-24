@@ -101,3 +101,65 @@ def test_a_seek_clamps_to_the_song_and_works_while_paused():
     tr.play()
     block = tr.render(10)
     assert [e.kind for e in block.events] == ["resumed", "jumped"] and np.isclose(block.song_t[0], 1.0)
+
+
+# --- Speed: the Transport plays pre-stretched arrays and keeps song time in original seconds -----------------------
+
+def stretched(song: np.ndarray, speed: float) -> np.ndarray:
+    """Stand-in for the time-stretcher: frame j of the result is the song's frame j * speed."""
+    n = round(len(song) / speed)
+    return song[np.minimum(np.round(np.arange(n) * speed).astype(int), len(song) - 1)]
+
+
+def test_at_70_percent_song_time_advances_seven_tenths_of_a_second_per_output_second():
+    song = ramp_song(3000)
+    tr = Transport(song, sample_rate=SR)
+    tr.set_speed(0.7, stretched(song, 0.7))
+    a, b = tr.render(100), tr.render(100)
+    assert a.events == ()                                          # set before the first block: no change to report
+    assert np.allclose(b.song_t, (70 + np.arange(100) * 0.7) / SR)
+    assert np.allclose(b.audio[:, 0], np.round((100 + np.arange(100)) * 0.7))      # the stretched array, in order
+    assert np.isclose(tr.position_s, 0.14) and tr.speed == 0.7
+    assert np.isclose(tr.log.song_time(0.15), 0.105)
+    assert np.isclose(tr.duration_s, 3.0)                          # still the song's own length
+
+
+def test_a_speed_change_mid_song_continues_from_the_same_song_time_and_is_reported_as_an_event():
+    song = ramp_song(3000)
+    tr = Transport(song, sample_rate=SR)
+    tr.render(200)
+    tr.set_speed(0.5, stretched(song, 0.5))
+    block = tr.render(100)
+    (ev,) = block.events
+    assert (ev.kind, ev.output_s, ev.song_t) == ("speed_changed", 0.2, 0.2)
+    assert np.isclose(block.song_t[0], 0.2) and np.isclose(block.song_t[1] - block.song_t[0], 0.5 / SR)
+    assert np.isclose(tr.position_s, 0.25)
+    assert np.isclose(tr.log.song_time(0.1), 0.1) and np.isclose(tr.log.song_time(0.25), 0.225)
+    tr.set_speed(1.0, song)
+    after = tr.render(10)
+    assert np.isclose(after.audio[-1, 0], 259, atol=1) and np.isclose(tr.position_s, 0.26)
+
+
+def test_the_first_block_after_a_speed_change_crossfades_so_it_does_not_click():
+    song = np.ones((3000, 2), np.float32)
+    tr = Transport(song, sample_rate=SR)
+    tr.render(100)
+    tr.set_speed(0.5, np.full((6000, 2), -1.0, np.float32))        # a stretch whose content differs from the old one
+    blend = tr.render(100).audio[:, 0]
+    assert blend[0] > 0.9 and blend[-1] < -0.9 and np.all(np.diff(blend) < 0)
+    assert np.all(tr.render(100).audio == -1.0)
+
+
+def test_a_speed_change_while_paused_applies_without_sound_and_the_song_ends_by_its_own_length():
+    song = ramp_song(300)
+    tr = Transport(song, sample_rate=SR)
+    tr.render(50)
+    tr.pause()
+    tr.set_speed(0.5, stretched(song, 0.5))
+    tr.render(10)
+    tr.play()
+    tr.render(10)
+    assert not tr.finished and np.isclose(tr.position_s, 0.055)
+    while not tr.finished:
+        tr.render(100)
+    assert tr.position_s >= 0.3

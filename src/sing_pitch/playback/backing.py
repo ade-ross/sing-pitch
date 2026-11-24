@@ -43,8 +43,8 @@ class BackingPlayer:
     song_log = the Transport's song-time log (both read from any thread). The constant gap between rendered and
     heard is part of the calibrated latency.
 
-    With a `vocal` stem (the Guide vocal) the output is backing * g_b + vocal * g_v. set_gains(), play() and pause()
-    may be called from any thread at any time and act from the next block (gains ramp within it).
+    With a `vocal` stem (the Guide vocal) the output is backing * g_b + vocal * g_v. set_gains(), play(), pause() and
+    set_speed() may be called from any thread at any time and act from the next block (gains ramp within it).
     Defaults: Backing 1.0, Guide vocal 0.0 (off)."""
 
     def __init__(self, audio: np.ndarray, audio_rate: int = SAMPLE_RATE,
@@ -53,6 +53,7 @@ class BackingPlayer:
         self._audio = _stereo_at(audio, audio_rate, sample_rate)
         self._vocal = None if vocal is None else _stereo_at(vocal, vocal_rate or audio_rate, sample_rate)
         self._gains: Gains = (1.0, 0.0)
+        self._stretched: tuple[float, np.ndarray, np.ndarray | None] | None = None   # (speed, Backing, vocal) at Speed
         self._sr = sample_rate
         self._factory = stream_factory
         self._device = device
@@ -61,7 +62,10 @@ class BackingPlayer:
         self.on_event: Callable[[TransportEvent], None] | None = None   # runs in the audio callback: only hand over
 
     def _new_transport(self) -> Transport:
-        return Transport(self._audio, self._vocal, self._sr, gains=self._gains)
+        transport = Transport(self._audio, self._vocal, self._sr, gains=self._gains)
+        if self._stretched is not None:
+            transport.set_speed(*self._stretched)
+        return transport
 
     @classmethod
     def from_file(cls, path: Path, vocals: Path | None = None, **kwargs) -> BackingPlayer:
@@ -73,6 +77,21 @@ class BackingPlayer:
         """Linear amplitude gains. Heard from the next block on, ramped within it (no click)."""
         self._gains = (float(backing), float(vocal))
         self._transport.set_gains(*self._gains)
+
+    def set_speed(self, speed: float, backing: np.ndarray | None = None, vocal: np.ndarray | None = None) -> None:
+        """Speed (1.0 = original) with the Backing and the vocal stem already stretched to it (playback/stretch.py;
+        not needed at 1.0). Applies from the next block, crossfaded, and stays for the next start(). Any thread."""
+        if speed == 1.0:
+            self._stretched = None
+            self._transport.set_speed(1.0, self._audio, self._vocal)
+            return
+        self._stretched = (float(speed), _stereo_at(backing, self._sr, self._sr),
+                           None if vocal is None else _stereo_at(vocal, self._sr, self._sr))
+        self._transport.set_speed(*self._stretched)
+
+    @property
+    def speed(self) -> float:
+        return 1.0 if self._stretched is None else self._stretched[0]
 
     def play(self) -> None:
         self._transport.play()

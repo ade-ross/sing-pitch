@@ -4,9 +4,12 @@ is a thin shell that asks it for one block per callback.
 Two clocks meet here. The OUTPUT clock counts frames handed to the sound card (output_s = frames / rate); it runs
 on as long as the stream runs, paused or not. SONG time is the position in the song in original-tempo seconds. Each
 block reports the song time of every frame it rendered, and the SongTimeLog keeps the whole mapping so the Take
-engine can ask "which song time was playing at output time x?" after any pause (later: seek, loop, Speed).
+engine can ask "which song time was playing at output time x?" after any pause, seek or Speed change (later: loop).
 
-Control calls (play, pause, set_gains) may come from any thread: each is one attribute assignment, read by
+Speed: the Transport plays arrays that were stretched beforehand (playback/stretch.py). Song time stays in original
+seconds: at Speed s each output frame advances the song by s frames, and the log records rate = s.
+
+Control calls (play, pause, set_gains, seek, set_speed) may come from any thread: each is one attribute assignment, read by
 render() at the start of the next block."""
 from __future__ import annotations
 
@@ -23,8 +26,8 @@ from .mix import Gains, mix_block
 @dataclass(frozen=True)
 class TransportEvent:
     """Something that changed the song-time mapping, at the first output frame it applies to.
-    Kinds now: "paused", "resumed", "jumped" (a seek: song_t is where the song goes on). Later tickets add
-    "pass_started", "pass_ended", "speed_changed"."""
+    Kinds now: "paused", "resumed", "speed_changed", "jumped" (a seek: song_t is where the song goes on). Later
+    tickets add "pass_started", "pass_ended"."""
 
     kind: str
     output_s: float
@@ -92,10 +95,11 @@ class Transport:
 
     def __init__(self, backing: np.ndarray, vocal: np.ndarray | None = None, sample_rate: int = SAMPLE_RATE,
                  gains: Gains = (1.0, 0.0)):
-        self._audio = backing
-        if vocal is not None:
-            vocal = np.ascontiguousarray(np.pad(vocal, ((0, max(0, len(backing) - len(vocal))), (0, 0)))[: len(backing)])
-        self._vocal = vocal
+        self._audio = backing                # the array being played: the original, or the stretched one at `speed`
+        self._vocal = self._fit(vocal, backing)
+        self._song_frames = len(backing)     # the song's own length, whatever the Speed
+        self._speed = 1.0                    # song frames per output frame (render thread only)
+        self._pending_speed: tuple[float, np.ndarray, np.ndarray | None] | None = None   # (any thread)
         self._sr = sample_rate
         self._gains: Gains = gains          # target (any thread)
         self._applied: Gains = gains        # what the last block ended on (render thread only)
@@ -104,6 +108,12 @@ class Transport:
         self._n = 0                         # song frame of the next frame to render
         self._seeks: deque[float] = deque()  # requested song times (any thread); the last one wins
         self.log = SongTimeLog(sample_rate)
+
+    @staticmethod
+    def _fit(vocal: np.ndarray | None, backing: np.ndarray) -> np.ndarray | None:
+        if vocal is None:
+            return None
+        return np.ascontiguousarray(np.pad(vocal, ((0, max(0, len(backing) - len(vocal))), (0, 0)))[: len(backing)])
 
     # --- control, any thread -------------------------------------------------------------------------------
     def play(self) -> None:
@@ -116,8 +126,15 @@ class Transport:
         self._gains = (float(backing), float(vocal))
 
     def seek(self, song_s: float) -> None:
-        """Go on from this song time (clamped to the song), from the start of the next block, playing or paused."""
+        """Go on from this song time (original seconds, clamped to the song), from the start of the next block,
+        playing or paused, at whatever Speed is playing."""
         self._seeks.append(float(song_s))
+
+    def set_speed(self, speed: float, backing: np.ndarray, vocal: np.ndarray | None = None) -> None:
+        """Play from the next block at `speed` (1.0 = original), with the Backing and Guide vocal already stretched
+        to it. The song position is kept. The first block after the change crossfades from the old Speed's audio
+        and a "speed_changed" event is reported; before the first block it just sets the starting Speed."""
+        self._pending_speed = (float(speed), backing, self._fit(vocal, backing))
 
     # --- state -----------------------------------------------------------------------------------------------
     @property
@@ -130,12 +147,18 @@ class Transport:
         return self._n / self._sr
 
     @property
+    def speed(self) -> float:
+        """Speed of the block rendered last (1.0 = original); a set_speed shows from the next block."""
+        return self._speed
+
+    @property
     def duration_s(self) -> float:
-        return len(self._audio) / self._sr
+        """The song's length in original seconds."""
+        return self._song_frames / self._sr
 
     @property
     def finished(self) -> bool:
-        return self._n >= len(self._audio)
+        return self._n >= self._song_frames
 
     # --- the core --------------------------------------------------------------------------------------------
     def render(self, frames: int) -> Block:
@@ -144,21 +167,38 @@ class Transport:
             self._playing = self._want_playing
             kind = "resumed" if self._playing else "paused"
             events = (TransportEvent(kind, self.log.rendered_s, self.position_s),)
-        if self._seeks:
+        fade_from = None
+        if (swap := self._pending_speed) is not None:
+            self._pending_speed = None
+            if self.log.rendered_s > 0:
+                events += (TransportEvent("speed_changed", self.log.rendered_s, self.position_s),)
+                if self._playing:
+                    fade_from = (self._audio, self._vocal, self._speed)
+            self._speed, self._audio, self._vocal = swap
+        if self._seeks:   # after a Speed swap, so a crossfade in this block fades both Speeds at the new position
             target = None
             while self._seeks:
                 target = self._seeks.popleft()
-            self._n = min(max(0, round(target * self._sr)), len(self._audio))
+            self._n = min(max(0, round(target * self._sr)), self._song_frames)
             events += (TransportEvent("jumped", self.log.rendered_s, self.position_s),)
         end = self._gains
         if not self._playing:
             self.log.append(frames, None)
             self._applied = end
             return Block(np.zeros((frames, 2), np.float32), np.full(frames, np.nan), events)
-        n = self._n
-        vocal = None if self._vocal is None else self._vocal[n : n + frames]
-        audio = mix_block(self._audio[n : n + frames], vocal, self._applied, end, frames)
+        n, speed = self._n, self._speed
+        audio = self._mix(self._audio, self._vocal, n, speed, frames, end)
+        if fade_from is not None:
+            old = self._mix(*fade_from[:2], n, fade_from[2], frames, end)
+            weight = (np.arange(1, frames + 1, dtype=np.float32) / frames)[:, None]
+            audio = old * (1.0 - weight) + audio * weight
         self._applied = end
-        self.log.append(frames, float(n))
-        self._n = n + frames
-        return Block(audio, np.arange(n, n + frames) / self._sr, events)
+        self.log.append(frames, float(n), speed)
+        self._n = n + frames * speed
+        return Block(audio, (n + np.arange(frames) * speed) / self._sr, events)
+
+    def _mix(self, backing, vocal, n, speed, frames, end) -> np.ndarray:
+        """One block of the array pair starting at song frame n (index n / speed in the stretched arrays)."""
+        i = round(n / speed)
+        return mix_block(backing[i : i + frames], None if vocal is None else vocal[i : i + frames],
+                         self._applied, end, frames)

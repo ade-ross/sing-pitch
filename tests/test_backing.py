@@ -157,3 +157,34 @@ def test_the_player_seeks_and_hands_its_transport_events_to_the_listener():
     assert np.allclose(out[:, 0], song[24000:25024, 0])
     assert [(e.kind, e.output_s, e.song_t) for e in got] == [("jumped", 1024 / 48000, 0.5)]
     assert player.song_log.song_time(1500 / 48000) == 0.5 + 476 / 48000
+
+
+def stretched_twice(song):
+    """Stand-in for the stretcher at 50 %: every frame twice."""
+    return np.repeat(song, 2, axis=0)
+
+
+def test_the_player_plays_stretched_stems_at_the_speed_it_is_given_and_logs_song_time_in_original_seconds():
+    song = np.stack([np.arange(4096, dtype=np.float32) / 4096] * 2, axis=1)
+    player, streams = player_with(song)
+    player.set_speed(0.5, stretched_twice(song))               # before start: the Take starts at 50 %
+    assert player.speed == 0.5
+    player.start()
+    out = streams[0].pull(1024)
+    assert np.allclose(out, stretched_twice(song)[:1024])
+    assert player.position_s() == 512 / 48000 and player.duration_s == 4096 / 48000
+    assert abs(player.song_log.song_time(1000 / 48000) - 500 / 48000) < 1e-9
+
+
+def test_a_speed_set_while_playing_applies_from_the_next_block_and_the_next_start_keeps_it():
+    song = np.stack([np.arange(8192, dtype=np.float32) / 8192] * 2, axis=1)
+    vocal = np.ones((8192, 2), np.float32)
+    player, streams = player_with_vocal(song, vocal)
+    player.start()
+    streams[0].pull(1024)
+    player.set_speed(0.5, stretched_twice(song), stretched_twice(vocal))
+    streams[0].pull(1024)
+    assert player.speed == 0.5 and abs(player.position_s() - (1024 + 512) / 48000) < 1e-9
+    player.start()                                             # a new Take: song start, still at 50 %
+    streams[1].pull(1024)
+    assert abs(player.position_s() - 512 / 48000) < 1e-9
