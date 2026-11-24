@@ -115,6 +115,8 @@ class QA:
             w.setChecked(bool(value))
         elif isinstance(w, (QtWidgets.QSlider, QtWidgets.QSpinBox)):
             w.setValue(int(value))
+        elif isinstance(w, QtWidgets.QDoubleSpinBox):
+            w.setValue(float(value))
         elif isinstance(w, QtWidgets.QLineEdit):
             w.setText(str(value))
         else:

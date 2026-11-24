@@ -18,7 +18,8 @@ from ..live import LiveRunner, Playback
 from ..music import NOTE_NAMES, note_name
 from ..pitch import PitchTracker
 from ..playback import BackingPlayer, DronePlayer
-from ..playback.transport import LEAD_IN_S, Loop
+from ..library.tempo import TempoDetector, detect_tempo, load_tempo
+from ..playback.transport import LEAD_IN_S, CountIn, Loop
 from ..playback.stretch import SpeedCache, Stretcher, time_stretch
 from ..playback.outputs import OutputKind, default_output_name, headphone_warning, list_outputs, output_kind
 from ..reference import Band, Key, Melody, NearestNote, Reference
@@ -35,6 +36,7 @@ from .gui_gc import collect_on_the_ui_thread_only
 from .song_axis import SongTimeAxis
 from .timeline import Timeline
 from .speed_prep import SpeedPreparer
+from .tempo_find import TempoFinder
 
 PAST_S = 4.0          # the plot is centred on now: this much of the voice and the Reference behind the now-line...
 FUTURE_S = 4.0        # ...and this much of the Reference ahead of it
@@ -131,6 +133,7 @@ class MainWindow(QtWidgets.QWidget):
         input_devices: Callable[[], list[dict]] = list_inputs,
         output_devices: Callable[[], list[dict]] = list_outputs,
         output_kind_of: Callable[[str], OutputKind] = output_kind,
+        tempo_detector: TempoDetector = detect_tempo,
     ):
         super().__init__()
         collect_on_the_ui_thread_only()       # the worker threads below must never finalise a Qt object (gui_gc.py)
@@ -158,6 +161,9 @@ class MainWindow(QtWidgets.QWidget):
         self._speed_timer.setSingleShot(True)
         self._speed_timer.setInterval(SPEED_DEBOUNCE_MS)
         self._speed_timer.timeout.connect(self._prepare_speed)
+        self._tempo_finder = TempoFinder(tempo_detector, self)
+        self._tempo_finder.done.connect(self._tempo_found)
+        self._detected_bpm: float | None = None      # the chosen song's tempo.json (None = not known yet)
         self._settings = Settings.load(self._home)
         self._melody: Melody | None = None           # drawn beside the live line during Melody Takes and replays
         self._melody_latency = 0.0
@@ -238,9 +244,35 @@ class MainWindow(QtWidgets.QWidget):
         self.delete_section_button.clicked.connect(self.delete_section)
         self.loop_box = QtWidgets.QCheckBox("Loop (L)")
         self.loop_box.setFocusPolicy(QtCore.Qt.NoFocus)
-        self.loop_box.setToolTip(f"Repeat the Section; each Pass starts {LEAD_IN_S:.0f} s early (never scored) and is "
-                                 "saved as its own Take")
+        self.loop_box.setToolTip(f"Repeat the Section; each Pass starts with a {LEAD_IN_S:.0f} s Lead-in or a Count-in "
+                                 "(never scored) and is saved as its own Take. A click inside the Section jumps there "
+                                 "and keeps looping; a click outside ends the loop")
         self.loop_box.toggled.connect(self._loop_toggled)
+        self.between_box = QtWidgets.QComboBox()
+        self.between_box.addItems(["Lead-in", "Count-in"])
+        self.between_box.setFocusPolicy(QtCore.Qt.NoFocus)
+        self.between_box.setToolTip(f"Between Passes: Lead-in = {LEAD_IN_S:.0f} s of song before the Section; Count-in = "
+                                    "one bar of clicks at the song's tempo (scaled by Speed), the song silent, then "
+                                    "the song starts exactly at the Section start")
+        self.bpm_box = QtWidgets.QDoubleSpinBox()
+        self.bpm_box.setRange(0.0, player_settings.BPM_RANGE[1])
+        self.bpm_box.setDecimals(1)
+        self.bpm_box.setSpecialValueText("? BPM")          # 0 = tempo unknown
+        self.bpm_box.setSuffix(" BPM")
+        self.bpm_box.setKeyboardTracking(False)            # one change when he has typed it, not one per digit
+        self.bpm_box.setToolTip("The song's tempo for the Count-in, detected at import; type your own if it is wrong "
+                                "(remembered for this song)")
+        self.bpm_box.editingFinished.connect(self.bpm_box.clearFocus)    # keys go back to the window
+        self.beats_box = QtWidgets.QSpinBox()
+        self.beats_box.setRange(*player_settings.BEATS_PER_BAR_RANGE)
+        self.beats_box.setValue(4)
+        self.beats_box.setSuffix(" / bar")
+        self.beats_box.setFocusPolicy(QtCore.Qt.NoFocus)
+        self.beats_box.setToolTip("Beats per bar: the Count-in plays this many clicks, the first one accented")
+        self.tempo_label = QtWidgets.QLabel("")
+        self.tempo_label.setStyleSheet("color: #e67e22;")
+        for w in (self.between_box, self.bpm_box, self.beats_box):
+            (w.currentIndexChanged if w is self.between_box else w.valueChanged).connect(self._between_changed)
         self.loop_label = QtWidgets.QLabel("")             # "Loop · Pass N · last 92 %" while the Section repeats
         self.loop_label.setStyleSheet("color: #f1c40f; font-weight: bold;")
         self.clear_button = QtWidgets.QPushButton("Clear")
@@ -355,7 +387,7 @@ class MainWindow(QtWidgets.QWidget):
         sections = QtWidgets.QHBoxLayout()
         for w in (QtWidgets.QLabel("Section"), self.section_box, self.section_name_edit, self.save_section_button,
                   self.rename_section_button, self.delete_section_button, self.clear_button, self.loop_box,
-                  self.loop_label):
+                  self.between_box, self.bpm_box, self.beats_box, self.tempo_label, self.loop_label):
             sections.addWidget(w)
         sections.addWidget(self.overwrite_button)
         sections.addWidget(self.cancel_overwrite_button)
@@ -403,6 +435,7 @@ class MainWindow(QtWidgets.QWidget):
             self.summary_label: "The result of the last Take, or what the app is doing now",
             self.loop_label: "The Section's Pass count and the last Pass's % in tune while it repeats",
             self.speed_label: "Shown while a new Speed is being prepared",
+            self.tempo_label: "Why the Count-in cannot play yet (no tempo known for this song)",
             self.note_length_label: "The Minimum note length now set",
             self.output_label: "Why this Output may not suit a Melody Take",
             self.timeline: "The whole song: click to jump, drag to mark a Section, drag the white line to seek",
@@ -514,7 +547,7 @@ class MainWindow(QtWidgets.QWidget):
         self._preview_song()
         for w in (self.guide_box, self.guide_slider, self.backing_slider, self.speed_box, self.octave_box,
                   self.notes_box, self.note_length_slider, self.section_box, self.section_name_edit,
-                  self.clear_button):
+                  self.clear_button, self.between_box, self.bpm_box, self.beats_box):
             w.setEnabled(is_melody)
         self._sync_section_controls()
         self.update_output_warning()
@@ -535,12 +568,15 @@ class MainWindow(QtWidgets.QWidget):
         self.reload_sections()
 
     def seek(self, song_s: float) -> None:
-        """Jump the running Melody Take's song to song_s (a click on the Timeline). A jump closes the Take and ends a
-        loop."""
+        """Jump the running Melody Take's song to song_s (a click on the Timeline). A jump closes the Take. Inside a
+        looping Section it starts the next Pass there and the loop goes on; anywhere else it ends the loop."""
         if self._backing is None:
             return
+        loop = getattr(self._backing, "loop", None)
+        inside = loop is not None and loop.start_s <= song_s < loop.end_s     # inside: the next Pass starts there
         self._backing.seek(song_s)
-        self._set_loop_box(False)
+        if not inside:
+            self._set_loop_box(False)
         self.timeline.set_playhead(song_s)
         self._show_loop()
 
@@ -713,7 +749,63 @@ class MainWindow(QtWidgets.QWidget):
         span = self.timeline.section
         if not self.loop_box.isChecked() or span is None:
             return None
-        return Loop(span[0], span[1], self.section_box.currentData(), LEAD_IN_S)
+        return Loop(span[0], span[1], self.section_box.currentData(), LEAD_IN_S, self._count_in())
+
+    # --- Between Passes: Lead-in or Count-in --------------------------------------------------------------------------
+    def _count_in(self) -> CountIn | None:
+        """The Count-in the controls ask for; None = the Lead-in (chosen, or no tempo known yet)."""
+        bpm = self.bpm_box.value()
+        if self.between_box.currentText() != "Count-in" or bpm < player_settings.BPM_RANGE[0]:
+            return None
+        return CountIn(bpm, self.beats_box.value())
+
+    def _between_changed(self, *_) -> None:
+        if 0 < self.bpm_box.value() < player_settings.BPM_RANGE[0]:      # a slip while typing: the slowest tempo
+            self.bpm_box.setValue(player_settings.BPM_RANGE[0])
+            return
+        self._find_tempo()
+        self._remember_player_settings()
+        self._show_tempo()
+        self._apply_loop()
+
+    def _find_tempo(self) -> None:
+        """Count-in chosen for a song with no tempo.json (imported before #42): detect it now, off the UI thread."""
+        song_id = self._speed_song()
+        if song_id is None or self.between_box.currentText() != "Count-in" or self._detected_bpm is not None:
+            return
+        self._tempo_finder.find(song_id, Library(self._home).get(song_id).dir)
+
+    def _tempo_found(self, song_id: str, tempo) -> None:
+        if song_id != self._speed_song():
+            return
+        self._detected_bpm = None if tempo is None else tempo.bpm
+        if self._detected_bpm is not None and self.bpm_box.value() == 0:
+            self._set_bpm_box(self._detected_bpm)
+            self._apply_loop()
+        self._show_tempo()
+
+    def _show_tempo(self) -> None:
+        song_id = self._speed_song()
+        if self.between_box.currentText() != "Count-in" or song_id is None or self.bpm_box.value() > 0:
+            self.tempo_label.setText("")
+        elif self._tempo_finder.busy(song_id):
+            self.tempo_label.setText("finding the tempo…")
+        else:
+            self.tempo_label.setText("tempo unknown — set BPM (Lead-in until then)")
+
+    def _set_bpm_box(self, bpm: float | None) -> None:
+        self.bpm_box.blockSignals(True)
+        self.bpm_box.setValue(bpm or 0.0)
+        self.bpm_box.blockSignals(False)
+
+    def _own_bpm(self) -> float | None:
+        """The BPM to remember for the song: what he typed, None when it is the detected one (or none)."""
+        bpm = self.bpm_box.value()
+        if bpm < player_settings.BPM_RANGE[0]:
+            return None
+        if self._detected_bpm is not None and abs(bpm - self._detected_bpm) < 0.05:
+            return None
+        return bpm
 
     def _loop_toggled(self, on: bool) -> None:
         if on and self.timeline.section is None:
@@ -797,7 +889,9 @@ class MainWindow(QtWidgets.QWidget):
             store.save(PlayerSettings(self.guide_box.isChecked(), self.guide_slider.value() / 100,
                                       self.backing_slider.value() / 100, self.speed_box.value(),
                                       self.section_box.currentData(), self.octave_box.currentData(),
-                                      self.notes_box.isChecked(), self._note_length()))
+                                      self.notes_box.isChecked(), self._note_length(),
+                                      between="count-in" if self.between_box.currentText() == "Count-in" else "lead-in",
+                                      bpm=self._own_bpm(), beats_per_bar=self.beats_box.value()))
 
     def _restore_player_settings(self, *_) -> None:
         """Put the chosen song's saved Guide vocal, volumes and Speed on the controls (the Section is picked by
@@ -823,6 +917,17 @@ class MainWindow(QtWidgets.QWidget):
         for widget in (self.notes_box, self.note_length_slider):
             widget.blockSignals(False)
         self.note_length_label.setText(format_length(self._note_length()))
+        tempo = load_tempo(Library(self._home).get(self._speed_song()).dir)
+        self._detected_bpm = None if tempo is None else tempo.bpm
+        for widget in (self.between_box, self.beats_box):
+            widget.blockSignals(True)
+        self.between_box.setCurrentText("Count-in" if saved.between == "count-in" else "Lead-in")
+        self.beats_box.setValue(saved.beats_per_bar)
+        for widget in (self.between_box, self.beats_box):
+            widget.blockSignals(False)
+        self._set_bpm_box(saved.bpm if saved.bpm is not None else self._detected_bpm)
+        self._find_tempo()
+        self._show_tempo()
 
     # --- Notes mode -------------------------------------------------------------------------------------------------
     def _note_length(self) -> float:
