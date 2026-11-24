@@ -9,10 +9,17 @@ from typing import Protocol
 import numpy as np
 
 from .audio_input import AudioInput
-from .pitch import PitchTracker
+from .pitch import PitchFrame, PitchTracker
 from .reference import Reference
 from .take_engine import FrameScore, LogClock, SongClock, TakeEngine, TakeRecord
 from .take_store import save_take
+
+FRAME_S = 0.016              # one tracker frame
+MIN_TAKE_SCORED_S = 3.0      # a Take closed by a jump with less scored singing than this is discarded
+
+
+def _too_short(record: TakeRecord) -> bool:
+    return record.summary.n_scored * FRAME_S < MIN_TAKE_SCORED_S
 
 
 class Playback(Protocol):
@@ -27,6 +34,8 @@ class Playback(Protocol):
 
     def stop(self) -> None: ...
 
+    on_event: object             # settable: called from the audio thread with each TransportEvent
+
     def set_gains(self, backing: float, vocal: float) -> None: ...
 
 
@@ -34,11 +43,14 @@ class LiveTake:
     """One Take, fed chunk by chunk. Drive from ONE thread. song_clock: see TakeEngine."""
 
     def __init__(self, tracker: PitchTracker, reference: Reference, sample_rate: int,
-                 song_clock: SongClock | None = None):
+                 song_clock: SongClock | None = None, reset_tracker: bool = True):
+        """reset_tracker False: a Take that goes on from the previous one's audio (after a jump), so the tracker keeps
+        its state and its frame times."""
         self._tracker = tracker
         self._engine = TakeEngine(reference, song_clock=song_clock)
         self._sample_rate = sample_rate
-        tracker.reset()
+        if reset_tracker:
+            tracker.reset()
 
     @property
     def song_clock(self) -> SongClock:
@@ -50,6 +62,14 @@ class LiveTake:
 
     def feed(self, chunk: np.ndarray) -> list[FrameScore]:
         return self._engine.push(self._tracker.push(chunk, self._sample_rate))
+
+    def push_frames(self, frames: list[PitchFrame]) -> list[FrameScore]:
+        """Frames the tracker already made (the runner splits them between Takes)."""
+        return self._engine.push(frames)
+
+    def close(self) -> TakeRecord:
+        """End this Take here, leaving the tracker alone."""
+        return self._engine.stop()
 
     def finish(self) -> TakeRecord:
         self._engine.push(self._tracker.flush())
@@ -63,7 +83,13 @@ class LiveRunner:
     Melody Takes pass the Backing player and the calibrated loop latency. The Backing starts first; at the first
     mic chunk the runner reads how much output the Backing had rendered when the input clock was at 0, and from then
     on a voice frame at input time t is scored against the song time the Backing's song-time log shows at output
-    time t - latency_s (a LogClock), so pauses (later seeks, loops, Speed) keep the sync."""
+    time t - latency_s (a LogClock), so pauses and seeks (later loops, Speed) keep the sync.
+
+    A jump (the Backing's "jumped" event) closes the current Take and opens the next one: voice frames before the
+    jump's input time (event output time + the clock's offset) belong to the old Take, the rest to the new one. A Take
+    closed that way with less than MIN_TAKE_SCORED_S of scored singing is discarded; the others are saved at once
+    and listed by drain_saved(). On stop() the last Take is saved too, unless it is that short and an earlier Take of
+    the run was saved (a run always leaves at least one Take)."""
 
     def __init__(self, source: AudioInput, tracker: PitchTracker, reference: Reference, home: Path,
                  backing: Playback | None = None, latency_s: float = 0.0):
@@ -76,16 +102,21 @@ class LiveRunner:
         self._chunks: queue.SimpleQueue = queue.SimpleQueue()
         self._scores: queue.SimpleQueue = queue.SimpleQueue()
         self._take: LiveTake | None = None
+        self._cuts: list[float] = []              # input times of jumps not yet reached by the frames (worker only)
+        self._saved: list[TakeRecord] = []        # Takes saved so far in this run (worker, then stop())
+        self._saved_news: queue.SimpleQueue = queue.SimpleQueue()
         self._thread: threading.Thread | None = None
         self._error: Exception | None = None      # what killed the worker, if anything
 
     def start(self) -> None:
         """Open the Backing and the input, then start the worker: a Start that fails leaves no thread behind."""
         self._error = None
+        self._cuts, self._saved = [], []
         self._take = LiveTake(self._tracker, self._reference, self._source.sample_rate)
         if self._backing is None:
             on_chunk = self._chunks.put
         else:
+            self._backing.on_event = self._on_event
             try:
                 self._backing.start()
             except Exception:
@@ -112,6 +143,10 @@ class LiveRunner:
         self._thread = threading.Thread(target=self._work, name="sing-pitch-tracker", daemon=True)
         self._thread.start()          # chunks that arrived meanwhile wait in the queue
 
+    def _on_event(self, event) -> None:       # audio thread: only hand over, in order with the chunks
+        if event.kind == "jumped":
+            self._chunks.put(("jump", event.output_s))
+
     @staticmethod
     def _quietly(cleanup) -> None:
         try:
@@ -124,12 +159,56 @@ class LiveRunner:
             if self._error is not None:       # crashed earlier: keep emptying the queue until stop() ends us
                 continue
             try:
-                if isinstance(chunk, tuple):            # ("align", clock): set before the first frame is scored
-                    self._take.song_clock = chunk[1]
+                if isinstance(chunk, tuple):
+                    self._control(*chunk)
                 else:
-                    self._scores.put(self._take.feed(chunk))
+                    self._scores.put(self._route(self._tracker.push(chunk, self._source.sample_rate)))
             except Exception as exc:
                 self._error = exc
+
+    def _control(self, kind: str, value) -> None:
+        if kind == "align":             # ("align", clock): set before the first frame is scored
+            self._take.song_clock = value
+        elif kind == "jump":            # ("jump", output_s): a jump before the clock exists has no Take to close
+            if isinstance(self._take.song_clock, LogClock):
+                self._cuts.append(value + self._take.song_clock.offset_s)
+
+    def _route(self, frames: list[PitchFrame]) -> list[FrameScore]:
+        """Tracker frames to the current Take; at each pending jump the Take is closed and the next one opened."""
+        scores: list[FrameScore] = []
+        while self._cuts and frames:
+            first_after = next((i for i, f in enumerate(frames) if f.t >= self._cuts[0]), None)
+            if first_after is None:
+                break
+            scores += self._take.push_frames(frames[:first_after])
+            frames = frames[first_after:]
+            self._cuts.pop(0)
+            self._next_take()
+        return scores + self._take.push_frames(frames)
+
+    def _next_take(self) -> None:
+        old, clock = self._take, self._take.song_clock
+        record = old.close()
+        if not _too_short(record):
+            saved = save_take(self._home, record)
+            self._saved.append(saved)
+            self._saved_news.put(saved)
+        self._take = LiveTake(self._tracker, self._reference, self._source.sample_rate, song_clock=clock,
+                              reset_tracker=False)
+
+    def drain_saved(self) -> list[TakeRecord]:
+        """Takes saved at a jump since the last call (the last Take of the run comes from stop())."""
+        out: list[TakeRecord] = []
+        while True:
+            try:
+                out.append(self._saved_news.get_nowait())
+            except queue.Empty:
+                return out
+
+    @property
+    def song_clock(self) -> SongClock | None:
+        """Voice time -> song time of the running Take (the same clock across jumps)."""
+        return None if self._take is None else self._take.song_clock
 
     @property
     def latency_s(self) -> float | None:
@@ -156,4 +235,7 @@ class LiveRunner:
         self._thread.join()
         if self._error is not None:
             raise self._error
-        return save_take(self._home, self._take.finish())
+        record = self._take.finish()
+        if self._saved and _too_short(record):
+            return self._saved[-1]
+        return save_take(self._home, record)

@@ -1,0 +1,76 @@
+"""The Timeline widget alone: the melody drawn over the whole song, a playhead, a click gives the song time."""
+import numpy as np
+import pytest
+from melody_helpers import reference_line, with_confidence
+from PySide6 import QtCore
+
+from sing_pitch.reference import Melody
+from sing_pitch.take_engine import SampledClock
+
+NOTES = [(-900, 0.6), (-500, 0.6), (-200, 0.8)]     # 2.0 s
+
+
+def pixel_of(timeline, song_s):
+    """Where in the widget the strip shows song time song_s (the plot area's mapping, not the widget's own)."""
+    vb = timeline.plot.vb
+    scene = vb.mapViewToScene(QtCore.QPointF(song_s, sum(vb.viewRange()[1]) / 2))
+    return timeline.mapFromScene(scene)
+
+
+@pytest.fixture
+def timeline(qtbot):
+    from sing_pitch.ui.timeline import Timeline
+
+    t = Timeline()
+    qtbot.addWidget(t)
+    t.resize(800, 90)
+    t.show()
+    qtbot.waitExposed(t)
+    return t
+
+
+def test_it_draws_the_whole_melody_and_a_playhead_that_moves(timeline):
+    timeline.set_melody(Melody(reference_line(NOTES), "x"), duration_s=4.0)
+    x, y = timeline._line.getData()
+    assert timeline.duration_s == 4.0 and x[0] == 0.0 and abs(x[-1] - 1.95) < 0.06      # thinned, whole song
+    assert abs(np.nanmin(y) - 60) < 0.01 and abs(np.nanmax(y) - 67) < 0.01
+    timeline.set_playhead(1.5)
+    assert timeline.playhead_s == 1.5
+
+
+def test_a_click_asks_for_the_song_time_under_the_mouse(qtbot, timeline):
+    timeline.set_melody(Melody(reference_line(NOTES), "x"), duration_s=4.0)
+    with qtbot.waitSignal(timeline.seek_requested, timeout=1000) as got:
+        qtbot.mouseClick(timeline.viewport(), QtCore.Qt.LeftButton, pos=pixel_of(timeline, 3.0))
+    assert abs(got.args[0] - 3.0) < 0.1
+    with qtbot.waitSignal(timeline.seek_requested, timeout=1000) as got:
+        qtbot.mouseClick(timeline.viewport(), QtCore.Qt.LeftButton, pos=pixel_of(timeline, 0.5))
+    assert abs(got.args[0] - 0.5) < 0.1
+
+
+def test_a_region_item_can_sit_on_the_strip_without_stealing_clicks_elsewhere(qtbot, timeline):
+    """The hook for Sections (#13): a draggable region added to timeline.plot, a click outside it still seeks."""
+    import pyqtgraph as pg
+
+    timeline.set_melody(Melody(reference_line(NOTES), "x"), duration_s=4.0)
+    region = pg.LinearRegionItem((1.0, 1.5))
+    timeline.plot.addItem(region)
+    with qtbot.waitSignal(timeline.seek_requested, timeout=1000) as got:
+        qtbot.mouseClick(timeline.viewport(), QtCore.Qt.LeftButton, pos=pixel_of(timeline, 3.5))
+    assert abs(got.args[0] - 3.5) < 0.1
+    assert region.getRegion() == (1.0, 1.5)
+
+
+def test_the_melody_can_be_sampled_at_any_song_times_for_drawing_on_a_clock():
+    line = with_confidence(reference_line([(0, 0.6), (100, 0.6), (200, 0.6)]), 0.6, 1.2, 0.05)
+    midi, unscored = Melody(line, "x").sample(np.array([-1.0, 0.3, 0.9, 1.5, 2.5, np.nan]))
+    assert np.isnan(midi[[0, 2, 4, 5]]).all() and abs(midi[1] - 69.0) < 1e-6 and abs(midi[3] - 71.0) < 0.01
+    assert list(unscored) == [False, False, True, False, False, False]      # only inside the unreliable stretch
+
+
+def test_a_saved_takes_clock_follows_its_song_times_across_a_jump_and_a_pause():
+    t = [i * 0.1 for i in range(40)]
+    song = [10.0 + x if x < 1.0 else None if x < 2.0 else 3.0 + (x - 2.0) for x in t]
+    clock = SampledClock(t, song)
+    assert abs(clock(0.5) - 10.5) < 1e-9 and clock(1.5) is None and abs(clock(3.0) - 4.0) < 1e-9
+    assert abs(clock(-0.2) - 9.8) < 1e-9 and abs(clock(4.5) - (3.0 + 1.9 + 0.6)) < 1e-9      # beyond the ends: slope 1

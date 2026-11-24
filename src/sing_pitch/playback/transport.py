@@ -11,6 +11,7 @@ render() at the start of the next block."""
 from __future__ import annotations
 
 import bisect
+from collections import deque
 from dataclasses import dataclass
 
 import numpy as np
@@ -22,7 +23,8 @@ from .mix import Gains, mix_block
 @dataclass(frozen=True)
 class TransportEvent:
     """Something that changed the song-time mapping, at the first output frame it applies to.
-    Kinds now: "paused", "resumed". Later tickets add "jumped", "pass_started", "pass_ended", "speed_changed"."""
+    Kinds now: "paused", "resumed", "jumped" (a seek: song_t is where the song goes on). Later tickets add
+    "pass_started", "pass_ended", "speed_changed"."""
 
     kind: str
     output_s: float
@@ -100,6 +102,7 @@ class Transport:
         self._want_playing = True           # requested (any thread)
         self._playing = True                # in effect (render thread only)
         self._n = 0                         # song frame of the next frame to render
+        self._seeks: deque[float] = deque()  # requested song times (any thread); the last one wins
         self.log = SongTimeLog(sample_rate)
 
     # --- control, any thread -------------------------------------------------------------------------------
@@ -111,6 +114,10 @@ class Transport:
 
     def set_gains(self, backing: float, vocal: float) -> None:
         self._gains = (float(backing), float(vocal))
+
+    def seek(self, song_s: float) -> None:
+        """Go on from this song time (clamped to the song), from the start of the next block, playing or paused."""
+        self._seeks.append(float(song_s))
 
     # --- state -----------------------------------------------------------------------------------------------
     @property
@@ -137,6 +144,12 @@ class Transport:
             self._playing = self._want_playing
             kind = "resumed" if self._playing else "paused"
             events = (TransportEvent(kind, self.log.rendered_s, self.position_s),)
+        if self._seeks:
+            target = None
+            while self._seeks:
+                target = self._seeks.popleft()
+            self._n = min(max(0, round(target * self._sr)), len(self._audio))
+            events += (TransportEvent("jumped", self.log.rendered_s, self.position_s),)
         end = self._gains
         if not self._playing:
             self.log.append(frames, None)

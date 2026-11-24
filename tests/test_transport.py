@@ -75,3 +75,29 @@ def test_after_the_song_ends_it_renders_silence_and_says_finished():
     tail = tr.render(100)
     assert np.all(tail.audio[:50] == 1.0) and np.all(tail.audio[50:] == 0.0)
     assert tr.finished and np.isclose(tail.song_t[-1], 0.199)
+
+
+def test_a_seek_moves_the_song_from_the_next_block_logs_it_and_says_jumped():
+    tr = Transport(ramp_song(3000), sample_rate=SR)
+    tr.render(100)
+    tr.seek(2.0)
+    jump = tr.render(100)
+    assert jump.audio[0, 0] == 2000.0 and np.isclose(jump.song_t[0], 2.0) and tr.position_s == 2.1
+    assert [(e.kind, e.output_s, e.song_t) for e in jump.events] == [("jumped", 0.1, 2.0)]
+    assert tr.render(100).events == ()
+    assert tr.log.song_time(0.05) == 0.05 and np.isclose(tr.log.song_time(0.15), 2.05)    # before and after
+
+
+def test_a_seek_clamps_to_the_song_and_works_while_paused():
+    tr = Transport(ramp_song(3000), sample_rate=SR)
+    tr.pause()
+    tr.render(100)
+    tr.seek(-5.0)
+    assert [e.kind for e in tr.render(10).events] == ["jumped"] and tr.position_s == 0.0
+    tr.seek(99.0)
+    tr.render(10)
+    assert tr.position_s == 3.0 and tr.finished
+    tr.seek(1.0)
+    tr.play()
+    block = tr.render(10)
+    assert [e.kind for e in block.events] == ["resumed", "jumped"] and np.isclose(block.song_t[0], 1.0)

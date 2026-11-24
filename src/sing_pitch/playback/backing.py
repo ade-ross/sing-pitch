@@ -9,7 +9,7 @@ import numpy as np
 from ..config import SAMPLE_RATE
 from .drone import _open_output
 from .mix import Gains
-from .transport import SongTimeLog, Transport
+from .transport import SongTimeLog, Transport, TransportEvent
 
 
 def load_audio(path: Path, sample_rate: int = SAMPLE_RATE) -> np.ndarray:
@@ -58,6 +58,7 @@ class BackingPlayer:
         self._device = device
         self._transport = self._new_transport()
         self._stream = None
+        self.on_event: Callable[[TransportEvent], None] | None = None   # runs in the audio callback: only hand over
 
     def _new_transport(self) -> Transport:
         return Transport(self._audio, self._vocal, self._sr, gains=self._gains)
@@ -78,6 +79,10 @@ class BackingPlayer:
 
     def pause(self) -> None:
         self._transport.pause()
+
+    def seek(self, song_s: float) -> None:
+        """Go on from this song time, from the next block (a "jumped" event goes to on_event)."""
+        self._transport.seek(song_s)
 
     @property
     def transport(self) -> Transport:
@@ -104,7 +109,11 @@ class BackingPlayer:
         transport = self._transport = self._new_transport()
 
         def callback(outdata, frames, time_info, status):
-            outdata[:] = transport.render(frames).audio
+            block = transport.render(frames)
+            outdata[:] = block.audio
+            if block.events and self.on_event is not None:
+                for event in block.events:
+                    self.on_event(event)
 
         kwargs = dict(channels=2, samplerate=self._sr, blocksize=1024, dtype="float32", callback=callback)
         if self._device is not None:

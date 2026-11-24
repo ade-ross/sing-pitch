@@ -39,10 +39,14 @@ def voice(song_time_heard, seconds):
     return out
 
 
-def render(transport, seconds, pause_at=None, pause_for=0.0):
-    """Drive the Transport like the output callback for `seconds` of output, pausing at output time pause_at."""
-    t, paused_until = 0.0, None
+def render(transport, seconds, pause_at=None, pause_for=0.0, seek_at=None, seek_to=0.0):
+    """Drive the Transport like the output callback for `seconds` of output, pausing at output time pause_at and
+    seeking to song time seek_to at output time seek_at."""
+    t, paused_until, sought = 0.0, None, False
     while t < seconds:
+        if seek_at is not None and t >= seek_at and not sought:
+            transport.seek(seek_to)
+            sought = True
         if pause_at is not None and t >= pause_at and paused_until is None:
             transport.pause()
             paused_until = t + pause_for
@@ -107,3 +111,27 @@ def test_a_take_with_a_pause_saves_its_song_times_and_rescores_to_the_same_numbe
     again = rescore_take(tmp_path, saved.id)
     assert again.summary == saved.summary and saved.summary.pct_in_tune >= 98.0
     assert again.song_times == saved.song_times
+
+
+def test_a_seek_mid_take_still_scores_about_100_in_tune_and_splits_into_two_takes_that_both_do():
+    tr = Transport(silent_song(), sample_rate=SR)
+    render(tr, 6.0, seek_at=2.0, seek_to=0.6)
+    # the schedule, independently of the log: the seek took effect at the first block boundary at or after 2.0 s
+    p0 = np.ceil(2.0 * SR / BLOCK) * BLOCK / SR
+
+    def heard(out_s):
+        return out_s if out_s < p0 else 0.6 + (out_s - p0)
+
+    frames = voice(heard, 5.0)
+    clock = LogClock(tr.log, LATENCY, OUT_AT_INPUT_ZERO)
+    whole = take(clock, frames).summary
+    assert whole.n_scored > 250 and whole.pct_in_tune >= 98.0 and whole.median_abs_cents < 1.0
+
+    cut = p0 + LATENCY - OUT_AT_INPUT_ZERO         # input time of the first voice frame that answers the jump
+    before, after = take(clock, [f for f in frames if f.t < cut]), take(clock, [f for f in frames if f.t >= cut])
+    for part in (before, after):
+        assert part.summary.n_scored > 80 and part.summary.pct_in_tune >= 98.0
+
+    # the old way, one constant offset for the whole Take, is lost after the jump
+    old = take(LinearClock(LATENCY - OUT_AT_INPUT_ZERO), frames)
+    assert old.summary.pct_in_tune < 70.0

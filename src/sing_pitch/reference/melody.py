@@ -95,6 +95,25 @@ class Melody:
         """(song time, MIDI) of the line, NaN where unscored: what the live view draws."""
         return self._t, np.where(self.scored, self._midi, np.nan)
 
+    def sample(self, song_t: np.ndarray) -> tuple[np.ndarray, np.ndarray]:
+        """(MIDI, unscored) of the line at each song time, for drawing it on any clock. MIDI is NaN where the line is
+        unscored or the time is outside it (or NaN); unscored is True only inside an Unscored stretch."""
+        song_t = np.asarray(song_t, dtype=np.float64)
+        midi = np.full(song_t.shape, np.nan)
+        unscored = np.zeros(song_t.shape, dtype=bool)
+        if not len(self._t):
+            return midi, unscored
+        with np.errstate(invalid="ignore"):
+            j = np.clip(np.searchsorted(self._t, song_t), 1, len(self._t) - 1) if len(self._t) > 1 else np.zeros(
+                song_t.shape, dtype=int)
+            if len(self._t) > 1:
+                j = np.where(song_t - self._t[j - 1] < self._t[j] - song_t, j - 1, j)
+            inside = np.isfinite(song_t) & (np.abs(self._t[j] - song_t) <= self._tolerance)
+        ok = inside & self.scored[j] & np.isfinite(self._midi[j])
+        midi[ok] = self._midi[j][ok]
+        unscored[inside] = ~self.scored[j][inside]
+        return midi, unscored
+
     def target(self, t: float, sung_midi: float) -> Target:
         if not len(self._t):
             return Target(None)

@@ -143,3 +143,17 @@ def test_the_player_pauses_and_resumes_through_its_transport_and_logs_song_time(
     log = player.song_log
     assert log.rendered_s == 3072 / 48000
     assert log.song_time(1500 / 48000) is None and abs(log.song_time(2500 / 48000) - 1476 / 48000) < 1e-9
+
+
+def test_the_player_seeks_and_hands_its_transport_events_to_the_listener():
+    song = np.stack([np.arange(48000, dtype=np.float32) / 48000] * 2, axis=1)
+    player, streams = player_with(song)
+    got = []
+    player.on_event = got.append                 # called from the audio thread; must only hand over
+    player.start()
+    streams[0].pull(1024)
+    player.seek(0.5)
+    out = streams[0].pull(1024)
+    assert np.allclose(out[:, 0], song[24000:25024, 0])
+    assert [(e.kind, e.output_s, e.song_t) for e in got] == [("jumped", 1024 / 48000, 0.5)]
+    assert player.song_log.song_time(1500 / 48000) == 0.5 + 476 / 48000
