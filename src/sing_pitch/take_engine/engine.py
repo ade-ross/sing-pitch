@@ -26,6 +26,7 @@ class FrameScore:
     note_name: str | None
     in_key: bool | None = None      # Key Reference only: False = the sung note is outside the key
     octave: int = 0                 # the Octave shift this frame was scored at: the Reference is drawn at it
+    line_note: str | None = None    # Notes mode: the note of the unmerged line (what a held note is, for Steadiness)
 
 
 def band_for(cents: float, config: ScoreConfig) -> Band:
@@ -54,8 +55,9 @@ def score_frame(
         return FrameScore(frame.t, midi, None, None, None, target.in_key, octave_shift)
     target_midi = target.midi + 12 * octave_shift
     cents = 100.0 * (midi - target_midi)
+    line_note = None if target.line_midi is None else note_name(round(target.line_midi + 12 * octave_shift))
     return FrameScore(frame.t, midi, cents, band_for(cents, config), note_name(round(target_midi)), target.in_key,
-                      octave_shift)
+                      octave_shift, line_note)
 
 
 def _song_times(frames: Sequence[PitchFrame], song_times: Sequence[float | None] | None) -> Sequence[float | None]:
@@ -91,7 +93,7 @@ def score_take(
     numbers out."""
     scores, octaves = _scored(frames, reference, config, _song_times(frames, song_times), octave)
     return dataclasses.replace(summarise(scores, frames, config), octave_shift=octaves.shift,
-                               octave_mode=octaves.mode)
+                               octave_mode=octaves.mode, octave_phrases=octaves.phrases)
 
 
 class TakeEngine:

@@ -24,6 +24,13 @@ class ScoreConfig:
     steadiness_min_note_s: float = 0.5
     steadiness_trim_s: float = 0.12
     steadiness_trim_fraction: float = 0.15   # the larger of trim_s and this share of the note is cut each end
+    # Steadiness and Range leave out tracker octave blips: a run of scored frames no longer than blip_max_s that sits
+    # blip_cents or more from the median of the scored frames blip_window_s either side (see take_engine/blips.py);
+    # Range is the middle of what is left (range_percentiles)
+    blip_cents: float = 1000.0
+    blip_max_s: float = 0.3
+    blip_window_s: float = 1.0
+    range_percentiles: tuple[float, float] = (5.0, 95.0)
     # Octave shift: whole-octave offsets tried, and how many scored frames (~2 s of singing) the LIVE view
     # waits before it stops re-estimating a growing Phrase and keeps its octave for the rest of that Phrase
     octave_shifts: tuple[int, ...] = (0, -1, 1, -2, 2)     # tie-break order: the smaller shift wins

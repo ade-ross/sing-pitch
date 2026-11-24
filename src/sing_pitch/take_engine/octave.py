@@ -123,6 +123,7 @@ class TakeOctaves:
     per_frame: list[int]            # the shift each frame is scored (and its Reference drawn) at
     shift: int                      # the Take's one number: pinned k, legacy k, else the most common Phrase shift
     mode: str                       # "auto" | "pinned" | "" (legacy, or not a Melody)
+    phrases: tuple[tuple[int, int], ...] = ()   # Auto: (shift, number of Phrases) for each shift used, smallest first
 
 
 def take_octaves(
@@ -161,4 +162,4 @@ def take_octaves(
             votes[s[0]] += 1
             weight[s[0]] += s[1]
     shift = min(votes, key=lambda k: (-votes[k], -weight[k], abs(k))) if votes else 0
-    return TakeOctaves(per_frame, shift, "auto")
+    return TakeOctaves(per_frame, shift, "auto", tuple(sorted(votes.items())))

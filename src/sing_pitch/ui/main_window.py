@@ -76,7 +76,10 @@ def describe(record: TakeRecord) -> str:
     if record.reference_kind == "melody":
         mode = f" ({s.octave_mode})" if s.octave_mode else ""
         notes = f"notes {format_length(record.min_note_s)}   |   " if record.note_mode == "on" else ""
-        key = f"{record.song_id}   |   {notes}octave shift {s.octave_shift:+d}{mode}   |   "
+        octave = f"octave shift {s.octave_shift:+d}{mode}"
+        if len(s.octave_phrases) > 1:        # Auto and the Phrases did not agree: one number would hide it
+            octave = "octave per Phrase: " + ", ".join(f"{k:+d} ×{n}".replace("+0", "0") for k, n in s.octave_phrases)
+        key = f"{record.song_id}   |   {notes}{octave}   |   "
     return (
         f"{key}In tune {s.pct_in_tune:.0f}%   |   median {s.median_abs_cents:.0f} cents off   |   "
         f"tends {s.tendency}   |   {steadiness_text(s)}   |   range {s.lowest_note}-{s.highest_note}   |   "
