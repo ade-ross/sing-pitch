@@ -1,7 +1,9 @@
 """Take store: each Take = raw pitch line (takes/<id>.npz) + one row in takes.csv. Nothing else.
 
 The npz also keeps `song_t`, the song time each frame was scored against (NaN = no song playing). Takes saved
-before the song-time log have no song_t: their song times are t - latency_offset_s, as they were scored then."""
+before the song-time log have no song_t: their song times are t - latency_offset_s, as they were scored then.
+A Pass Take also keeps `clock_t`, the clock's song time of each frame with the Lead-in not masked out, for drawing
+the Reference on a replay (Takes without it draw from song_t)."""
 from __future__ import annotations
 
 import csv
@@ -92,7 +94,8 @@ def save_take(home: Path, record: TakeRecord) -> TakeRecord:
         confidence=np.array([x.confidence for x in f], dtype=np.float64),
         loudness_db=np.array([x.loudness_db for x in f], dtype=np.float64),
         **({} if record.song_times is None else
-           {"song_t": np.array([np.nan if x is None else x for x in record.song_times], dtype=np.float64)}),
+           {"song_t": _nan_array(record.song_times)}),
+        **({} if record.clock_times is None else {"clock_t": _nan_array(record.clock_times)}),
     )
     path = summary_path(home)
     new_file = not path.exists()
@@ -104,6 +107,10 @@ def save_take(home: Path, record: TakeRecord) -> TakeRecord:
             writer.writeheader()
         writer.writerow(_row(record))
     return record
+
+
+def _nan_array(times) -> np.ndarray:
+    return np.array([np.nan if x is None else x for x in times], dtype=np.float64)
 
 
 def _write_rows(path: Path, rows: list[dict]) -> None:
@@ -149,6 +156,15 @@ def saved_song_times(home: Path, take_id: str) -> list[float | None]:
     """Per frame, the song time the saved Take was scored against (old Takes: t - latency_offset_s)."""
     row = next(r for r in _rows(home) if r["id"] == take_id)
     return _song_times(home, take_id, row, load_frames(home, take_id))
+
+
+def saved_clock_times(home: Path, take_id: str) -> list[float | None]:
+    """Per frame, the song time the singer heard, for drawing the Reference on a replay: a Pass Take's clock times
+    (its Lead-in included), else the song times it was scored against."""
+    with np.load(_take_path(home, take_id)) as z:
+        if "clock_t" in z.files:
+            return [None if np.isnan(x) else float(x) for x in z["clock_t"]]
+    return saved_song_times(home, take_id)
 
 
 def _rows(home: Path) -> list[dict]:

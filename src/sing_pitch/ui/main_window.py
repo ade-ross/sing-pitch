@@ -25,7 +25,8 @@ from ..reference import Band, Key, Melody, NearestNote, Reference
 from ..replay import Replay
 from ..settings import DEFAULT_OUTPUT, Settings
 from ..take_engine import FrameScore, LinearClock, SampledClock, SongClock, TakeRecord, replay_scores
-from ..take_store import last_take_id, load_frames, saved_latency, saved_reference, saved_song_times
+from ..take_store import (last_take_id, load_frames, saved_clock_times, saved_latency, saved_reference,
+                          saved_song_times)
 from .timeline import Timeline
 from .speed_prep import SpeedPreparer
 
@@ -632,7 +633,7 @@ class MainWindow(QtWidgets.QWidget):
             song_times = saved_song_times(self._home, take_id)
             frames = load_frames(self._home, take_id)
             replay = Replay(replay_scores(frames, reference, song_times=song_times))
-            replay_clock = SampledClock([f.t for f in frames], song_times)
+            replay_clock = SampledClock([f.t for f in frames], saved_clock_times(self._home, take_id))   # with the Lead-in
         except Exception as exc:
             self.summary_label.setText(f"Cannot replay Take {take_id}: {exc}")
             return

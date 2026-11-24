@@ -180,3 +180,27 @@ def test_a_two_and_a_half_second_section_keeps_its_full_passes(tmp_path):
     short = Loop(4.0, 6.5, "Short", lead_in_s=2.0)           # 2.5 s of Section per Pass
     _, _, rows = sing_looped(tmp_path, passes=2.5, section=short, expect_shown=2)
     assert [r["pass_index"] for r in rows] == ["1", "2"]     # Pass 3 has 0.25 s of Section: discarded at Stop
+
+
+def test_replaying_a_pass_take_draws_the_reference_through_its_lead_in_too(qtbot, tmp_path):
+    """The Lead-in is never scored, but the singer heard the song there: a replay draws it, as the live view did."""
+    from audio import quiet
+    from test_melody_window import window
+
+    from sing_pitch.take_store import save_take
+
+    library_song(tmp_path, reference_line(NOTES))
+    takes, _ = pass_takes(1.0)
+    saved = save_take(tmp_path, takes[1])                 # Pass 2: voice 6.18 .. 12.18 s, the first 2 s are Lead-in
+    lead_in = [f.t for f, st in zip(saved.frames, saved.song_times) if st is None]
+    lo, hi = min(lead_in), max(lead_in)
+    assert hi - lo > 1.5
+    win = window(qtbot, tmp_path, quiet(0.5))
+    win.reference_box.setCurrentText("Melody")
+    win.toggle_replay()
+    assert win._replay is not None, win.summary_label.text()
+    win._draw_melody(hi)
+    x, y = win._ref_curve.getData()
+    in_lead_in = (x >= lo + 0.2) & (x <= hi - 0.2)
+    assert in_lead_in.any() and np.isfinite(y[in_lead_in]).mean() > 0.9
+    win.toggle_replay()
