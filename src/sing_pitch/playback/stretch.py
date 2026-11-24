@@ -7,6 +7,7 @@ from __future__ import annotations
 import shutil
 import threading
 import uuid
+from functools import partial
 from pathlib import Path
 from typing import Callable
 
@@ -15,9 +16,11 @@ import numpy as np
 BLOCK = 16384          # Rubber Band's process limit is 524288 frames; retrieving after every block keeps buffers small
 
 
-def time_stretch(audio: np.ndarray, sample_rate: int, speed: float) -> np.ndarray:
+def time_stretch(audio: np.ndarray, sample_rate: int, speed: float,
+                 progress: Callable[[float], None] | None = None) -> np.ndarray:
     """(frames, channels) float32 -> (frames / speed, channels) to the frame. speed 0.5 = half as fast, pitch unchanged.
-    Speed 1.0 returns the input itself. The GIL is released while Rubber Band works, so this can run in a thread."""
+    Speed 1.0 returns the input itself. The GIL is released while Rubber Band works, so this can run in a thread.
+    progress(fraction of the input processed, 0..1) is called after every block."""
     if speed == 1.0:
         return audio
     import pylibrb as rb
@@ -32,12 +35,15 @@ def time_stretch(audio: np.ndarray, sample_rate: int, speed: float) -> np.ndarra
         stretcher.process(np.ascontiguousarray(x[:, start : start + BLOCK]), final=start + BLOCK >= n)
         if (ready := stretcher.available()) > 0:
             chunks.append(stretcher.retrieve(ready))
+        if progress is not None:
+            progress(min(1.0, (start + BLOCK) / n))
     while (ready := stretcher.available()) > 0:                       # drain what the final block released
         chunks.append(stretcher.retrieve(ready))
     return np.ascontiguousarray(np.concatenate(chunks, axis=1).T)
 
 
-Stretcher = Callable[[np.ndarray, int, float], np.ndarray]
+time_stretch.reports_progress = True     # a stretcher with this flag also takes progress=callback(fraction)
+Stretcher = Callable[..., np.ndarray]    # (audio, sample_rate, speed[, progress=]) -> audio
 Stems = tuple[np.ndarray, "np.ndarray | None"]      # (Backing, Guide vocal or None), each (frames, 2) at the stream rate
 
 
@@ -58,7 +64,9 @@ class SpeedCache:
     def has(self, percent: int) -> bool:
         return percent == 100 or (self.folder(percent) / "backing.wav").exists()
 
-    def get(self, percent: int) -> Stems:
+    def get(self, percent: int, progress: Callable[[float], None] | None = None) -> Stems:
+        """The stems at this Speed. progress(fraction 0..1 of the rendering) is called while a Speed is being rendered
+        (never for one already on disk)."""
         from .backing import load_audio
 
         vocals = self._dir / "vocals.wav"
@@ -66,11 +74,11 @@ class SpeedCache:
             return load_audio(self._dir / "backing.wav", self._sr), (load_audio(vocals, self._sr) if vocals.exists() else None)
         folder = self.folder(percent)
         if not self.has(percent):
-            self._render(percent, folder)
+            self._render(percent, folder, progress)
         return load_audio(folder / "backing.wav", self._sr), (load_audio(folder / "vocals.wav", self._sr)
                                                              if (folder / "vocals.wav").exists() else None)
 
-    def _render(self, percent: int, folder: Path) -> None:
+    def _render(self, percent: int, folder: Path, progress: Callable[[float], None] | None = None) -> None:
         import soundfile as sf
 
         from .backing import load_audio
@@ -80,10 +88,21 @@ class SpeedCache:
             sources["vocals.wav"] = self._dir / "vocals.wav"
         results: dict[str, np.ndarray] = {}
         errors: list[BaseException] = []
+        done = dict.fromkeys(sources, 0.0)                  # how far each stem is; the whole is their mean
+
+        def report(name: str, fraction: float) -> None:
+            done[name] = fraction
+            if progress is not None:
+                progress(sum(done.values()) / len(done))
 
         def work(name: str, path: Path) -> None:
             try:
-                results[name] = self._stretcher(load_audio(path, self._sr), self._sr, percent / 100)
+                audio = load_audio(path, self._sr)
+                if getattr(self._stretcher, "reports_progress", False):
+                    results[name] = self._stretcher(audio, self._sr, percent / 100, progress=partial(report, name))
+                else:
+                    results[name] = self._stretcher(audio, self._sr, percent / 100)
+                report(name, 1.0)
             except BaseException as exc:
                 errors.append(exc)
 

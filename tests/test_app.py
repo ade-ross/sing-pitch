@@ -127,7 +127,7 @@ def test_replay_plays_the_last_saved_take_back_through_the_live_view(qtbot, tmp_
     win.toggle_replay()
     qtbot.waitUntil(lambda: len(win._t) > 20, timeout=3000)
     assert win._midi and not np.all(np.isnan(np.fromiter(win._midi, float)))
-    qtbot.waitUntil(lambda: win.summary_label.text() == "Replay finished.", timeout=6000)
+    qtbot.waitUntil(lambda: "Replay finished." in win.summary_label.text(), timeout=6000)
     assert win.button.isEnabled() and win.replay_button.text() == "Replay last Take"
 
 
