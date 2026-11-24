@@ -3,13 +3,14 @@ latency, is ~100 % in tune however the song was played (linear, or with a pause 
 rendered by hand, block by block, as the output stream would; the voice is built from the play/pause SCHEDULE,
 not from the log, so the log is checked against an independent source. Also seeks, Speed changes, and both."""
 import numpy as np
+import pytest
 from frames import HOP, hz_at
 from melody_helpers import reference_line
 
 from sing_pitch.pitch import PitchFrame
-from sing_pitch.playback.transport import Transport
+from sing_pitch.playback.transport import SongTimeLog, Transport
 from sing_pitch.reference import Melody
-from sing_pitch.take_engine import LinearClock, LogClock, TakeEngine
+from sing_pitch.take_engine import LinearClock, LogClock, PauseFold, SampledClock, TakeEngine
 
 MELODY = [(-900, 0.6), (-700, 0.6), (-500, 0.6), (-400, 0.6), (-200, 0.6), (-500, 0.6), (-900, 1.0)]  # C D E F G E C
 SR = 48000
@@ -255,3 +256,26 @@ def test_a_seek_in_the_crossfade_block_of_a_speed_change_does_not_glitch_song_ti
     tr.seek(1.0)
     after = tr.render(BLOCK)
     assert [e.kind for e in after.events] == ["jumped"] and np.allclose(after.song_t, 1.0 + np.arange(BLOCK) / SR)
+
+
+def test_a_pause_fold_turns_voice_time_into_view_time_with_every_pause_folded_away():
+    fold = PauseFold([(2.0, 3.0), (5.0, 7.0)])                    # paused 2 -> 3 and 5 -> 7 s of voice time
+    assert fold.to_view(np.array([1.0, 2.5, 3.0, 4.0, 6.0, 8.0])) == pytest.approx([1.0, 2.0, 2.0, 3.0, 4.0, 5.0])
+    assert fold.to_voice(np.array([1.0, 2.0, 3.0, 4.0, 5.0])) == pytest.approx([1.0, 3.0, 4.0, 7.0, 8.0])
+    assert fold.paused(2.5) and not fold.paused(3.0) and not fold.paused(1.9)
+    still = PauseFold([(2.0, np.inf)])                            # still paused
+    assert still.to_view(10.0) == 2.0 and still.to_voice(4.0) == 2.0 and still.paused(10.0)
+    assert PauseFold().to_view(4.2) == 4.2 and PauseFold().to_voice(4.2) == 4.2
+
+
+def test_the_log_and_the_clocks_report_where_the_song_was_paused():
+    log = SongTimeLog(100)
+    log.append(200, 0.0)
+    log.append(100, None)                                         # paused at output 2 -> 3 s
+    log.append(100, 200.0)
+    log.append(50, None)                                          # paused again from 4 s, still paused
+    assert log.paused_spans() == [(2.0, 3.0), (4.0, np.inf)]
+    spans = LogClock(log, 0.3, 0.1).paused_spans()                # voice time = output time + latency - 0.1
+    assert np.allclose(spans, [(2.2, 3.2), (4.2, np.inf)])
+    clock = SampledClock([0.0, 1.0, 2.0, 3.0, 4.0], [0.0, None, None, 1.0, None])
+    assert clock.paused_spans() == [(1.0, 3.0), (4.0, np.inf)]

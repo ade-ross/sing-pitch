@@ -62,6 +62,11 @@ class SoundDeviceInput:
         )
         self._stream.start()
 
+    @property
+    def latency_s(self) -> float:
+        """The input latency PortAudio reports (mic -> callback), 0 before start()."""
+        return 0.0 if self._stream is None else float(self._stream.latency)
+
     def stop(self) -> None:
         if self._stream is not None:
             self._stream.stop()
@@ -71,6 +76,8 @@ class SoundDeviceInput:
 
 class ArrayInput:
     """Test double: plays a numpy array as if it came from a mic, synchronously, on start()."""
+
+    latency_s = 0.0
 
     def __init__(self, samples: np.ndarray, sample_rate: int = SAMPLE_RATE, chunk: int = BLOCKSIZE):
         self._samples = np.asarray(samples, dtype=np.float32)

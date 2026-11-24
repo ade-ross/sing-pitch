@@ -141,6 +141,11 @@ he does not play guitar while using it.
   end of a looped Section to the next Pass's Lead-in and ending at the song end; a seek, pause or Speed change made
   inside those seconds shows once rendered. Paused, it shows what plays on resume. The Octave shift of the last frame
   is held in the right half (a later Phrase may be scored at another one).
+  The now-line is the song heard in the headphones now (the newest mic sample's time plus the input latency, i.e. the
+  rendered output minus the output part of the calibrated latency), not the newest voice frame: the voice is drawn
+  where it was sung, so it ends ~0.2 s left of the line (the tracker's look-ahead). The x axis is voice time with
+  every pause of the song folded away (`PauseFold`): while paused the whole plot stands still and singing is neither
+  drawn nor scored; on resume it goes on from the same place, and the Take is not split. Replays do the same.
 - **Sync:** the Transport logs which song time it rendered at each output time. A voice frame heard at input time t
   is scored against the song time rendered at t − calibrated latency (a LogClock over that log), so pauses (later
   seeks, loops, Speed) keep sync. The song time of every frame is saved with the Take (npz `song_t`); Takes saved

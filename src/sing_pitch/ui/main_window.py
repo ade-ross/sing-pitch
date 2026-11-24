@@ -26,8 +26,8 @@ from ..reference.melody import NotesMelody
 from ..reference.notes import PER_PHRASE, format_length
 from ..replay import Replay
 from ..settings import DEFAULT_OUTPUT, Settings
-from ..take_engine import (AUTO, FrameScore, LinearClock, SampledClock, SongClock, TakeRecord, pinned, project_song_time,
-                           replay_scores)
+from ..take_engine import (AUTO, FrameScore, LinearClock, PauseFold, SampledClock, SongClock, TakeRecord, pinned,
+                           project_song_time, replay_scores)
 from ..take_store import (last_take_id, load_frames, saved_clock_times, saved_latency, saved_octave,
                           saved_reference, saved_song_times)
 from .timeline import Timeline
@@ -156,7 +156,7 @@ class MainWindow(QtWidgets.QWidget):
         self._runner: LiveRunner | None = None
         self._replay: Replay | None = None
         self._replay_started = 0.0
-        self._t: deque[float] = deque()
+        self._t: deque[float] = deque()           # voice time of each drawn frame (the plot shows view time, see _fold)
         self._midi: deque[float] = deque()
         self._band: deque[Band | None] = deque()
         self._out: deque[bool] = deque()          # True = sung note outside the Key
@@ -569,8 +569,8 @@ class MainWindow(QtWidgets.QWidget):
             self.seek(max(0.0, self._backing.position_s() + seconds))
 
     def toggle_pause(self) -> None:
-        """Space: pause or resume the song of the running Melody Take. The Take goes on; singing while paused is
-        shown but not scored."""
+        """Space: pause or resume the song of the running Melody Take. The Take goes on; the plot stands still while
+        the song is paused (singing then is neither drawn nor scored) and goes on from the same place on resume."""
         if self._backing is None:
             return
         self._paused = not self._paused
@@ -924,6 +924,8 @@ class MainWindow(QtWidgets.QWidget):
         self.summary_label.setText(describe(record) if record else f"The Take failed: {error}")
 
     def ingest(self, scores: list[FrameScore]) -> None:
+        fold = self._fold()
+        scores = [s for s in scores if not fold.paused(s.t)]     # sung while the song was paused: not drawn
         for s in scores:
             self._t.append(s.t)
             self._midi.append(np.nan if s.midi is None else s.midi)
@@ -934,7 +936,8 @@ class MainWindow(QtWidgets.QWidget):
                 self._oct = deque(s.octave for _ in self._oct)
             self._oct.append(s.octave)
         if scores:
-            while self._t[-1] - self._t[0] > PAST_S:
+            end = fold.to_view(self._t[-1])
+            while end - fold.to_view(self._t[0]) > PAST_S:
                 self._t.popleft(), self._midi.popleft(), self._band.popleft(), self._out.popleft(), self._oct.popleft()
             last = scores[-1]
             if last.band is None:
@@ -990,24 +993,43 @@ class MainWindow(QtWidgets.QWidget):
             return self._runner.song_clock
         return self._replay_clock or LinearClock(self._melody_latency)
 
-    def _octaves_at(self, x: np.ndarray) -> np.ndarray:
-        """The Octave shift in force at each voice time x: that of the latest frame at or before it (the first frame's
+    def _fold(self, clock: SongClock | None = None) -> PauseFold:
+        """Voice time <-> the plot's view time: the draw clock's pauses folded away, so the plot stands still while the
+        song is paused and resumes where it stopped (no pauses: the two are the same)."""
+        spans = getattr(clock or self._draw_clock(), "paused_spans", None)
+        return PauseFold(spans() if spans is not None else ())
+
+    def _now_voice(self) -> float:
+        """The voice time of the song heard now, where the now-line goes: the running Take's heard_t (the tracker's
+        frames lag it, so the voice ends a little left of the line), a replay's own clock, else the newest frame. Never
+        before the newest frame, so no voice is drawn right of the line."""
+        newest = self._t[-1]
+        if self._runner is not None:
+            return max(newest, self._runner.heard_t)
+        if self._replay is not None:
+            return max(newest, self._replay.origin_s + time.monotonic() - self._replay_started)
+        return newest
+
+    def _octaves_at(self, x: np.ndarray, fold: PauseFold | None = None) -> np.ndarray:
+        """The Octave shift in force at each view time x: that of the latest frame at or before it (the first frame's
         before them, the last frame's beyond them)."""
         if not self._t:
             return np.zeros(len(x))
-        t = np.fromiter(self._t, float)
+        t = (fold or self._fold()).to_view(np.fromiter(self._t, float))
         octs = np.fromiter(self._oct, float)
         return octs[np.clip(np.searchsorted(t, x, side="right") - 1, 0, len(t) - 1)]
 
-    def _song_times(self, x: np.ndarray, now: float) -> np.ndarray:
-        """The song time heard at each voice time x of the plot (NaN = no song there). Up to what the Transport has
-        rendered that is the song clock's own answer, so seeks, pauses, Speed changes and loop wraps show as they
-        happened. Beyond it (the right half, up to FUTURE_S ahead of `now`) nothing is known yet: the song is taken to
-        go on from where the rendering ended at its Speed, wrapping at the end of a looped Section to the next Pass's
-        Lead-in, and ending at the song end. A seek, pause, Speed change or Section change made inside those seconds
-        is not foreseen (it shows once rendered); while paused it is drawn as if playing resumed now."""
+    def _song_times(self, x: np.ndarray, fold: PauseFold | None = None) -> np.ndarray:
+        """The song time heard at each view time x of the plot (NaN = no song there). Up to what the Transport has
+        rendered that is the song clock's own answer at the voice time shown there, so seeks, Speed changes and loop
+        wraps show as they happened and pauses are folded away (see _fold). Beyond it (the right half, up to FUTURE_S
+        ahead of now) nothing is known yet: the song is taken to go on from where the rendering ended at its Speed,
+        wrapping at the end of a looped Section to the next Pass's Lead-in, and ending at the song end. A seek, pause,
+        Speed change or Section change made inside those seconds is not foreseen (it shows once rendered); while paused
+        the song goes on, on resume, from where the player waits."""
         clock = self._draw_clock()
-        song = np.array([np.nan if (t := clock(v)) is None else t for v in x])
+        fold = fold or self._fold(clock)
+        song = np.array([np.nan if (t := clock(v)) is None else t for v in fold.to_voice(x)])
         tail = getattr(clock, "tail", None)
         tail = tail() if tail is not None else None
         if tail is None:                                 # a replay's clock knows its whole Take, a linear one goes on
@@ -1017,7 +1039,8 @@ class MainWindow(QtWidgets.QWidget):
         if song_end is None:                             # paused: the song waits where the player stands
             if backing is None:
                 return song
-            x_end, song_end, rate = now, backing.position_s(), getattr(backing, "speed", 1.0)
+            song_end, rate = backing.position_s(), getattr(backing, "speed", 1.0)
+        x_end = fold.to_view(x_end)                      # paused: the fold the pause stands at
         ahead = x > x_end
         duration = getattr(backing, "duration_s", None)
         loop = getattr(backing, "loop", None)
@@ -1026,21 +1049,23 @@ class MainWindow(QtWidgets.QWidget):
                                         0.0 if loop is None else loop.pass_start_s, duration)
         return song
 
-    def _sample_reference(self, x: np.ndarray, now: float) -> tuple[np.ndarray, np.ndarray, np.ndarray]:
-        """(song time, MIDI, unscored) of the Melody at each voice time x of the plot, past and future halves alike:
+    def _sample_reference(self, x: np.ndarray,
+                          fold: PauseFold | None = None) -> tuple[np.ndarray, np.ndarray, np.ndarray]:
+        """(song time, MIDI, unscored) of the Melody at each view time x of the plot, past and future halves alike:
         the one place that turns the plot's x-range into the Reference, for the line, the Guide lines, the Unscored
         bands and whatever else is drawn in the right half."""
-        song = self._song_times(x, now)
+        song = self._song_times(x, fold)
         midi, unscored = self._melody.sample(song)
         return song, midi, unscored
 
     def _draw_melody(self, t_end: float) -> None:
-        """The reference line on the voice clock over the plot's [t_end - PAST_S, t_end + FUTURE_S]."""
+        """The reference line over the plot's [t_end - PAST_S, t_end + FUTURE_S] (view time, see _fold)."""
         if self._melody is None:
             return
         x = np.arange(t_end - PAST_S, t_end + FUTURE_S + DRAW_STEP_S, DRAW_STEP_S)
-        song, midi, unscored = self._sample_reference(x, t_end)
-        octaves = self._octaves_at(x)
+        fold = self._fold()
+        song, midi, unscored = self._sample_reference(x, fold)
+        octaves = self._octaves_at(x, fold)
         shift = 12.0 * octaves                           # drawn where the Take is scored, not at the singer's octave
         if isinstance(self._melody, NotesMelody):
             midi = self._note_bars(x, song, midi, octaves, shift)
@@ -1116,7 +1141,8 @@ class MainWindow(QtWidgets.QWidget):
             self.timeline.set_playhead(self._backing.position_s())
         if not self._t:
             return
-        t, midi = np.fromiter(self._t, float), np.fromiter(self._midi, float)
+        fold = self._fold()
+        t, midi = fold.to_view(np.fromiter(self._t, float)), np.fromiter(self._midi, float)
         self._curve.setData(t, midi)
         voiced = ~np.isnan(midi)
         bands = [b for b, v in zip(self._band, voiced) if v]
@@ -1124,8 +1150,9 @@ class MainWindow(QtWidgets.QWidget):
         self._dots.setData(t[voiced], midi[voiced], brush=[BRUSH[b] for b in bands],
                            symbol=["x" if o else "o" for o in out],   # out-of-key notes are drawn as big crosses
                            size=[11 if o else 6 for o in out])
-        self._set_now(t[-1])
-        self._draw_melody(t[-1])
+        now = fold.to_view(self._now_voice())
+        self._set_now(now)
+        self._draw_melody(now)
         if self._replay is not None and self._replay.finished:
             self._end_replay()
             self.summary_label.setText("Replay finished.")

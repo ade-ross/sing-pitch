@@ -13,6 +13,11 @@ class Replay:
         self._next = 0
 
     @property
+    def origin_s(self) -> float:
+        """The Take time of its first frame: advance() counts elapsed_s from here."""
+        return self._origin
+
+    @property
     def finished(self) -> bool:
         return self._next >= len(self._scores)
 
