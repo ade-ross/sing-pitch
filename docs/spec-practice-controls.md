@@ -167,3 +167,28 @@ target is the note's semitone (the Octave shift applies as before), so live scor
 bars and reproduce the numbers; the segmentation is cached per song and length. Each Take records `note_mode` (off/on)
 and `min_note_s` (seconds, or `phrase`) at the end of takes.csv; old rows read as off. History filters by Notes mode,
 and the toggle and length are remembered per song in player.json. Both are locked during a Take.
+
+## Count-in and clicks inside a loop (#42)
+
+**Between Passes** is a choice next to Loop: **Lead-in** (as before, ~2 s of song before the Section) or **Count-in**
+(one bar of metronome clicks, the song silent, then the song starts exactly at the Section start). The Count-in is
+`transport.CountIn(bpm, beats_per_bar)` on the `Loop`: a Pass then starts one bar of song time before the Section
+(`pass_start_s = start - bar`, which may lie before the song start), and the Transport renders that stretch as clicks
+instead of song. Because the bar is measured in song time, the clicks scale with Speed by themselves (at 70 % a beat
+lasts beat / 0.7 output seconds), the last click lands one beat before the Section start, and the Pass mask that
+leaves the Lead-in unscored leaves the Count-in unscored too. Clicks go through the same output as the Backing and
+ignore both volume sliders; the first beat of the bar is higher and louder.
+
+**Tempo:** `library/tempo.py` beat-tracks the Backing with `librosa.beat.beat_track` (librosa comes with the `import`
+extra, through audio-separator) and stores `<song>/tempo.json` = `{bpm, beats_s}`. The importer does it after the
+reference line; for songs imported before, the window does it the first time Count-in is chosen, on a worker thread
+(`ui/tempo_find.py`, ~20 s the first time). Without librosa, or when it fails, the tempo is unknown: the BPM box shows
+"? BPM", the label says "tempo unknown — set BPM (Lead-in until then)", and the Lead-in plays until a BPM is typed.
+The BPM box (editable, 30-300) and the Beats-per-bar box (1-12, default 4) sit beside the choice. A BPM Simone types
+is kept in `player.json` (`bpm`; None = the detected one) together with `between` and `beats_per_bar`, and wins over
+the detected tempo. Changing any of the three during a loop restarts it at Pass 1 with the new Count-in.
+Detected for tulip-limited: 143.55 BPM.
+
+**A click inside a looping Section** (or an arrow jump that lands inside it) ends the Pass playing and starts the next
+Pass right there, without a Lead-in or Count-in; the loop goes on and wraps at the Section end as usual. A click
+anywhere else, the Lead-in included, ends the loop as before.

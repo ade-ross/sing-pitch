@@ -204,3 +204,28 @@ def test_replaying_a_pass_take_draws_the_reference_through_its_lead_in_too(qtbot
     in_lead_in = (x >= lo + 0.2) & (x <= hi - 0.2)
     assert in_lead_in.any() and np.isfinite(y[in_lead_in]).mean() > 0.9
     win.toggle_replay()
+
+
+def test_with_a_count_in_each_pass_scores_only_its_section_and_the_count_in_is_never_scored(tmp_path):
+    """#42: a 2 s bar of clicks (120 bpm, 4/4) instead of the Lead-in. The voice even sings through the count-in
+    (it follows the reference there): none of that is scored, each Pass scores its 4 s Section at about 100 %."""
+    from sing_pitch.playback.transport import CountIn
+
+    library_song(tmp_path, reference_line(NOTES))
+    counted = Loop(4.0, 8.0, "Chorus 1", count_in=CountIn(120.0, 4))
+    _, _, rows = sing_looped(tmp_path, passes=3.3, section=counted, expect_shown=3)
+    assert [(r["section_name"], r["pass_index"]) for r in rows] == [("Chorus 1", "1"), ("Chorus 1", "2"),
+                                                                    ("Chorus 1", "3")]
+    assert all(float(r["pct_in_tune"]) >= 98.0 for r in rows)
+    assert all(abs(int(r["n_scored_frames"]) * HOP - 4.0) < 0.15 for r in rows)
+
+
+def test_at_70_percent_the_count_in_lasts_a_bar_at_the_slower_tempo_and_is_still_unscored(tmp_path):
+    from sing_pitch.playback.transport import CountIn
+
+    library_song(tmp_path, reference_line(NOTES))
+    counted = Loop(4.0, 8.0, "Chorus 1", count_in=CountIn(120.0, 4))
+    _, _, rows = sing_looped(tmp_path, passes=2.3, speed=0.7, section=counted, expect_shown=2)
+    assert [r["pass_index"] for r in rows] == ["1", "2"]
+    assert all(float(r["pct_in_tune"]) >= 98.0 for r in rows)
+    assert all(abs(int(r["n_scored_frames"]) * HOP - 4.0 / 0.7) < 0.2 for r in rows)

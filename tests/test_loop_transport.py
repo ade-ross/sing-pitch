@@ -190,3 +190,40 @@ def test_pass_index_counts_every_wrap_and_is_zero_without_a_loop():
     tr.set_loop(None)
     tr.render(100)
     assert tr.pass_index == 0
+
+
+def test_a_seek_inside_the_looping_section_jumps_there_as_the_next_pass_and_keeps_looping():
+    """#42: a click inside the Section ends the Pass playing and starts the next one from there (no Lead-in); at the
+    Section end it wraps to start - Lead-in as usual."""
+    tr = Transport(ramp_song(10000), sample_rate=SR)
+    tr.set_loop(Loop(3.0, 4.0, "Chorus", lead_in_s=2.0))
+    tr.render(2500)                                  # song 1.0 .. 3.5, Pass 1
+    tr.seek(3.2)
+    b = tr.render(1000)                              # 3.2 .. 3.999 then the wrap to 1.0
+    assert kinds(b) == [("pass_ended", 1), ("pass_started", 2), ("pass_ended", 2), ("pass_started", 3)]
+    jump = b.events[1]
+    assert np.isclose(jump.output_s, 2.5) and np.isclose(jump.song_t, 3.2) and jump.loop.name == "Chorus"
+    assert np.array_equal(b.audio[:800, 0], np.arange(3200, 4000))
+    assert np.array_equal(b.audio[800:, 0], np.arange(1000, 1200))
+    assert tr.loop is not None and tr.pass_index == 3
+
+
+def test_a_seek_into_the_lead_in_ends_the_loop():
+    tr = Transport(ramp_song(10000), sample_rate=SR)
+    tr.set_loop(Loop(3.0, 4.0, lead_in_s=2.0))
+    tr.render(1500)
+    tr.seek(2.0)                                     # before the Section start: outside it
+    b = tr.render(100)
+    assert [e.kind for e in b.events] == ["pass_ended", "loop_ended", "jumped"] and tr.loop is None
+
+
+def test_through_the_player_a_seek_inside_the_section_keeps_the_loop_and_one_outside_drops_it():
+    from sing_pitch.playback.backing import BackingPlayer
+
+    player = BackingPlayer(ramp_song(10000), SR, stream_factory=lambda **kw: None, sample_rate=SR)
+    loop = Loop(3.0, 4.0, lead_in_s=2.0)
+    player.set_loop(loop)
+    player.seek(3.5)
+    assert player.loop == loop
+    player.seek(6.0)
+    assert player.loop is None

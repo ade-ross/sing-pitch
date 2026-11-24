@@ -117,3 +117,20 @@ def test_the_restored_gains_reach_the_player_at_start(qtbot, tmp_path):
     win.reference_box.setCurrentText("Melody")
     assert controls(win)[:3] == (True, 40, 70)
     assert win._gains() == (0.7, 0.4)
+
+
+def test_the_between_passes_choice_his_bpm_and_beats_per_bar_are_kept_per_song(tmp_path):
+    """#42: Lead-in or Count-in, the BPM he typed (None = use the detected one) and the beats in a bar."""
+    song = library_song(tmp_path, reference_line(NOTES))
+    store = Library(tmp_path).player_settings(song.id)
+    assert (store.load().between, store.load().bpm, store.load().beats_per_bar) == ("lead-in", None, 4)
+    store.save(PlayerSettings(between="count-in", bpm=72.5, beats_per_bar=3))
+    again = Library(tmp_path).player_settings(song.id).load()
+    assert (again.between, again.bpm, again.beats_per_bar) == ("count-in", 72.5, 3)
+
+
+def test_a_damaged_between_passes_setting_reads_as_the_defaults(tmp_path):
+    song = library_song(tmp_path, reference_line(NOTES))
+    (song.dir / "player.json").write_text(json.dumps({"between": "drums", "bpm": -1, "beats_per_bar": 99}))
+    saved = Library(tmp_path).player_settings(song.id).load()
+    assert (saved.between, saved.bpm, saved.beats_per_bar) == ("lead-in", None, 4)

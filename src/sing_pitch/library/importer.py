@@ -12,6 +12,7 @@ from typing import Callable
 from . import logic_stems
 from .library import BACKING, REFERENCE, VOCALS, Library, Song, save_reference
 from .ports import MelodyExtractor, SongDownloader, StemSeparator
+from .tempo import TempoDetector, save_tempo
 
 
 MAX_DURATION_S = 15 * 60.0   # a song, not a podcast
@@ -40,9 +41,21 @@ def file_key(path: Path) -> str:
 
 class Importer:
     def __init__(self, library: Library, separator: StemSeparator, extractor: MelodyExtractor,
-                 downloader: SongDownloader | None = None, progress: Callable[[str], None] = lambda _msg: None):
+                 downloader: SongDownloader | None = None, progress: Callable[[str], None] = lambda _msg: None,
+                 tempo: TempoDetector | None = None):
+        """tempo: the beat tracker (tempo.detect_tempo); None = none at import (the app detects it on first use)."""
         self.library, self.separator, self.extractor, self.downloader = library, separator, extractor, downloader
-        self.progress = progress
+        self.progress, self.tempo = progress, tempo
+
+    def _store_tempo(self, staging: Path) -> None:
+        """tempo.json beside the Backing. Never fails the import: without it the Count-in asks for the BPM."""
+        if self.tempo is None:
+            return
+        self.progress("finding the tempo ...")
+        try:
+            save_tempo(staging, self.tempo(staging / BACKING))
+        except Exception as exc:
+            self.progress(f"tempo unknown ({exc}); set the BPM in the app")
 
     def import_file(self, path: Path, *, force: bool = False) -> Song:
         path = Path(path)
@@ -94,6 +107,7 @@ class Importer:
                 raise SongImportError(str(e)) from e
             self.progress("extracting the melody line ...")
             save_reference(staging / REFERENCE, self.extractor.extract(staging / VOCALS))
+            self._store_tempo(staging)
             return self.library.commit(staging, dict(
                 source_kind="logic-stems", source_key=key, stems_from="logic", separator_model=None,
                 extractor_model=self.extractor.model_name,
@@ -113,6 +127,7 @@ class Importer:
             self.progress("extracting the melody line ...")
             line = self.extractor.extract(staging / VOCALS)
             save_reference(staging / REFERENCE, line)
+            self._store_tempo(staging)
             return self.library.commit(staging, dict(
                 imported_at=datetime.now().isoformat(timespec="seconds"), stems_from="separated",
                 separator_model=self.separator.model_name, extractor_model=self.extractor.model_name,

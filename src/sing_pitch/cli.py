@@ -14,11 +14,12 @@ from .library import Importer, Library, SongImportError
 
 def build_importer(model: str, progress: Callable[[str], None]) -> Importer:
     from .library import adapters
+    from .library.tempo import detect_tempo
 
     adapters.require_ffmpeg()
     models = config.models_dir()
     return Importer(Library(config.data_dir()), adapters.AudioSeparatorSeparator(models, model),
-                    adapters.RmvpeExtractor(models), adapters.YtDlpDownloader(), progress=progress)
+                    adapters.RmvpeExtractor(models), adapters.YtDlpDownloader(), progress=progress, tempo=detect_tempo)
 
 
 def import_main(argv: list[str], make_importer: Callable[[], Importer] | None = None) -> int:
