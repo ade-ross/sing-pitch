@@ -62,6 +62,14 @@ The whole-octave offset between Simone's voice and the original singer, chosen p
 A run of singing between pauses of about half a second or more; the unit an Auto Octave shift is chosen for.
 _Avoid_: line, segment
 
+**Notes mode**:
+A view and scoring mode where the reference melody is shown and scored as flat note bars on exact semitones instead of the continuous line.
+_Avoid_: piano roll, discrete mode, simplified view
+
+**Minimum note length**:
+The Notes-mode setting (0.1–4 s, or one note per reference Phrase) below which melody movements merge into the neighbouring note; each note takes the semitone the singer holds longest.
+_Avoid_: threshold, interval
+
 **Guide lines**:
 Faint copies of the reference melody one octave above and below the active Octave shift.
 
