@@ -335,6 +335,14 @@ class MainWindow(QtWidgets.QWidget):
         self._timer = QtCore.QTimer(self)
         self._timer.setTimerType(QtCore.Qt.PreciseTimer)
         self._timer.timeout.connect(self.tick)
+        self._name_widgets()
+
+    def _name_widgets(self) -> None:
+        """Stable objectName()s for scripts (sing_pitch.qa): each public widget is named after its attribute."""
+        self.setObjectName("main_window")
+        for name, value in vars(self).items():
+            if isinstance(value, QtWidgets.QWidget) and not name.startswith("_"):
+                value.setObjectName(name)
 
     def refresh_devices(self) -> None:
         """List the inputs and outputs again (a headset connected since the start). Each keeps its selection by name:
