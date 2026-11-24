@@ -14,10 +14,15 @@ A4_HZ = 440.0
 class ScoreConfig:
     green_cents: float = 25.0       # Band edges: |cents| <= the Tolerance (default 25) green, <= twice it yellow, beyond
     yellow_cents: float = 50.0      # red (see with_tolerance)
-    # Timing window (Melody): a voice frame is compared with the scored reference frames within this many seconds of
-    # the song time it answers, and the one closest to the voice counts (forgives timing, not pitch). 0 = the frame at
-    # that song time only: how Takes saved before #41 were scored
+    # Timing window (Melody): how early or late a voice may be and still be scored on pitch alone. Each Phrase gets ONE
+    # timing shift within +-timing_window_s (timing_step_s apart), the one that fits it best together with its Octave
+    # shift, and every frame of it is scored strictly at that shift (QA #44: forgives timing, not pitch; see
+    # take_engine/octave.py). timing_per_phrase False = how Takes saved by #41 were scored: per frame, the scored
+    # reference frame within the window closest to the voice. timing_window_s 0 = the frame at its own song time only:
+    # how Takes saved before #41 were scored
     timing_window_s: float = 0.1
+    timing_step_s: float = 0.01
+    timing_per_phrase: bool = True
     # voicing gate on raw tracker output (raw values are saved, so Takes can be re-scored with a new gate)
     gate_enter_confidence: float = 0.6
     gate_leave_confidence: float = 0.4

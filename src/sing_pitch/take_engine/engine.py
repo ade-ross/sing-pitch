@@ -11,8 +11,8 @@ from ..pitch import PitchFrame
 from ..reference import Band, Reference
 from .clock import LinearClock, SongClock
 from .gate import VoicingGate, voiced_mask
-from .octave import (AUTO, OctavePair, OctaveSetting, PhraseTracker, TakeOctaves, best_octave_shift, octave_pair,
-                     take_octaves)
+from .octave import (AUTO, OctavePair, OctaveSetting, PhraseTracker, TakeOctaves, best_octave_shift, best_timing,
+                     octave_pair, shifts_timing, take_octaves)
 from .octave import scoring_target as _target
 from .note_scores import note_verdicts, scored_per_note
 from .summary import PassTag, TakeRecord, TakeSummary, summarise
@@ -31,6 +31,7 @@ class FrameScore:
     octave: int = 0                 # the Octave shift this frame was scored at: the Reference is drawn at it
     line_note: str | None = None    # Notes mode: the note of the unmerged line (what a held note is, for Steadiness)
     note: int | None = None         # Notes mode: the note (index in the NotesMelody's note_list) it was scored against
+    timing_shift_s: float = 0.0     # Melody: its Phrase's timing shift it was scored at (+ = the voice late)
 
 
 def band_for(cents: float, config: ScoreConfig) -> Band:
@@ -44,24 +45,25 @@ def band_for(cents: float, config: ScoreConfig) -> Band:
 
 def score_frame(
     frame: PitchFrame, voiced: bool, reference: Reference, config: ScoreConfig, song_t: float | None,
-    octave_shift: int = 0,
+    octave_shift: int = 0, lag_s: float = 0.0,
 ) -> FrameScore:
     """song_t: the song time this voice frame answers (see clock.py); None = no song was playing then, so a sung
     frame is shown but never scored. Nearest note and Key ignore it.
-    octave_shift k: the voice is k octaves from the original singer, so the target moves by 12 * k semitones."""
+    octave_shift k: the voice is k octaves from the original singer, so the target moves by 12 * k semitones.
+    lag_s: the Phrase's timing shift (a Melody scored per Phrase, see octave.py): the line at song_t - lag_s counts."""
     if not voiced:
-        return FrameScore(frame.t, None, None, None, None, octave=octave_shift)
+        return FrameScore(frame.t, None, None, None, None, octave=octave_shift, timing_shift_s=lag_s)
     midi = hz_to_midi(frame.hz)
     if song_t is None:
-        return FrameScore(frame.t, midi, None, None, None, octave=octave_shift)
-    target = _target(reference, song_t, midi - 12 * octave_shift, config)
+        return FrameScore(frame.t, midi, None, None, None, octave=octave_shift, timing_shift_s=lag_s)
+    target = _target(reference, song_t, midi - 12 * octave_shift, config, lag_s)
     if target.midi is None:       # sung, but the Reference has nothing reliable here: shown, never scored
-        return FrameScore(frame.t, midi, None, None, None, target.in_key, octave_shift)
+        return FrameScore(frame.t, midi, None, None, None, target.in_key, octave_shift, timing_shift_s=lag_s)
     target_midi = target.midi + 12 * octave_shift
     cents = 100.0 * (midi - target_midi)
     line_note = None if target.line_midi is None else note_name(round(target.line_midi + 12 * octave_shift))
     return FrameScore(frame.t, midi, cents, band_for(cents, config), note_name(round(target_midi)), target.in_key,
-                      octave_shift, line_note, target.note)
+                      octave_shift, line_note, target.note, lag_s)
 
 
 def _song_times(frames: Sequence[PitchFrame], song_times: Sequence[float | None] | None) -> Sequence[float | None]:
@@ -74,8 +76,9 @@ def _scored(
 ) -> tuple[list[FrameScore], TakeOctaves]:
     mask = voiced_mask(frames, config)
     octaves = take_octaves(frames, mask, reference, song_times, config, octave)
-    scores = [score_frame(f, v, reference, config, st, k)
-              for f, v, st, k in zip(frames, mask, song_times, octaves.per_frame)]
+    lags = octaves.per_frame_lag or (0.0,) * len(frames)
+    scores = [score_frame(f, v, reference, config, st, k, lag)
+              for f, v, st, k, lag in zip(frames, mask, song_times, octaves.per_frame, lags)]
     return scores, octaves
 
 
@@ -98,8 +101,9 @@ def score_take(
     verdicts (note_scores.py); Steadiness and Range from the frames, as always."""
     scores, octaves = _scored(frames, reference, config, _song_times(frames, song_times), octave)
     verdicts = note_verdicts(scores, reference, config) if scored_per_note(reference, config) else None
+    timing = None if octaves.timing_shift_s is None else 1000.0 * octaves.timing_shift_s
     return dataclasses.replace(summarise(scores, frames, config, verdicts), octave_shift=octaves.shift,
-                               octave_mode=octaves.mode, octave_phrases=octaves.phrases)
+                               octave_mode=octaves.mode, octave_phrases=octaves.phrases, timing_shift_ms=timing)
 
 
 class TakeEngine:
@@ -134,6 +138,9 @@ class TakeEngine:
         self._run_pairs: list[OctavePair] = []       # of the voiced run that is not yet long enough to count
         self._phrase_locked = False
         self._live_octave = octave.k if octave.mode == "pinned" else 0
+        self._live_lag = 0.0                         # the open Phrase's timing shift (a Melody scored per Phrase)
+        self._shifts = shifts_timing(reference, config)
+        self._refit_at = 0                           # after the lock: pairs at which the shift is re-estimated next
         self._started_at = started_at or datetime.now()
 
     def phrase_spans(self) -> list[tuple[int, int]]:
@@ -145,24 +152,44 @@ class TakeEngine:
             return None
         return octave_pair(self._reference, song_t, hz_to_midi(frame.hz), self._config)
 
-    def _live_shift(self, frame: PitchFrame, voiced: bool, song_t: float | None) -> int:
-        """The Octave shift this frame is scored at. Auto, Melody: the open Phrase's best shift over its scored frames
-        so far, re-estimated while the Phrase grows until octave_live_lock_frames of them exist (~2 s of singing),
-        then kept for the rest of that Phrase. A new Phrase starts afresh. Frames of a voiced run too short to count
-        yet are scored at the previous Phrase's shift (before the first Phrase: at the run's own best)."""
+    def _ks(self) -> tuple[int, ...]:
+        return tuple(self._config.octave_shifts) if self._octave.mode == "auto" else (self._live_octave,)
+
+    def _best(self, pairs: list[OctavePair], ks: tuple[int, ...] | None = None) -> tuple[int, float]:
+        """(Octave shift, timing shift) that fits these pairs: jointly with a timing shift per Phrase, else the octave
+        alone (see octave.py)."""
+        if self._shifts:
+            return best_timing(pairs, self._config, ks or self._ks())
+        return best_octave_shift(pairs, self._config), 0.0
+
+    def _live_shift(self, frame: PitchFrame, voiced: bool, song_t: float | None) -> tuple[int, float]:
+        """The (Octave shift, timing shift) this frame is scored at. Melody: the open Phrase's best pair over its
+        scored frames so far (chosen together, octave.best_timing), re-estimated while the Phrase grows until
+        octave_live_lock_frames of them exist (~2 s of singing); then the octave is kept for the rest of that Phrase and
+        the timing shift is re-estimated at it each time the Phrase's scored frames double. A pinned octave searches
+        the timing shift only. A new Phrase starts afresh. Frames of a voiced run too short to count yet are scored at
+        the previous Phrase's pair (before the first Phrase: at the run's own best)."""
         opened = self._phrases.step(frame.t, voiced)          # every frame, whatever the mode: phrase_spans() reports it
         if self._reference.kind != "melody":
-            return 0                                          # only a Melody has an original singer an octave away
-        if self._octave.mode != "auto":
-            return self._live_octave                          # pinned k, or 0 for a legacy Take
+            return 0, 0.0                                     # only a Melody has an original singer an octave away
+        if self._octave.mode != "auto" and not self._shifts:
+            return self._live_octave, 0.0                     # pinned k, or 0 for a legacy Take
+        now = (self._live_octave, self._live_lag)
         if not voiced:
             self._run_pairs = []
-            return self._live_octave
+            return now
         if opened:
             self._phrase_pairs, self._phrase_locked = [], False
         counted = self._phrases.counted
         if self._phrase_locked and counted:
-            return self._live_octave
+            if self._shifts:                                  # the octave is kept; the timing shift keeps learning
+                pair = self._pair(frame, song_t)
+                if pair is not None:
+                    self._phrase_pairs.append(pair)
+                    if len(self._phrase_pairs) >= self._refit_at:
+                        self._live_lag = self._best(self._phrase_pairs, (self._live_octave,))[1]
+                        self._refit_at = 2 * len(self._phrase_pairs)
+            return self._live_octave, self._live_lag
         pair = self._pair(frame, song_t)
         if pair is not None:
             (self._phrase_pairs if counted else self._run_pairs).append(pair)
@@ -170,11 +197,12 @@ class TakeEngine:
             self._phrase_pairs += self._run_pairs
             self._run_pairs = []
         if not counted and not self._phrases.spans and self._run_pairs:      # nothing sung yet: the run's own best
-            return best_octave_shift(self._run_pairs, self._config)
+            return self._best(self._run_pairs)
         if counted and self._phrase_pairs:
-            self._live_octave = best_octave_shift(self._phrase_pairs, self._config)
+            self._live_octave, self._live_lag = self._best(self._phrase_pairs)
             self._phrase_locked = len(self._phrase_pairs) >= self._config.octave_live_lock_frames
-        return self._live_octave
+            self._refit_at = 2 * len(self._phrase_pairs)
+        return self._live_octave, self._live_lag
 
     def push(self, frames: Sequence[PitchFrame]) -> list[FrameScore]:
         """Live scoring, one FrameScore per frame. Uses the streaming gate (no look-ahead, no lag);
@@ -190,7 +218,7 @@ class TakeEngine:
         self._song_times.extend(song_times)
         voiced = [self._gate.step(f) for f in frames]
         return [
-            score_frame(f, v, self._reference, self._config, st, self._live_shift(f, v, st))
+            score_frame(f, v, self._reference, self._config, st, *self._live_shift(f, v, st))
             for f, v, st in zip(frames, voiced, song_times)
         ]
 

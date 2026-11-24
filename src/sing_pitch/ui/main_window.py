@@ -52,6 +52,8 @@ END_GRACE_S = 1.0     # Melody: keep listening this long after the Backing ends
 JUMP_S = 5.0          # the arrow keys jump this far
 DRAW_STEP_S = 0.01    # the reference line is drawn at this resolution on the voice clock
 HALF_RANGE = 12      # semitones shown above and below the centre (4 s of a song spans up to ~20)
+NOTE_LABEL_MIN_PX = 14   # note names on the left axis at least this far apart: on a short plot only every 2nd (3rd...)
+SLIDER_MIN_W = 80
 Y_VOICE_S = 2.0       # the voice's median over this many seconds decides where the vertical range sits
 Y_LOOK_S = 6.0        # a move of the vertical range also looks this many seconds beyond the right half
 Y_EASE = 0.3          # share of the way to the new centre covered per redraw (about 0.3 s for a move)
@@ -164,6 +166,7 @@ class MainWindow(QtWidgets.QWidget):
         self._calibration_output: str | None = None   # the Output the running calibration measures
         self._speed_ready: tuple[str, int, tuple] | None = None   # (song id, percent, stems) loaded for the chosen Speed
         self._speed_job: tuple[int, str, int] | None = None       # (job, song id, percent) being prepared
+        self._start_waiting = False      # Start was pressed while the Speed was prepared: the Take starts when it is ready
         self._speed_playing = 100                                 # the percent the player is set to (or will start at)
         home = self._home     # not self in the lambda: window <-> preparer would be a cycle, freed by gc on any thread
         self._preparer = SpeedPreparer(lambda song_id: SpeedCache(Library(home).get(song_id).dir, SAMPLE_RATE,
@@ -177,6 +180,7 @@ class MainWindow(QtWidgets.QWidget):
         self._tempo_finder = TempoFinder(tempo_detector, self)
         self._tempo_finder.done.connect(self._tempo_found)
         self._detected_bpm: float | None = None      # the chosen song's tempo.json (None = not known yet)
+        self._bpm_note = ""                          # what the BPM box did with a typed value, for the tempo label
         self._settings = Settings.load(self._home)
         self._melody: Melody | None = None           # drawn beside the live line during Melody Takes and replays
         self._melody_latency = 0.0
@@ -197,11 +201,12 @@ class MainWindow(QtWidgets.QWidget):
         self._oct_known = False                   # a scored frame has set it (until then the line sits at 0)
         self._y = YWindow(60, HALF_RANGE)            # where the vertical range is heading; _y_drawn is what shows
         self._y_drawn = 60.0
-        self._y_ticks_from: int | None = None
+        self._y_ticks_from: tuple[int, int] | None = None
         self._ahead = np.empty(0)                    # MIDI of the Reference coming in the right half, as drawn
         self._note_tally: NoteTally | None = None   # Notes mode per note: the running Take's (or replay's) notes
         self._verdicts: dict[int, Band] = {}        # ...and the verdict of each note that has ended
         self._verdicts_since = -math.inf            # voice time the running Take (this Pass) began: verdicts apply after
+        self._tallied_t: float | None = None        # voice time of the newest frame the note tally has
         self._verdict_eras: list[tuple[float, dict[int, Band]]] = []   # (voice start, verdicts) of the Takes before
         self._pending_cuts: list[float] = []        # Take boundaries (voice time) whose later scores are not in yet
         self._tally_args: tuple[Reference, ScoreConfig] | None = None
@@ -286,7 +291,7 @@ class MainWindow(QtWidgets.QWidget):
         self.bpm_box.setSuffix(" BPM")
         self.bpm_box.setKeyboardTracking(False)            # one change when he has typed it, not one per digit
         self.bpm_box.setToolTip("The song's tempo for the Count-in, detected at import; type your own if it is wrong "
-                                "(remembered for this song)")
+                                "(30–300, remembered for this song); 0 or empty goes back to the detected tempo")
         self.bpm_box.editingFinished.connect(self.bpm_box.clearFocus)    # keys go back to the window
         self.beats_box = QtWidgets.QSpinBox()
         self.beats_box.setRange(*player_settings.BEATS_PER_BAR_RANGE)
@@ -410,6 +415,7 @@ class MainWindow(QtWidgets.QWidget):
         self._dots = pg.ScatterPlotItem(size=6, pen=None)
         plot.addItem(self._dots)
         self._plot = plot
+        plot.getViewBox().sigResized.connect(self._apply_y)     # a taller or shorter plot re-spaces the note names
         self._set_y(60)
         self._set_now(0.0)
 
@@ -424,11 +430,12 @@ class MainWindow(QtWidgets.QWidget):
                   self.button, self.replay_button, self.history_button):
             top.addWidget(w)
         top.setStretchFactor(self.song_box, 1)
+        for slider in (self.guide_slider, self.backing_slider, self.note_length_slider, self.tolerance_slider):
+            slider.setMinimumWidth(SLIDER_MIN_W)        # usable with the mouse at the minimum window width (QA #46)
         mix = QtWidgets.QHBoxLayout()
         for w in (self.guide_box, self.guide_slider, QtWidgets.QLabel("Backing"), self.backing_slider,
                   self.pause_button, QtWidgets.QLabel("Speed"), self.speed_box, self.speed_70_button, self.speed_85_button,
-                  self.speed_100_button, self.speed_label, QtWidgets.QLabel("Octave"),
-                  self.octave_box, self.notes_box, self.note_length_slider, self.note_length_label):
+                  self.speed_100_button, self.speed_label):
             mix.addWidget(w)
         mix.addStretch(1)
         sections = QtWidgets.QHBoxLayout()
@@ -439,8 +446,9 @@ class MainWindow(QtWidgets.QWidget):
         sections.addWidget(self.overwrite_button)
         sections.addWidget(self.cancel_overwrite_button)
         sections.addStretch(1)
-        warn = QtWidgets.QHBoxLayout()
-        for w in (QtWidgets.QLabel("Tolerance"), self.tolerance_slider, self.tolerance_label):
+        warn = QtWidgets.QHBoxLayout()                  # how it is scored: Octave, Notes, Tolerance (QA #46: off the mix row)
+        for w in (QtWidgets.QLabel("Octave"), self.octave_box, self.notes_box, self.note_length_slider,
+                  self.note_length_label, QtWidgets.QLabel("Tolerance"), self.tolerance_slider, self.tolerance_label):
             warn.addWidget(w)
         warn.addWidget(self.output_label, 1)
         warn.addWidget(self.headphones_button)
@@ -828,9 +836,15 @@ class MainWindow(QtWidgets.QWidget):
     def _between_changed(self, *_) -> None:
         if self._replay is not None:                 # a replay shows its Take's settings: nothing reacts
             return
-        if 0 < self.bpm_box.value() < player_settings.BPM_RANGE[0]:      # a slip while typing: the slowest tempo
-            self.bpm_box.setValue(player_settings.BPM_RANGE[0])
+        low, high = player_settings.BPM_RANGE
+        bpm = self.bpm_box.value()
+        if 0 < bpm < low:                            # a slip while typing: the slowest tempo, and say why
+            self._bpm_note = f"BPM is {low:.0f}–{high:.0f}: {bpm:g} became {low:.0f}"
+            self.bpm_box.setValue(low)               # comes back here with the allowed value
             return
+        if bpm == 0 and self._detected_bpm is not None:      # 0 or empty: back to the detected tempo (QA #48)
+            self._set_bpm_box(self._detected_bpm)
+            self._bpm_note = f"0 or empty = the detected tempo ({self._detected_bpm:.1f} BPM)"
         self._find_tempo()
         self._remember_player_settings()
         self._show_tempo()
@@ -854,8 +868,9 @@ class MainWindow(QtWidgets.QWidget):
 
     def _show_tempo(self) -> None:
         song_id = self._speed_song()
+        note, self._bpm_note = self._bpm_note, ""    # what the BPM box just did with a typed value: said once
         if self.between_box.currentText() != "Count-in" or song_id is None or self.bpm_box.value() > 0:
-            self.tempo_label.setText("")
+            self.tempo_label.setText(note if self.between_box.currentText() == "Count-in" else "")
         elif self._tempo_finder.busy(song_id):
             self.tempo_label.setText("finding the tempo…")
         else:
@@ -881,6 +896,7 @@ class MainWindow(QtWidgets.QWidget):
             self.summary_label.setText("Mark a Section on the timeline first (drag across it), then loop it.")
             return
         self._last_pass_pct = None
+        self._remember_player_settings()
         self._apply_loop()
         self._show_loop()
 
@@ -961,7 +977,8 @@ class MainWindow(QtWidgets.QWidget):
                                       self.section_box.currentData(), self.octave_box.currentData(),
                                       self.notes_box.isChecked(), self._note_length(),
                                       between="count-in" if self.between_box.currentText() == "Count-in" else "lead-in",
-                                      bpm=self._own_bpm(), beats_per_bar=self.beats_box.value()))
+                                      bpm=self._own_bpm(), beats_per_bar=self.beats_box.value(),
+                                      loop=self.loop_box.isChecked()))
 
     def _restore_player_settings(self, *_) -> None:
         """Put the chosen song's saved Guide vocal, volumes and Speed on the controls (the Section is picked by
@@ -999,6 +1016,7 @@ class MainWindow(QtWidgets.QWidget):
         for widget in (self.between_box, self.beats_box):
             widget.blockSignals(False)
         self._set_bpm_box(saved.bpm if saved.bpm is not None else self._detected_bpm)
+        self._set_loop_box(saved.loop)               # unticked again by reload_sections when its Section is gone
         self._find_tempo()
         self._show_tempo()
 
@@ -1089,6 +1107,22 @@ class MainWindow(QtWidgets.QWidget):
         else:
             self.speed_label.setText(f"preparing {percent} %…")
             self._speed_timer.start()
+        self._start_when_ready()
+
+    def _start_when_ready(self, failed: str | None = None) -> None:
+        """A Start waiting for its Speed: start now when the chosen Speed is ready (or 100 %), keep waiting (saying for
+        which Speed) while it is prepared, give up when it failed or there is no song to start any more."""
+        if not self._start_waiting:
+            return
+        song_id, percent = self._speed_song(), self.speed_box.value()
+        if failed is not None or song_id is None or self._replay is not None or self._calibration is not None:
+            self._start_waiting = False
+            self.summary_label.setText(f"Not started: {failed}" if failed else "Start cancelled.")
+        elif percent == 100 or (self._speed_ready and self._speed_ready[:2] == (song_id, percent)):
+            self._start_waiting = False
+            self._start()
+        else:
+            self.summary_label.setText(f"Starting when {percent} % is ready… (Start again to cancel)")
 
     def _prepare_speed(self) -> None:
         if self._replay is not None:                 # due during a replay: the box shows the Take's Speed; after it
@@ -1117,8 +1151,10 @@ class MainWindow(QtWidgets.QWidget):
             self.speed_box.blockSignals(False)
             self._sync_speed_presets()
             self._remember_player_settings()          # the failed Speed is not kept as the song's Speed
+            self._start_when_ready(failed=f"Speed {percent} % failed: {error}")
             return
         self._speed_ready = (song_id, percent, stems)
+        self._start_when_ready()
         self._set_player_speed(percent, stems)
 
     def _set_player_speed(self, percent: int, stems) -> None:
@@ -1199,9 +1235,13 @@ class MainWindow(QtWidgets.QWidget):
         lo, hi = self._y_drawn - HALF_RANGE, self._y_drawn + HALF_RANGE
         self._plot.setYRange(lo, hi, padding=0)
         first = math.floor(lo)
-        if first != self._y_ticks_from:                    # the labels are the same until the view passes a semitone
-            self._y_ticks_from = first
-            ticks = [(m, f"{NOTE_NAMES[m % 12]}{m // 12 - 1}") for m in range(first - 1, first + 2 * HALF_RANGE + 3)]
+        px = self._plot.getViewBox().height() / (2 * HALF_RANGE)          # pixels per semitone
+        step = max(1, math.ceil(NOTE_LABEL_MIN_PX / px)) if px > 0 else 1
+        if (first, step) != self._y_ticks_from:     # the labels are the same until the view passes a semitone
+            self._y_ticks_from = (first, step)
+            names = range(first - 1, first + 2 * HALF_RANGE + 3)
+            # every semitone keeps its grid line; on a short plot only every step-th has its name (C always among them)
+            ticks = [(m, f"{NOTE_NAMES[m % 12]}{m // 12 - 1}" if m % step == 0 else "") for m in names]
             self._plot.getAxis("left").setTicks([ticks])
 
     def _follow_y(self) -> None:
@@ -1328,8 +1368,8 @@ class MainWindow(QtWidgets.QWidget):
         self.reference_box.setCurrentText(settings["reference"])
         if settings["song"] is not None and self.song_box.findData(settings["song"]) >= 0:
             self.song_box.setCurrentIndex(self.song_box.findData(settings["song"]))
-        if settings["key"] is not None and self.key_box.findData(settings["key"]) >= 0:
-            self.key_box.setCurrentIndex(self.key_box.findData(settings["key"]))
+        if settings["key"] is not None and self.key_box.findText(settings["key"].name) >= 0:     # by name: a saved
+            self.key_box.setCurrentIndex(self.key_box.findText(settings["key"].name))        # Key is another object
         self.octave_box.setCurrentIndex(max(0, self.octave_box.findData(settings["octave"])))
         self.notes_box.setChecked(settings["notes"])
         self.note_length_slider.setValue(slider_of_length(settings["length"]))
@@ -1385,6 +1425,10 @@ class MainWindow(QtWidgets.QWidget):
     def toggle(self) -> None:
         if self._replay is not None:
             return
+        if self._start_waiting:                      # pressed again while waiting for the Speed: no Take after all
+            self._start_waiting = False
+            self.summary_label.setText("Start cancelled.")
+            return
         if self._runner is None:
             self._start()
         else:
@@ -1419,8 +1463,9 @@ class MainWindow(QtWidgets.QWidget):
                 latency = self._settings.latency_for(output)
                 percent = self.speed_box.value()
                 stems = None if percent == 100 else self._stems_for_start(reference.song_id, percent)
-                if percent != 100 and stems is None:
-                    self.summary_label.setText(f"Cannot start yet: preparing {percent} %…")
+                if percent != 100 and stems is None:          # starts by itself once ready (QA #32)
+                    self._start_waiting = True
+                    self.summary_label.setText(f"Starting when {percent} % is ready… (Start again to cancel)")
                     return
                 song = Library(self._home).get(reference.song_id)
                 backing = self._backing_factory(song.backing_path, song.vocals_path, **self._output_kwargs())
@@ -1562,6 +1607,7 @@ class MainWindow(QtWidgets.QWidget):
         """Notes mode scored per note: tally the Take's (or replay's) frames by note, for each note's verdict."""
         self._verdicts, self._verdicts_since, self._verdict_eras, self._pending_cuts = {}, -math.inf, [], []
         self._tally_args = (reference, config)
+        self._tallied_t: float | None = None        # voice time of the newest frame the tally has
         self._note_tally = NoteTally(reference, config) if scored_per_note(reference, config) else None
 
     def _tally(self, scores: list[FrameScore]) -> None:
@@ -1578,6 +1624,8 @@ class MainWindow(QtWidgets.QWidget):
             self._pending_cuts.pop(0)
             self._new_note_era(at)
         self._note_tally.add(scores[i:])
+        if scores:
+            self._tallied_t = scores[-1].t
 
     def _new_note_era(self, at: float) -> None:
         """A Take boundary at voice time `at`: every note of the Take before is judged now (one that ends at the
@@ -1587,11 +1635,12 @@ class MainWindow(QtWidgets.QWidget):
         self._verdicts, self._verdicts_since = {}, at
         self._note_tally = NoteTally(*self._tally_args)
 
-    def _close_notes(self, now: float, fold: PauseFold) -> None:
-        """Give each note the song has passed (its end plus the Timing window) its verdict colour."""
-        if self._note_tally is None:
+    def _close_notes(self, fold: PauseFold) -> None:
+        """Give each note the voice has passed (its end plus the Timing window, at the song time of the newest frame
+        tallied, not of the song heard now: the tracker's frames lag that) its verdict colour, final (QA #45)."""
+        if self._note_tally is None or self._tallied_t is None:
             return
-        song_now = self._song_times(np.array([now]), fold)[0]
+        song_now = self._song_times(fold.to_view(np.array([self._tallied_t])), fold)[0]
         if np.isfinite(song_now):
             self._verdicts.update((v.note, v.band) for v in self._note_tally.close_until(float(song_now)))
 
@@ -1789,7 +1838,7 @@ class MainWindow(QtWidgets.QWidget):
                            size=[11 if o else 6 for o in out])
         now = fold.to_view(self._now_voice())
         self._set_now(now)
-        self._close_notes(now, fold)
+        self._close_notes(fold)
         self._draw_melody(now)
         self._follow_y()
         if self._replay is not None and self._replay.finished:

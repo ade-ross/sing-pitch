@@ -55,22 +55,59 @@ def test_the_speed_control_runs_from_50_to_120_in_steps_of_5_and_acts_with_plus_
     assert not box.isEnabled()
 
 
-def test_a_new_speed_shows_preparing_at_once_without_blocking_and_start_waits_for_it(qtbot, tmp_path):
+def test_a_new_speed_shows_preparing_at_once_and_start_pressed_meanwhile_starts_when_it_is_ready(qtbot, tmp_path):
+    """QA #32: Start pressed while a Speed is prepared used to be refused ('Cannot start yet'); it now waits for it."""
     stretcher = GatedStretcher()
     backings = []
     win, song = melody_window(qtbot, tmp_path, stretcher, backings)
     win.speed_box.setValue(70)
     qtbot.waitUntil(lambda: "preparing 70 %" in win.speed_label.text(), timeout=3000)     # the UI thread stayed free
     win.toggle()
-    assert win._runner is None and "preparing 70 %" in win.summary_label.text()           # Start waits, says why
+    assert win._runner is None and "starting when 70 % is ready" in win.summary_label.text().lower()
     stretcher.gate.set()
-    qtbot.waitUntil(lambda: win.speed_label.text() == "", timeout=5000)
+    qtbot.waitUntil(lambda: win._runner is not None, timeout=5000)                       # it starts by itself
     assert (song.dir / "speed" / "70" / "backing.wav").exists()
-    win.toggle()
-    assert win._runner is not None
     speed, backing, vocal = backings[0].speeds[0]
     assert speed == 0.7 and abs(len(backing) - SR * 2.0 / 0.7) <= 1 and vocal is not None
     win.toggle()
+
+
+def test_start_pressed_again_while_waiting_for_a_speed_cancels_the_start(qtbot, tmp_path):
+    stretcher = GatedStretcher()
+    win, _ = melody_window(qtbot, tmp_path, stretcher)
+    win.speed_box.setValue(70)
+    win.toggle()
+    win.toggle()
+    assert "cancelled" in win.summary_label.text().lower()
+    stretcher.gate.set()
+    qtbot.waitUntil(lambda: win.speed_label.text() == "", timeout=5000)
+    qtbot.wait(100)
+    assert win._runner is None
+
+
+def test_a_start_waiting_for_another_speed_waits_for_the_new_one(qtbot, tmp_path):
+    stretcher = GatedStretcher()
+    backings = []
+    win, _ = melody_window(qtbot, tmp_path, stretcher, backings)
+    win.speed_box.setValue(70)
+    win.toggle()
+    win.speed_box.setValue(85)
+    assert "starting when 85 % is ready" in win.summary_label.text().lower()
+    stretcher.gate.set()
+    qtbot.waitUntil(lambda: win._runner is not None, timeout=5000)
+    assert backings[0].speeds[0][0] == 0.85
+    win.toggle()
+
+
+def test_a_failed_stretch_while_start_waits_says_so_and_does_not_start(qtbot, tmp_path):
+    def broken(audio, sample_rate, speed):
+        raise RuntimeError("out of memory")
+
+    win, _ = melody_window(qtbot, tmp_path, broken)
+    win.speed_box.setValue(60)
+    win.toggle()
+    qtbot.waitUntil(lambda: "failed" in win.speed_label.text(), timeout=5000)
+    assert win._runner is None and "not started" in win.summary_label.text().lower()
 
 
 def test_a_cached_speed_is_not_stretched_again_and_a_change_mid_take_reaches_the_player(qtbot, tmp_path):

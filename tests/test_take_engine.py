@@ -40,8 +40,13 @@ class FixedNote:
     def __init__(self, midi: float):
         self._midi = midi
 
-    def target(self, t, sung_midi, window_s=0.0):
+    def target(self, t, sung_midi, window_s=0.0, lag_s=None):
         return Target(midi=self._midi)
+
+    def shifted_midi(self, song_t, lags_s):
+        import numpy as np
+
+        return np.full((len(np.atleast_1d(song_t)), len(lags_s)), self._midi)
 
 
 def test_against_a_fixed_note_60_cents_flat_is_red():

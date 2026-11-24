@@ -2,7 +2,8 @@
 two volumes (0-1), the Speed in percent and the Section that was chosen (a saved Section's name, None = the unnamed
 mark), the Octave box (None = Auto, else the pinned shift) and Notes mode with its Minimum note length (math.inf = one
 note per Phrase, written "phrase"). Between Passes of a loop: "lead-in" or "count-in", the BPM Simone typed for the
-Count-in (None = the detected tempo, library/tempo.py) and the beats in a bar. A song reopens with these."""
+Count-in (None = the detected tempo, library/tempo.py) and the beats in a bar; whether the Loop box was ticked. A song
+reopens with these."""
 from __future__ import annotations
 
 import json
@@ -34,6 +35,7 @@ class PlayerSettings:
     between: str = "lead-in"
     bpm: float | None = None
     beats_per_bar: int = 4
+    loop: bool = False               # the Loop box (QA #32): the Section comes back looping
 
 
 def _min_note(value) -> float:
@@ -83,6 +85,7 @@ def _from_dict(raw: dict) -> PlayerSettings:
         between=raw.get("between") if raw.get("between") in BETWEEN_CHOICES else d.between,
         bpm=_bpm(raw.get("bpm")),
         beats_per_bar=_beats(raw.get("beats_per_bar", d.beats_per_bar)),
+        loop=raw.get("loop") is True,
     )
 
 

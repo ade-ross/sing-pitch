@@ -51,6 +51,52 @@ def test_the_big_note_label_never_changes_the_window_width_while_singing(qtbot, 
     assert idle[0] <= 1000
 
 
+def row_widgets(win):
+    """The visible widgets of each control row (the window's horizontal layouts), in order."""
+    rows = []
+    for i in range(win.layout().count()):
+        row = win.layout().itemAt(i).layout()
+        if row is not None:
+            items = [row.itemAt(k).widget() for k in range(row.count())]
+            rows.append([w for w in items if w is not None and w.isVisible()])
+    return rows
+
+
+def at_minimum_width(qtbot, tmp_path):
+    win, _ = melody_window(qtbot, tmp_path, title=LONG_TITLE)
+    win.resize(900, 600)                       # asks for less than the minimum: gets the minimum
+    win.show()
+    qtbot.waitExposed(win)
+    QtWidgets.QApplication.processEvents()
+    return win
+
+
+def test_at_the_minimum_width_every_slider_keeps_a_usable_width(qtbot, tmp_path):
+    """QA #46: at 978 px the Guide vocal and Backing sliders were 20 px wide, like check boxes."""
+    win = at_minimum_width(qtbot, tmp_path)
+    for slider in (win.guide_slider, win.backing_slider, win.note_length_slider, win.tolerance_slider):
+        assert slider.width() >= 80, slider.objectName()
+
+
+def test_at_the_minimum_width_no_two_controls_overlap(qtbot, tmp_path):
+    win = at_minimum_width(qtbot, tmp_path)
+    for row in row_widgets(win):
+        for a, b in zip(row, row[1:]):
+            assert a.geometry().right() < b.geometry().left(), (a.objectName(), b.objectName())
+
+
+def test_the_note_labels_thin_out_so_they_never_overlap_on_a_short_plot(qtbot, tmp_path):
+    """QA #46: 24 semitone labels 10.9 px apart on a 261 px plot overlapped (G#4 on G4)."""
+    win = at_minimum_width(qtbot, tmp_path)
+    for height in (900, 600):
+        win.resize(win.width(), height)
+        QtWidgets.QApplication.processEvents()          # a resize alone re-spaces them
+        labelled = [v for v, text in win._plot.getAxis("left")._tickLevels[0] if text]
+        px_per_semitone = win._plot.getViewBox().height() / 24
+        assert min(np.diff(labelled)) * px_per_semitone >= 14, height
+        assert len(labelled) >= 6                              # still a note name every few semitones
+
+
 def test_the_history_window_can_be_narrow_with_long_song_and_section_names(qtbot, tmp_path):
     from sing_pitch.ui.history_view import HistoryView
 
