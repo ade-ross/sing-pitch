@@ -291,7 +291,7 @@ class MainWindow(QtWidgets.QWidget):
         self.history_window = None
         self.note_label = QtWidgets.QLabel("-")
         self.note_label.setStyleSheet("font-size: 40px; font-weight: bold;")
-        self.summary_label = QtWidgets.QLabel("Press Start and sing.")
+        self.summary_label = QtWidgets.QLabel(self._library_notice or "Press Start and sing.")
         self.summary_label.setWordWrap(True)
 
         self.plot_widget = pg.PlotWidget(background="#1e1e1e")
@@ -420,7 +420,9 @@ class MainWindow(QtWidgets.QWidget):
 
     def reload_songs(self) -> None:
         self.song_box.clear()
-        for song in Library(self._home).list_songs():
+        songs, problems = Library(self._home).scan()
+        self._library_notice = f"Skipped a song that cannot be read: {'; '.join(problems)}" if problems else ""
+        for song in songs:
             self.song_box.addItem(song.meta.title, song.id)
         if not self.song_box.count():
             self.song_box.addItem("no songs: sing-pitch import <file or link>", None)
