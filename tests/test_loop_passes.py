@@ -1,0 +1,172 @@
+"""Section loop end to end without a sound card: the real Transport core rendered block by block, a synthetic voice
+that copies exactly what it heard one calibrated latency earlier, and the live runner splitting it into one Take per
+Pass. The voice is built from the loop's own arithmetic (start - Lead-in, Section end, Speed), never from the log."""
+import csv
+import time
+
+import numpy as np
+from frames import HOP, hz_at
+from melody_helpers import library_song, reference_line
+from test_take_boundary_on_jump import Backing, LogView, Mic, VoiceTracker
+
+from sing_pitch.live import LiveRunner
+from sing_pitch.pitch import PitchFrame
+from sing_pitch.playback.transport import Loop, Transport
+from sing_pitch.reference import Melody
+from sing_pitch.take_engine import LinearClock, LogClock, PassTag, TakeEngine
+
+NOTES = [(-900, 0.6), (-700, 0.6), (-500, 0.6), (-400, 0.6), (-200, 0.6), (-500, 0.6), (-900, 1.0)] * 2   # 9.2 s
+SR, MIC_SR, CHUNK, BLOCK = 48000, 16000, 160, 1024
+LATENCY, OUT_AT_ZERO = 0.23, 0.05
+SECTION = Loop(4.0, 8.0, "Chorus 1", lead_in_s=2.0)      # a Pass: song 2.0 .. 8.0, the first 2 s are the Lead-in
+
+
+def note_at(song_t):
+    start = 0.0
+    for cents, seconds in NOTES:
+        if start <= song_t < start + seconds:
+            return cents
+        start += seconds
+    return None
+
+
+def heard_in_loop(speed, section=SECTION):
+    """Song time heard at output time out_s with the loop on from output 0: Passes of (end - pass start) / speed."""
+    pass_s = (section.end_s - section.pass_start_s) / speed
+
+    def heard(out_s):
+        return section.pass_start_s + (out_s % pass_s) * speed if out_s >= 0 else None
+    return heard, pass_s
+
+
+def voice(heard, seconds):
+    out = []
+    for i in range(round(seconds / HOP)):
+        t = i * HOP
+        song_t = heard(t - LATENCY + OUT_AT_ZERO)
+        cents = None if song_t is None else note_at(song_t)
+        out.append(PitchFrame(t, 0.0, 0.0, -140.0) if cents is None else PitchFrame(t, hz_at(cents), 0.98, -20.0))
+    return out
+
+
+def looped_transport(seconds, speed=1.0, section=SECTION):
+    tr = Transport(np.zeros((round(9.2 * SR), 2), np.float32), sample_rate=SR)
+    if speed != 1.0:
+        tr.set_speed(speed, np.zeros((round(9.2 * SR / speed), 2), np.float32))
+    tr.set_loop(section)
+    events, t = [], 0.0
+    while t < seconds:
+        events += tr.render(BLOCK).events
+        t += BLOCK / SR
+    return tr, events
+
+
+def melody():
+    return Melody(reference_line(NOTES), "do-re-mi")
+
+
+def pass_takes(speed):
+    """Three wraps (four Passes, the last one cut short) scored Pass by Pass through the engine."""
+    heard, pass_s = heard_in_loop(speed)
+    tr, events = looped_transport(3.5 * pass_s + 1, speed)
+    starts = [e for e in events if e.kind == "pass_started"]
+    assert [e.pass_index for e in starts[:4]] == [1, 2, 3, 4]
+    assert np.allclose([e.output_s for e in starts[:4]], [k * pass_s for k in range(4)], atol=1 / SR)
+    frames = voice(heard, 3.5 * pass_s)
+    clock = LogClock(tr.log, LATENCY, OUT_AT_ZERO)
+    cuts = [k * pass_s + LATENCY - OUT_AT_ZERO for k in range(1, 4)] + [1e9]
+    takes, lo = [], -1e9
+    for k, hi in enumerate(cuts, start=1):
+        engine = TakeEngine(melody(), song_clock=clock,
+                            pass_tag=PassTag("Chorus 1", SECTION.start_s, SECTION.end_s, k))
+        engine.push([f for f in frames if lo <= f.t < hi])
+        takes.append(engine.stop())
+        lo = hi
+    return takes, frames
+
+
+def check_passes(takes, speed=1.0):
+    for k, record in enumerate(takes[:3], start=1):
+        s = record.summary
+        assert (record.section_name, record.pass_index) == ("Chorus 1", k)
+        assert s.pct_in_tune >= 98.0 and s.median_abs_cents < 1.0
+        # only the Section is scored: 4 s of song (4 / speed s of singing), never the 2 s Lead-in
+        assert abs(s.n_scored * HOP - 4.0 / speed) < 0.15
+        lead_in = [st for f, st in zip(record.frames, record.song_times) if f.hz > 0 and st is None]
+        assert abs(len(lead_in) * HOP - 2.0 / speed) < 0.15
+
+
+def test_three_loop_wraps_give_passes_each_about_100_in_tune_with_the_lead_in_unscored():
+    takes, frames = pass_takes(1.0)
+    check_passes(takes)
+    # the old constant offset loses the sync from the first wrap on
+    old = TakeEngine(melody(), song_clock=LinearClock(LATENCY - OUT_AT_ZERO))
+    old.push(frames)
+    assert old.stop().summary.pct_in_tune < 70.0
+
+
+def test_the_passes_stay_about_100_in_tune_at_70_percent_speed():
+    takes, _ = pass_takes(0.7)
+    check_passes(takes, 0.7)
+
+
+def test_a_pass_take_rescores_to_the_same_numbers(tmp_path):
+    from sing_pitch.take_store import rescore_take, save_take
+
+    library_song(tmp_path, reference_line(NOTES))
+    takes, _ = pass_takes(1.0)
+    saved = save_take(tmp_path, takes[1])
+    again = rescore_take(tmp_path, saved.id, write=True)
+    assert again.summary == saved.summary and again.song_times == saved.song_times
+    assert (again.section_name, again.pass_index) == ("Chorus 1", 2)
+    (row,) = csv.DictReader(open(tmp_path / "takes.csv"))
+    assert (row["section_name"], row["pass_index"]) == ("Chorus 1", "2")
+
+
+# --- through the live runner ----------------------------------------------------------------------------------------
+
+def sing_looped(tmp_path, passes, speed=1.0, section=SECTION, expect_shown=0):
+    """One Start..Stop with the loop on from the start; the Transport's events are handed to the runner just before
+    the voice that answers them, as the audio thread would."""
+    heard, pass_s = heard_in_loop(speed, section)
+    seconds = passes * pass_s
+    tr, events = looped_transport(seconds + 1, speed, section)
+    frames = voice(heard, seconds)
+    backing = Backing(LogView(tr.log, OUT_AT_ZERO + CHUNK / MIC_SR))
+    mic = Mic()
+    runner = LiveRunner(mic, VoiceTracker(frames), melody(), tmp_path, backing=backing, latency_s=LATENCY)
+    runner.start()
+    pending = sorted(events, key=lambda e: e.output_s)
+    fed = 0
+    if pending and pending[0].output_s == 0.0:      # the loop was set before Start: its first Pass starts at once
+        backing.on_event(pending.pop(0))
+    while fed < round(seconds * MIC_SR):
+        while pending and fed / MIC_SR >= pending[0].output_s + LATENCY - OUT_AT_ZERO - 0.1:
+            backing.on_event(pending.pop(0))
+        mic.on_chunk(np.zeros(CHUNK, np.float32))
+        fed += CHUNK
+    shown, deadline = [], time.monotonic() + 5.0       # before Stop: what the UI timer would have picked up
+    while time.monotonic() < deadline and len(shown) < expect_shown:
+        shown += runner.drain_saved()
+        time.sleep(0.01)
+    record = runner.stop()
+    return record, shown, list(csv.DictReader(open(tmp_path / "takes.csv")))
+
+
+def test_three_wraps_through_the_runner_save_three_tagged_pass_takes_while_the_loop_goes_on(tmp_path):
+    library_song(tmp_path, reference_line(NOTES))
+    record, shown, rows = sing_looped(tmp_path, passes=3.5, expect_shown=3)
+    # Passes 1-3 complete; Pass 4 has only ~1 s of Section singing (under 3 s) and is dropped at Stop
+    assert [(r["section_name"], r["pass_index"]) for r in rows] == [("Chorus 1", "1"), ("Chorus 1", "2"),
+                                                                    ("Chorus 1", "3")]
+    assert all(float(r["pct_in_tune"]) >= 98.0 for r in rows)
+    assert all(abs(int(r["n_scored_frames"]) * HOP - 4.0) < 0.15 for r in rows)
+    # each Pass's result reached the UI while the loop went on, not only at Stop
+    assert [t.pass_index for t in shown] == [1, 2, 3] and record.pass_index == 3
+
+
+def test_a_pass_with_under_3_s_of_scored_singing_is_discarded(tmp_path):
+    library_song(tmp_path, reference_line(NOTES))
+    short = Loop(4.0, 6.5, "Short", lead_in_s=2.0)           # 2.5 s of Section per Pass
+    _, _, rows = sing_looped(tmp_path, passes=2.5, section=short)
+    assert len(rows) == 1 and rows[0]["section_name"] == "Short"     # a run always keeps its last Take
