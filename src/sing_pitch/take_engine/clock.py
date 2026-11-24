@@ -14,6 +14,8 @@ class SongLog(Protocol):
 
     def song_time(self, output_s: float) -> float | None: ...
 
+    def tail(self) -> tuple[float, float | None, float] | None: ...
+
 
 class SongClock(Protocol):
     offset_s: float      # t - song time at the Take start: drawn on the plot and kept in takes.csv (latency_offset_s)
@@ -45,6 +47,12 @@ class LogClock:
     def __call__(self, t: float) -> float | None:
         return self._log.song_time(t - self.offset_s)
 
+    def tail(self) -> tuple[float, float | None, float] | None:
+        """(voice time, song time, rate) where the rendered song ends, for projecting the song that is still to be
+        heard: the voice time is ahead of the live voice by about the latency. Song time None = paused there."""
+        tail = self._log.tail()
+        return None if tail is None else (tail[0] + self.offset_s, tail[1], tail[2])
+
 
 class SampledClock:
     """A saved Take's own clock: the song time of each of its frames (None = paused), read between and just beyond
@@ -67,6 +75,24 @@ class SampledClock:
             value = float(np.interp(t, self._t, self._song))
             return None if np.isnan(value) else value
         return None if np.isnan(edge) else float(edge + (t - at))
+
+
+def project_song_time(dt: np.ndarray, song_s: float, rate: float, loop_end_s: float | None = None,
+                      loop_pass_start_s: float = 0.0, song_end_s: float | None = None) -> np.ndarray:
+    """The song time that will be heard `dt` output seconds after the song was at `song_s` playing at `rate` (song
+    seconds per output second). Inside a loop the song runs to loop_end_s and wraps to loop_pass_start_s (the Lead-in),
+    again and again; outside one it is NaN (no song) past song_end_s. Assumes what is playing now keeps playing: a
+    seek, pause or Speed change that has not been rendered yet is not foreseen."""
+    dt = np.asarray(dt, dtype=np.float64)
+    song = song_s + dt * rate
+    if loop_end_s is not None and rate > 0 and song_s < loop_end_s:
+        pass_s = max(loop_end_s - loop_pass_start_s, 1e-6)
+        over = song - loop_end_s                        # song seconds past the Section end, as if it ran on
+        wrapped = loop_pass_start_s + np.mod(over, pass_s)
+        return np.where(over >= 0, wrapped, song)
+    if song_end_s is not None:
+        song = np.where(song > song_end_s, np.nan, song)
+    return song
 
 
 def linear_song_times(frames: Sequence[PitchFrame], offset_s: float = 0.0) -> list[float]:

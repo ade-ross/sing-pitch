@@ -113,7 +113,7 @@ def test_the_reference_line_is_drawn_through_the_song_clock_so_it_stretches_with
     win._melody_latency = 0.0
     win.toggle()
     backings[-1].song_log.append(0, 0.0, 0.5)                 # the player at 50 %: half a song second per output second
-    win._draw_melody(10.0)
+    win._draw_melody(4.0)                                     # the plot shows voice time 0 .. 8 s
     x, midi = win._ref_curve.getData()
     drawn = x[np.isfinite(midi)]
     assert abs(drawn[-1] - 2.0 * 2.0) < 0.05 + 0.02 * 2 and drawn[0] >= 0.0   # a 2 s melody lasts 4 s of output at 50 %
