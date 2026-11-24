@@ -29,6 +29,8 @@ class Playback(Protocol):
 
     def set_gains(self, backing: float, vocal: float) -> None: ...
 
+    def set_speed(self, speed: float, backing=None, vocal=None) -> None: ...
+
 
 class LiveTake:
     """One Take, fed chunk by chunk. Drive from ONE thread. song_clock: see TakeEngine."""

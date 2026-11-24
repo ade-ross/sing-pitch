@@ -8,25 +8,29 @@ from typing import Callable
 
 import numpy as np
 import pyqtgraph as pg
-from PySide6 import QtCore, QtWidgets
+from PySide6 import QtCore, QtGui, QtWidgets
 
 from ..audio_input import AudioInput, SoundDeviceInput, list_inputs, pick_input
-from ..config import data_dir
+from ..config import SAMPLE_RATE, data_dir
 from ..calibration import CalibrationRun
 from ..library import Library
 from ..live import LiveRunner, Playback
 from ..music import NOTE_NAMES, note_name
 from ..pitch import PitchTracker
 from ..playback import BackingPlayer, DronePlayer
+from ..playback.stretch import SpeedCache, Stretcher, time_stretch
 from ..playback.outputs import OutputKind, default_output_name, headphone_warning, output_kind
 from ..reference import Band, Key, Melody, NearestNote, Reference
 from ..replay import Replay
 from ..settings import DEFAULT_OUTPUT, Settings
 from ..take_engine import FrameScore, TakeRecord, replay_scores
 from ..take_store import last_take_id, load_frames, saved_latency, saved_reference, saved_song_times
+from .speed_prep import SpeedPreparer
 
 WINDOW_S = 10.0       # seconds of line on screen
 TICK_MS = 33          # ~30 Hz redraw
+SPEED_MIN, SPEED_MAX, SPEED_STEP = 50, 120, 5     # Speed in percent of the original
+SPEED_DEBOUNCE_MS = 400   # +/- pressed several times: stretch only the Speed he stops on
 END_GRACE_S = 1.0     # Melody: keep listening this long after the Backing ends
 HALF_RANGE = 8        # semitones shown above and below the centre
 BAND_COLOUR = {Band.GREEN: "#2ecc71", Band.YELLOW: "#f1c40f", Band.RED: "#e74c3c"}
@@ -83,6 +87,7 @@ class MainWindow(QtWidgets.QWidget):
         backing_factory: Callable[[Path, Path], Playback] = BackingPlayer.from_file,
         output_info: Callable[[], tuple[str | None, OutputKind]] = _default_output,
         calibration_player_factory: Callable | None = None,
+        stretcher: Stretcher = time_stretch,
     ):
         super().__init__()
         self.setWindowTitle("sing-pitch")
@@ -95,6 +100,16 @@ class MainWindow(QtWidgets.QWidget):
         self._output_info = output_info
         self._calibration_player_factory = calibration_player_factory
         self._calibration: CalibrationRun | None = None
+        self._speed_ready: tuple[str, int, tuple] | None = None   # (song id, percent, stems) loaded for the chosen Speed
+        self._speed_job: tuple[int, str, int] | None = None       # (job, song id, percent) being prepared
+        self._speed_playing = 100                                 # the percent the player is set to (or will start at)
+        self._preparer = SpeedPreparer(lambda song_id: SpeedCache(Library(self._home).get(song_id).dir, SAMPLE_RATE,
+                                                                  stretcher), self)
+        self._preparer.done.connect(self._speed_prepared)
+        self._speed_timer = QtCore.QTimer(self)
+        self._speed_timer.setSingleShot(True)
+        self._speed_timer.setInterval(SPEED_DEBOUNCE_MS)
+        self._speed_timer.timeout.connect(self._prepare_speed)
         self._settings = Settings.load(self._home)
         self._melody: Melody | None = None           # drawn beside the live line during Melody Takes and replays
         self._melody_latency = 0.0
@@ -122,6 +137,18 @@ class MainWindow(QtWidgets.QWidget):
         self.backing_slider = _volume_slider("Backing volume")
         for w in (self.guide_box, self.guide_slider, self.backing_slider):
             (w.toggled if w is self.guide_box else w.valueChanged).connect(self._apply_gains)
+        self.speed_box = QtWidgets.QSpinBox()
+        self.speed_box.setRange(SPEED_MIN, SPEED_MAX)
+        self.speed_box.setSingleStep(SPEED_STEP)
+        self.speed_box.setValue(100)
+        self.speed_box.setSuffix(" %")
+        self.speed_box.setFocusPolicy(QtCore.Qt.NoFocus)         # so + and - stay shortcuts of the window
+        self.speed_box.setToolTip("Speed, pitch unchanged (+ and - change it by 5 %)")
+        self.speed_label = QtWidgets.QLabel("")
+        self.speed_box.valueChanged.connect(self._speed_changed)
+        self.song_box.currentIndexChanged.connect(self._speed_changed)
+        for key, step in (("+", 1), ("=", 1), ("-", -1)):
+            QtGui.QShortcut(QtGui.QKeySequence(key), self, activated=lambda step=step: self._step_speed(step))
         self.calibrate_button = QtWidgets.QPushButton("Calibrate latency")
         self.calibrate_button.clicked.connect(self.start_calibration)
         self.output_label = QtWidgets.QLabel("")
@@ -166,7 +193,8 @@ class MainWindow(QtWidgets.QWidget):
         top.addStretch(1)
         top.addWidget(self.note_label)
         mix = QtWidgets.QHBoxLayout()
-        for w in (self.guide_box, self.guide_slider, QtWidgets.QLabel("Backing"), self.backing_slider):
+        for w in (self.guide_box, self.guide_slider, QtWidgets.QLabel("Backing"), self.backing_slider,
+                  QtWidgets.QLabel("Speed"), self.speed_box, self.speed_label):
             mix.addWidget(w)
         mix.addStretch(1)
         warn = QtWidgets.QHBoxLayout()
@@ -208,14 +236,87 @@ class MainWindow(QtWidgets.QWidget):
         self.key_box.setEnabled(is_key)
         self.drone_box.setEnabled(is_key)
         self.song_box.setEnabled(is_melody)
-        for w in (self.guide_box, self.guide_slider, self.backing_slider):
+        for w in (self.guide_box, self.guide_slider, self.backing_slider, self.speed_box):
             w.setEnabled(is_melody)
         self.update_output_warning()
+        self._speed_changed()
 
     def _apply_gains(self, *_) -> None:
         """Slider and checkbox changes reach the player at once, also mid-Take; it ramps them within a block."""
         if self._backing is not None:
             self._backing.set_gains(*self._gains())
+
+    # --- Speed -------------------------------------------------------------------------------------------------
+    def speed_up(self) -> None:
+        self._step_speed(1)
+
+    def speed_down(self) -> None:
+        self._step_speed(-1)
+
+    def _step_speed(self, direction: int) -> None:
+        if self.speed_box.isEnabled():
+            self.speed_box.setValue(self.speed_box.value() + direction * SPEED_STEP)      # stays within 50-120
+
+    def _speed_song(self) -> str | None:
+        return self.song_box.currentData() if self.reference_box.currentText() == "Melody" else None
+
+    def _speed_changed(self, *_) -> None:
+        """The chosen Speed or song changed (or the Reference did). 100 % and Speeds whose stems are already loaded
+        apply at once; a Speed cached on disk loads in the background; a new one is stretched in the background
+        after a short pause (so a run of +/- presses prepares only the Speed he stops on) while the player keeps its
+        old Speed. The message says what is going on."""
+        song_id, percent = self._speed_song(), self.speed_box.value()
+        self._speed_timer.stop()
+        self._speed_job = None
+        if song_id is None:
+            self.speed_label.setText("")
+        elif percent == 100:
+            self._speed_ready = None
+            self._set_player_speed(100, None)
+        elif self._speed_ready and self._speed_ready[:2] == (song_id, percent):
+            self._set_player_speed(percent, self._speed_ready[2])
+        elif self._preparer.is_cached(song_id, percent):
+            self._prepare_speed()
+        else:
+            self.speed_label.setText(f"preparing {percent} %…")
+            self._speed_timer.start()
+
+    def _prepare_speed(self) -> None:
+        song_id, percent = self._speed_song(), self.speed_box.value()
+        if song_id is not None and percent != 100:
+            self._speed_job = (self._preparer.start(song_id, percent), song_id, percent)
+
+    def _speed_prepared(self, job: int, stems, error) -> None:
+        if self._speed_job is None or self._speed_job[0] != job:
+            return                                        # superseded: its result is cached on disk for next time
+        _, song_id, percent = self._speed_job
+        self._speed_job = None
+        if error is not None:
+            self.speed_label.setText(f"Speed {percent} % failed: {error}")
+            self.speed_box.blockSignals(True)
+            self.speed_box.setValue(self._speed_playing)
+            self.speed_box.blockSignals(False)
+            return
+        self._speed_ready = (song_id, percent, stems)
+        self._set_player_speed(percent, stems)
+
+    def _set_player_speed(self, percent: int, stems) -> None:
+        self._speed_playing = percent
+        self.speed_label.setText("")
+        if self._backing is not None:
+            self._backing.set_speed(percent / 100, *(stems or ()))
+
+    def _stems_for_start(self, song_id: str, percent: int):
+        """The stretched stems a Take at `percent` starts with, or None while they are still being prepared."""
+        if self._speed_ready and self._speed_ready[:2] == (song_id, percent):
+            return self._speed_ready[2]
+        if self._preparer.is_cached(song_id, percent):
+            stems = self._preparer.load_now(song_id, percent)
+            self._speed_ready = (song_id, percent, stems)
+            return stems
+        if self._speed_job is None and not self._speed_timer.isActive():
+            self._speed_changed()
+        return None
 
     def _gains(self) -> tuple[float, float]:
         """(Backing, Guide vocal) linear gains from the controls; the Guide vocal is 0 while its box is unticked."""
@@ -328,9 +429,17 @@ class MainWindow(QtWidgets.QWidget):
             if reference.kind == "melody":
                 output, _ = self._output_info()
                 latency = self._settings.latency_for(output)
+                percent = self.speed_box.value()
+                stems = None if percent == 100 else self._stems_for_start(reference.song_id, percent)
+                if percent != 100 and stems is None:
+                    self.summary_label.setText(f"Cannot start yet: preparing {percent} %…")
+                    return
                 song = Library(self._home).get(reference.song_id)
                 backing = self._backing_factory(song.backing_path, song.vocals_path)
                 backing.set_gains(*self._gains())
+                if stems is not None:
+                    backing.set_speed(percent / 100, *stems)
+                self._speed_playing = percent
             self._runner = LiveRunner(self._input_factory(index), self._tracker, reference, self._home,
                                       backing=backing, latency_s=latency)
             self._runner.start()
@@ -441,12 +550,13 @@ class MainWindow(QtWidgets.QWidget):
         latency = self._melody_latency
         if self._runner is not None and self._runner.latency_s is not None:
             latency = self._runner.latency_s
+        stretch = 1.0 / getattr(self._backing, "speed", 1.0)       # at 50 % the melody lasts twice as long on screen
         t, midi = self._melody.midi_line()
-        x = t + latency
+        x = t * stretch + latency
         keep = (x >= t_end - WINDOW_S) & (x <= t_end + 1.0)
         self._ref_curve.setData(x[keep], midi[keep])
-        spans = [(a + latency, b + latency) for a, b in self._melody.unscored_spans()
-                 if b + latency >= t_end - WINDOW_S and a + latency <= t_end + 1.0]
+        spans = [(a * stretch + latency, b * stretch + latency) for a, b in self._melody.unscored_spans()
+                 if b * stretch + latency >= t_end - WINDOW_S and a * stretch + latency <= t_end + 1.0]
         self._unscored.setOpts(x0=[a for a, _ in spans], x1=[b for _, b in spans],
                                y0=[0.0] * len(spans), y1=[127.0] * len(spans))
 
