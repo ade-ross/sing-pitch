@@ -156,7 +156,7 @@ def sing_looped(tmp_path, passes, speed=1.0, section=SECTION, expect_shown=0):
 def test_three_wraps_through_the_runner_save_three_tagged_pass_takes_while_the_loop_goes_on(tmp_path):
     library_song(tmp_path, reference_line(NOTES))
     record, shown, rows = sing_looped(tmp_path, passes=3.5, expect_shown=3)
-    # Passes 1-3 complete; Pass 4 has only ~1 s of Section singing (under 3 s) and is dropped at Stop
+    # Passes 1-3 complete; Pass 4 has only ~1 s of its 4 s Section (under half) and is dropped at Stop
     assert [(r["section_name"], r["pass_index"]) for r in rows] == [("Chorus 1", "1"), ("Chorus 1", "2"),
                                                                     ("Chorus 1", "3")]
     assert all(float(r["pct_in_tune"]) >= 98.0 for r in rows)
@@ -165,8 +165,18 @@ def test_three_wraps_through_the_runner_save_three_tagged_pass_takes_while_the_l
     assert [t.pass_index for t in shown] == [1, 2, 3] and record.pass_index == 3
 
 
-def test_a_pass_with_under_3_s_of_scored_singing_is_discarded(tmp_path):
+def test_passes_of_a_section_shorter_than_3_s_are_saved_and_a_pass_cut_short_is_discarded(tmp_path):
+    """A Pass Take is kept when it scored at least half of its Section (3 s is for Takes cut by a jump): every full
+    Pass of a 1.2 s Section is saved; the last Pass, stopped 0.25 s into its Section, is not."""
+    library_song(tmp_path, reference_line(NOTES))
+    short = Loop(4.0, 5.2, "Short", lead_in_s=2.0)           # 1.2 s of Section per Pass (a Pass = 3.2 s)
+    _, _, rows = sing_looped(tmp_path, passes=3 + 2.25 / 3.2, section=short, expect_shown=3)
+    assert [(r["section_name"], r["pass_index"]) for r in rows] == [("Short", "1"), ("Short", "2"), ("Short", "3")]
+    assert all(abs(int(r["n_scored_frames"]) * HOP - 1.2) < 0.15 for r in rows)
+
+
+def test_a_two_and_a_half_second_section_keeps_its_full_passes(tmp_path):
     library_song(tmp_path, reference_line(NOTES))
     short = Loop(4.0, 6.5, "Short", lead_in_s=2.0)           # 2.5 s of Section per Pass
-    _, _, rows = sing_looped(tmp_path, passes=2.5, section=short)
-    assert len(rows) == 1 and rows[0]["section_name"] == "Short"     # a run always keeps its last Take
+    _, _, rows = sing_looped(tmp_path, passes=2.5, section=short, expect_shown=2)
+    assert [r["pass_index"] for r in rows] == ["1", "2"]     # Pass 3 has 0.25 s of Section: discarded at Stop

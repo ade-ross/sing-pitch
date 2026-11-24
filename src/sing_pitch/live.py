@@ -18,7 +18,9 @@ from .take_engine import FrameScore, LogClock, PassTag, SongClock, TakeEngine, T
 from .take_store import save_take
 
 FRAME_S = 0.016              # one tracker frame
-MIN_TAKE_SCORED_S = 3.0      # a Take closed by a jump or a loop wrap with less scored singing than this is discarded
+MIN_TAKE_SCORED_S = 3.0      # a Take closed by a jump with less scored singing than this is discarded
+MIN_PASS_FRACTION = 0.5      # a Pass Take is kept when it scored this share of its Section's singable time...
+MIN_PASS_SCORED_S = 0.3      # ...but at least this much, and never more is asked than MIN_TAKE_SCORED_S
 
 
 def pass_tag(loop, pass_index: int) -> PassTag:
@@ -42,8 +44,22 @@ def _guide_settings(history: list[tuple[float, float]], frames) -> tuple[str, fl
     return ("on" if all(on) else "mixed"), round(max(gains), 3)
 
 
-def _too_short(record: TakeRecord) -> bool:
-    return record.summary.n_scored * FRAME_S < MIN_TAKE_SCORED_S
+def _singable_s(reference: Reference, tag: PassTag) -> float:
+    """Song seconds of the Section the Reference can score (a Reference without a line: the whole Section)."""
+    if not hasattr(reference, "sample"):
+        return tag.end_s - tag.start_s
+    midi, _ = reference.sample(np.arange(tag.start_s, tag.end_s, FRAME_S))
+    return float(np.isfinite(midi).sum()) * FRAME_S
+
+
+def _too_short(record: TakeRecord, reference: Reference, tag: PassTag | None) -> bool:
+    """Too little scored singing to keep: under MIN_TAKE_SCORED_S, or for a Pass under MIN_PASS_FRACTION of its
+    Section's singable time (in voice seconds at its Speed), so Sections shorter than 3 s still save their Passes."""
+    need = MIN_TAKE_SCORED_S
+    if tag is not None:
+        voice_s = _singable_s(reference, tag) / (record.speed_pct / 100)
+        need = min(need, max(MIN_PASS_SCORED_S, MIN_PASS_FRACTION * voice_s))
+    return record.summary.n_scored * FRAME_S < need
 
 
 class Playback(Protocol):
@@ -126,7 +142,8 @@ class LiveRunner:
 
     A jump (the Backing's "jumped" event) closes the current Take and opens the next one: voice frames before the
     jump's input time (event output time + the clock's offset) belong to the old Take, the rest to the new one. A Take
-    closed that way with less than MIN_TAKE_SCORED_S of scored singing is discarded; the others are saved at once
+    closed that way with less than MIN_TAKE_SCORED_S of scored singing is discarded (a Pass Take: less than
+    MIN_PASS_FRACTION of its Section, see _too_short); the others are saved at once
     and listed by drain_saved(). On stop() the last Take is saved too, unless it is that short and an earlier Take of
     the run was saved (a run always leaves at least one Take).
 
@@ -279,7 +296,7 @@ class LiveRunner:
         record = self._with_settings(old.close())
         if speed_pct is not None:
             self._speed_pct = speed_pct
-        if not _too_short(record):
+        if not _too_short(record, self._reference, old.pass_tag):
             saved = save_take(self._home, record)
             self._saved.append(saved)
             self._saved_news.put(saved)
@@ -327,6 +344,6 @@ class LiveRunner:
         if self._error is not None:
             raise self._error
         record = self._with_settings(self._take.finish())
-        if self._saved and _too_short(record):
+        if self._saved and _too_short(record, self._reference, self._take.pass_tag):
             return self._saved[-1]
         return save_take(self._home, record)
