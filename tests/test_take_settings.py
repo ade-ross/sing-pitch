@@ -32,7 +32,8 @@ def test_a_take_row_carries_guide_vocal_guide_gain_and_speed_pct(tmp_path):
     save_take(tmp_path, record)
     (row,) = csv.DictReader(open(summary_path(tmp_path)))
     assert (row["guide_vocal"], row["guide_gain"], row["speed_pct"]) == ("mixed", "0.6", "70")
-    assert COLUMNS[-4:] == ("guide_vocal", "guide_gain", "speed_pct", "octave_mode")      # new columns go at the end
+    assert COLUMNS[-6:] == ("guide_vocal", "guide_gain", "speed_pct", "octave_mode", "note_mode",
+                            "min_note_s")      # new columns go at the end
 
 
 def test_a_take_without_practice_settings_is_saved_as_guide_off_speed_100(tmp_path):

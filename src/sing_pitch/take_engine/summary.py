@@ -62,6 +62,8 @@ class TakeRecord:
     speed_pct: int = 100                # Speed the Take was sung at (a Speed change starts a new Take)
     clock_times: tuple[float | None, ...] | None = None   # a Pass Take: the clock's song time of each frame before
                                         # the Lead-in was masked out, for drawing the Reference (None = song_times)
+    note_mode: str = "off"              # "on" = scored against the Notes-mode bars (#19)
+    min_note_s: float | None = None     # Notes mode: the Minimum note length (math.inf = one note per Phrase)
 
 
 def count_out_of_key(scores: Sequence) -> int:

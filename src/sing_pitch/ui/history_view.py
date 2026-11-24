@@ -10,6 +10,7 @@ from ..config import data_dir
 from ..history import WHOLE_SONG, History, Series, load_history
 
 REFERENCE_LABEL = {"nearest": "Nearest note", "key": "Key", "melody": "Melody"}
+NOTES_LABEL = {"off": "Line", "on": "Notes"}
 GUIDE_LABEL = {"off": "Guide off", "on": "Guide on", "mixed": "Guide switched mid-Take"}
 EMPTY_TEXT = "No Takes yet. Sing a Take and it will show up here."
 EMPTY_FILTER_TEXT = "No scored Takes match this filter."
@@ -27,6 +28,7 @@ class HistoryView(QtWidgets.QWidget):
         self.guide_box = QtWidgets.QComboBox()
         self.speed_box = QtWidgets.QComboBox()
         self.section_box = QtWidgets.QComboBox()
+        self.notes_box = QtWidgets.QComboBox()
         self.refresh_button = QtWidgets.QPushButton("Refresh")
         self.empty_label = QtWidgets.QLabel(EMPTY_TEXT)
         self.empty_label.setAlignment(QtCore.Qt.AlignCenter)
@@ -52,7 +54,7 @@ class HistoryView(QtWidgets.QWidget):
         top = QtWidgets.QHBoxLayout()
         for w in (QtWidgets.QLabel("Reference"), self.reference_box, QtWidgets.QLabel("Song"), self.song_box,
                   QtWidgets.QLabel("Guide vocal"), self.guide_box, QtWidgets.QLabel("Speed"), self.speed_box,
-                  QtWidgets.QLabel("Section"), self.section_box):
+                  QtWidgets.QLabel("Section"), self.section_box, QtWidgets.QLabel("Notes mode"), self.notes_box):
             top.addWidget(w)
         top.addStretch(1)
         top.addWidget(self.refresh_button)
@@ -67,7 +69,7 @@ class HistoryView(QtWidgets.QWidget):
         self.reload()
 
     def _boxes(self) -> tuple[QtWidgets.QComboBox, ...]:
-        return self.reference_box, self.song_box, self.guide_box, self.speed_box, self.section_box
+        return self.reference_box, self.song_box, self.guide_box, self.speed_box, self.section_box, self.notes_box
 
     def reload(self) -> None:
         """Re-read the summary table and rebuild the filter boxes, keeping the current choice when it still exists."""
@@ -80,6 +82,7 @@ class HistoryView(QtWidgets.QWidget):
             (self.speed_box, [(f"{p} %", p) for p in h.speeds], len(h.speeds) > 1),
             (self.section_box, [("Whole song", WHOLE_SONG)] * bool(h.sections) + [(s, s) for s in h.sections],
              bool(h.sections)),
+            (self.notes_box, [(NOTES_LABEL[m], m) for m in h.note_modes], len(h.note_modes) > 1),
         )
         for box, items, enabled in choices:
             keep = box.currentData()
@@ -94,8 +97,8 @@ class HistoryView(QtWidgets.QWidget):
         self._apply_filters()
 
     def _apply_filters(self) -> None:
-        ref, song, guide, speed, section = (box.currentData() for box in self._boxes())
-        self.show_series(self.history.series(ref, song, guide, speed, section))
+        ref, song, guide, speed, section, notes = (box.currentData() for box in self._boxes())
+        self.show_series(self.history.series(ref, song, guide, speed, section, notes))
 
     def show_series(self, series: Series) -> None:
         if series.started_at:
