@@ -12,6 +12,7 @@ from ..reference import Band, Reference
 from .clock import LinearClock, SongClock
 from .gate import VoicingGate, voiced_mask
 from .octave import AUTO, OctaveSetting, PhraseTracker, TakeOctaves, best_octave_shift, take_octaves
+from .note_scores import note_verdicts, scored_per_note
 from .summary import PassTag, TakeRecord, TakeSummary, summarise
 
 
@@ -27,6 +28,7 @@ class FrameScore:
     in_key: bool | None = None      # Key Reference only: False = the sung note is outside the key
     octave: int = 0                 # the Octave shift this frame was scored at: the Reference is drawn at it
     line_note: str | None = None    # Notes mode: the note of the unmerged line (what a held note is, for Steadiness)
+    note: int | None = None         # Notes mode: the note (index in the NotesMelody's note_list) it was scored against
 
 
 def band_for(cents: float, config: ScoreConfig) -> Band:
@@ -65,7 +67,7 @@ def score_frame(
     cents = 100.0 * (midi - target_midi)
     line_note = None if target.line_midi is None else note_name(round(target.line_midi + 12 * octave_shift))
     return FrameScore(frame.t, midi, cents, band_for(cents, config), note_name(round(target_midi)), target.in_key,
-                      octave_shift, line_note)
+                      octave_shift, line_note, target.note)
 
 
 def _song_times(frames: Sequence[PitchFrame], song_times: Sequence[float | None] | None) -> Sequence[float | None]:
@@ -98,9 +100,11 @@ def score_take(
     song_times: Sequence[float | None] | None = None, octave: OctaveSetting = AUTO,
 ) -> TakeSummary:
     """Final numbers for a whole Take. Also the re-score path: raw frames + their saved song times in, same
-    numbers out."""
+    numbers out. Notes mode (config.notes_per_note): % in tune, median cents and tendency come from the notes'
+    verdicts (note_scores.py); Steadiness and Range from the frames, as always."""
     scores, octaves = _scored(frames, reference, config, _song_times(frames, song_times), octave)
-    return dataclasses.replace(summarise(scores, frames, config), octave_shift=octaves.shift,
+    verdicts = note_verdicts(scores, reference, config) if scored_per_note(reference, config) else None
+    return dataclasses.replace(summarise(scores, frames, config, verdicts), octave_shift=octaves.shift,
                                octave_mode=octaves.mode, octave_phrases=octaves.phrases)
 
 

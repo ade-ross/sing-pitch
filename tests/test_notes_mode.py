@@ -146,8 +146,9 @@ def test_a_notes_take_records_its_mode_and_length_and_a_rescore_reproduces_it(tm
         assert (row["note_mode"], row["min_note_s"]) == ("on", cell)
         again = rescore_take(tmp_path, saved.id)
         assert again.summary == saved.summary
-        # 0.3 s: two bars, E and G, both sung; per Phrase: one bar (E and G held equally long: the first, E)
-        assert saved.summary.pct_in_tune == (pytest.approx(100.0, abs=3) if length == 0.3 else pytest.approx(50, abs=3))
+        # 0.3 s: two bars, E and G, both sung; per Phrase: one bar (E and G held equally long: the first, E), scored
+        # once on the voice's median over it (#41), which lies between E and G: not in tune
+        assert saved.summary.pct_in_tune == (pytest.approx(100.0, abs=3) if length == 0.3 else 0.0)
         assert (again.note_mode, again.min_note_s) == ("on", length)
 
 

@@ -18,6 +18,7 @@ class Target:
     midi: float | None            # target pitch as float MIDI; None = unscored (Melody only)
     in_key: bool | None = None    # Key Reference only: False = outside the key
     line_midi: float | None = None   # Melody only: the line itself where midi is a Notes-mode bar (None = same as midi)
+    note: int | None = None          # Notes mode: which note (index in note_list) midi is the bar of
 
 
 class Reference(Protocol):

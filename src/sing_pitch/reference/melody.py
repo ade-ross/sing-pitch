@@ -180,6 +180,16 @@ class NotesMelody(Melody):
     def notes(self, min_note_s: float) -> NotesMelody:
         return Melody(self.line, self.song_id, self.scored).notes(min_note_s)
 
+    def _target_at(self, j: int, line_midi: float) -> Target:
+        return Target(float(self._midi[j]), line_midi=line_midi, note=int(self._note_index[j]))
+
+    def note_spans_s(self) -> tuple[np.ndarray, np.ndarray]:
+        """(end in song time, length in s) of each note in note_list. The length counts its scored frames only."""
+        hop = self._tolerance / 1.5
+        ends = np.array([self._t[n.end - 1] + hop / 2 for n in self.note_list], dtype=np.float64)
+        counts = np.bincount(self._note_index[self._note_index >= 0], minlength=len(self.note_list))
+        return ends, counts[:len(self.note_list)] * hop
+
     def note_index_at(self, song_t: np.ndarray) -> np.ndarray:
         """Which note sounds at each song time (its index in note_list), -1 where none does."""
         song_t = np.asarray(song_t, dtype=np.float64)

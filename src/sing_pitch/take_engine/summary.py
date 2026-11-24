@@ -12,6 +12,7 @@ from ..music import note_name
 from ..pitch import PitchFrame
 from ..reference import Band, Reference
 from .blips import without_blips
+from .note_scores import weighted_median
 from .steadiness import steadiness_cents
 
 
@@ -85,13 +86,24 @@ def count_out_of_key(scores: Sequence) -> int:
     return count
 
 
-def summarise(scores: Sequence, frames: Sequence[PitchFrame], config: ScoreConfig) -> TakeSummary:
+def summarise(scores: Sequence, frames: Sequence[PitchFrame], config: ScoreConfig,
+              verdicts: Sequence | None = None) -> TakeSummary:
+    """verdicts: Notes mode per note (note_scores.NoteVerdict); % in tune is then the green share of the sung notes'
+    length, and median cents and tendency the length-weighted medians of the notes' cents. None: frame by frame."""
     voiced = [s for s in scores if s.midi is not None]
     scored = [s for s in voiced if s.cents is not None]
     duration = frames[-1].t - frames[0].t if len(frames) > 1 else 0.0
     if not scored:
         return TakeSummary(len(voiced), 0, duration, None, None, None, None, None)
-    signed = statistics.median(s.cents for s in scored)
+    if verdicts:
+        weights = [v.length_s for v in verdicts]
+        signed = weighted_median([v.cents for v in verdicts], weights)
+        pct = 100.0 * sum(w for v, w in zip(verdicts, weights) if v.band is Band.GREEN) / sum(weights)
+        median_abs = weighted_median([abs(v.cents) for v in verdicts], weights)
+    else:
+        signed = statistics.median(s.cents for s in scored)
+        pct = 100.0 * sum(s.band is Band.GREEN for s in scored) / len(scored)
+        median_abs = statistics.median(abs(s.cents) for s in scored)
     if abs(signed) <= config.tendency_deadband_cents:
         tendency = "centred"
     else:
@@ -104,8 +116,8 @@ def summarise(scores: Sequence, frames: Sequence[PitchFrame], config: ScoreConfi
         n_voiced=len(voiced),
         n_scored=len(scored),
         duration_s=duration,
-        pct_in_tune=100.0 * sum(s.band is Band.GREEN for s in scored) / len(scored),
-        median_abs_cents=statistics.median(abs(s.cents) for s in scored),
+        pct_in_tune=pct,
+        median_abs_cents=median_abs,
         tendency=tendency,
         lowest_note=note_name(round(float(low))),
         highest_note=note_name(round(float(high))),
