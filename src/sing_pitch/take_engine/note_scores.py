@@ -4,7 +4,8 @@ A frame belongs to the note it was scored against (FrameScore.note, after the Ti
 median of its frames' cents (the voice's median pitch minus the bar) and its Band under the Tolerance. Only notes with
 at least one scored frame count ("sung notes"); each weighs its length (its scored reference frames). The live view
 shows a verdict once the song is past the note's end plus the Timing window (NoteTally); the summary uses the same
-verdicts for the whole Take (note_verdicts), so both agree."""
+verdicts for the whole Take (note_verdicts), so both agree. A verdict is final once given: frames of a closed note
+that arrive later are left out (QA #45: the tracker's tail of a note used to re-close it on those frames alone)."""
 from __future__ import annotations
 
 import statistics
@@ -39,10 +40,11 @@ class NoteTally:
         self._ends, self._lengths = reference.note_spans_s()
         self._config = config
         self._cents: dict[int, list[float]] = {}
+        self._closed: set[int] = set()
 
     def add(self, scores: Iterable) -> None:
         for s in scores:
-            if s.note is not None and s.cents is not None and s.note >= 0:
+            if s.note is not None and s.cents is not None and s.note >= 0 and s.note not in self._closed:
                 self._cents.setdefault(s.note, []).append(s.cents)
 
     def close_until(self, song_s: float) -> list[NoteVerdict]:
@@ -52,6 +54,7 @@ class NoteTally:
         done = sorted(k for k in self._cents if self._ends[k] + window <= song_s)
         out = []
         for k in done:
+            self._closed.add(k)
             cents = statistics.median(self._cents.pop(k))
             out.append(NoteVerdict(k, cents, _band(cents, self._config), float(self._lengths[k])))
         return out

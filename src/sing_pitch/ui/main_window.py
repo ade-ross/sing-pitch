@@ -202,6 +202,7 @@ class MainWindow(QtWidgets.QWidget):
         self._note_tally: NoteTally | None = None   # Notes mode per note: the running Take's (or replay's) notes
         self._verdicts: dict[int, Band] = {}        # ...and the verdict of each note that has ended
         self._verdicts_since = -math.inf            # voice time the running Take (this Pass) began: verdicts apply after
+        self._tallied_t: float | None = None        # voice time of the newest frame the note tally has
         self._verdict_eras: list[tuple[float, dict[int, Band]]] = []   # (voice start, verdicts) of the Takes before
         self._pending_cuts: list[float] = []        # Take boundaries (voice time) whose later scores are not in yet
         self._tally_args: tuple[Reference, ScoreConfig] | None = None
@@ -1562,6 +1563,7 @@ class MainWindow(QtWidgets.QWidget):
         """Notes mode scored per note: tally the Take's (or replay's) frames by note, for each note's verdict."""
         self._verdicts, self._verdicts_since, self._verdict_eras, self._pending_cuts = {}, -math.inf, [], []
         self._tally_args = (reference, config)
+        self._tallied_t: float | None = None        # voice time of the newest frame the tally has
         self._note_tally = NoteTally(reference, config) if scored_per_note(reference, config) else None
 
     def _tally(self, scores: list[FrameScore]) -> None:
@@ -1578,6 +1580,8 @@ class MainWindow(QtWidgets.QWidget):
             self._pending_cuts.pop(0)
             self._new_note_era(at)
         self._note_tally.add(scores[i:])
+        if scores:
+            self._tallied_t = scores[-1].t
 
     def _new_note_era(self, at: float) -> None:
         """A Take boundary at voice time `at`: every note of the Take before is judged now (one that ends at the
@@ -1587,11 +1591,12 @@ class MainWindow(QtWidgets.QWidget):
         self._verdicts, self._verdicts_since = {}, at
         self._note_tally = NoteTally(*self._tally_args)
 
-    def _close_notes(self, now: float, fold: PauseFold) -> None:
-        """Give each note the song has passed (its end plus the Timing window) its verdict colour."""
-        if self._note_tally is None:
+    def _close_notes(self, fold: PauseFold) -> None:
+        """Give each note the voice has passed (its end plus the Timing window, at the song time of the newest frame
+        tallied, not of the song heard now: the tracker's frames lag that) its verdict colour, final (QA #45)."""
+        if self._note_tally is None or self._tallied_t is None:
             return
-        song_now = self._song_times(np.array([now]), fold)[0]
+        song_now = self._song_times(fold.to_view(np.array([self._tallied_t])), fold)[0]
         if np.isfinite(song_now):
             self._verdicts.update((v.note, v.band) for v in self._note_tally.close_until(float(song_now)))
 
@@ -1789,7 +1794,7 @@ class MainWindow(QtWidgets.QWidget):
                            size=[11 if o else 6 for o in out])
         now = fold.to_view(self._now_voice())
         self._set_now(now)
-        self._close_notes(now, fold)
+        self._close_notes(fold)
         self._draw_melody(now)
         self._follow_y()
         if self._replay is not None and self._replay.finished:
