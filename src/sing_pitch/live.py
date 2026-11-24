@@ -24,6 +24,8 @@ class Playback(Protocol):
 
     def stop(self) -> None: ...
 
+    def set_gains(self, backing: float, vocal: float) -> None: ...
+
 
 class LiveTake:
     """One Take, fed chunk by chunk. Drive from ONE thread. latency_s: see TakeEngine."""
