@@ -5,6 +5,7 @@ import dataclasses
 import math
 import queue
 import threading
+from datetime import datetime, timedelta
 from pathlib import Path
 from typing import Protocol
 
@@ -72,11 +73,12 @@ class LiveTake:
     """One Take, fed chunk by chunk. Drive from ONE thread. song_clock: see TakeEngine."""
 
     def __init__(self, tracker: PitchTracker, reference: Reference, sample_rate: int,
-                 song_clock: SongClock | None = None, reset_tracker: bool = True, pass_tag: PassTag | None = None):
+                 song_clock: SongClock | None = None, reset_tracker: bool = True, pass_tag: PassTag | None = None,
+                 started_at: datetime | None = None):
         """reset_tracker False: a Take that goes on from the previous one's audio (after a jump or a loop wrap), so
-        the tracker keeps its state and its frame times. pass_tag: see TakeEngine."""
+        the tracker keeps its state and its frame times. pass_tag, started_at: see TakeEngine."""
         self._tracker = tracker
-        self._engine = TakeEngine(reference, song_clock=song_clock, pass_tag=pass_tag)
+        self._engine = TakeEngine(reference, song_clock=song_clock, pass_tag=pass_tag, started_at=started_at)
         self._sample_rate = sample_rate
         if reset_tracker:
             tracker.reset()
@@ -159,6 +161,7 @@ class LiveRunner:
         self._saved_news: queue.SimpleQueue = queue.SimpleQueue()
         self._thread: threading.Thread | None = None
         self._error: Exception | None = None      # what killed the worker, if anything
+        self._run_started = datetime.now()        # wall clock at input time 0: a cut's Take starts at this + its time
 
     def start(self) -> None:
         """Open the Backing and the input, then start the worker: a Start that fails leaves no thread behind."""
@@ -167,7 +170,8 @@ class LiveRunner:
         self._speed_pct = round(100 * getattr(self._backing, "speed", 1.0))
         self._speed_next = None
         self._guide = [(-math.inf, getattr(self._backing, "current_gains", (1.0, 0.0))[1])]
-        self._take = LiveTake(self._tracker, self._reference, self._source.sample_rate)
+        self._run_started = datetime.now()
+        self._take = LiveTake(self._tracker, self._reference, self._source.sample_rate, started_at=self._run_started)
         if self._backing is None:
             on_chunk = self._chunks.put
         else:
@@ -260,15 +264,17 @@ class LiveRunner:
                 break
             scores += self._take.push_frames(frames[:first_after])
             frames = frames[first_after:]
-            _, tag, pct = self._cuts.pop(0)
-            self._next_take(tag, pct)
+            at, tag, pct = self._cuts.pop(0)
+            self._next_take(tag, pct, at)
         return scores + self._take.push_frames(frames)
 
     def _with_settings(self, record: TakeRecord) -> TakeRecord:
         guide, gain = _guide_settings(self._guide, record.frames)
         return dataclasses.replace(record, guide_vocal=guide, guide_gain=gain, speed_pct=self._speed_pct)
 
-    def _next_take(self, tag: PassTag | None = None, speed_pct: int | None = None) -> None:
+    def _next_take(self, tag: PassTag | None = None, speed_pct: int | None = None, at: float = 0.0) -> None:
+        """Close the running Take and open the next one at voice time `at`: it started at the run start + `at` (not
+        when the worker got here), so Takes cut a few seconds apart get their own started_at and id."""
         old, clock = self._take, self._take.song_clock
         record = self._with_settings(old.close())
         if speed_pct is not None:
@@ -278,7 +284,8 @@ class LiveRunner:
             self._saved.append(saved)
             self._saved_news.put(saved)
         self._take = LiveTake(self._tracker, self._reference, self._source.sample_rate, song_clock=clock,
-                              reset_tracker=False, pass_tag=tag)
+                              reset_tracker=False, pass_tag=tag,
+                              started_at=self._run_started + timedelta(seconds=max(0.0, at)))
 
     def drain_saved(self) -> list[TakeRecord]:
         """Takes saved at a jump or a loop wrap since the last call (the last Take of the run comes from stop())."""
