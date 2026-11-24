@@ -17,6 +17,7 @@ class SpeedPreparer(QtCore.QObject):
     finishes and fills the cache."""
 
     done = QtCore.Signal(int, object, object)
+    progress = QtCore.Signal(int, float)           # (job, fraction 0..1 of its rendering), whole percents only
 
     def __init__(self, cache_for: Callable[[str], SpeedCache], parent: QtCore.QObject | None = None):
         super().__init__(parent)
@@ -41,9 +42,20 @@ class SpeedPreparer(QtCore.QObject):
             self._inflight[key] = [job]
         cache = self._cache_for(song_id)
 
+        shown = [-1]
+
+        def on_progress(fraction: float) -> None:
+            if round(100 * fraction) == shown[0]:
+                return
+            shown[0] = round(100 * fraction)
+            with self._lock:
+                waiting = list(self._inflight.get(key, ()))
+            for waiting_job in waiting:
+                self.progress.emit(waiting_job, fraction)
+
         def work() -> None:
             try:
-                stems, error = cache.get(percent), None
+                stems, error = cache.get(percent, progress=on_progress), None
             except Exception as exc:
                 stems, error = None, exc
             with self._lock:

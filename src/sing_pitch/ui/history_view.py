@@ -8,6 +8,7 @@ from PySide6 import QtCore, QtWidgets
 
 from ..config import data_dir
 from ..history import WHOLE_SONG, History, Series, load_history
+from .eliding import eliding_combo
 
 REFERENCE_LABEL = {"nearest": "Nearest note", "key": "Key", "melody": "Melody"}
 NOTES_LABEL = {"off": "Line", "on": "Notes"}
@@ -24,13 +25,21 @@ class HistoryView(QtWidgets.QWidget):
         self.resize(900, 600)
         self._home = home or data_dir()
 
-        self.reference_box = QtWidgets.QComboBox()
-        self.song_box = QtWidgets.QComboBox()
-        self.guide_box = QtWidgets.QComboBox()
-        self.speed_box = QtWidgets.QComboBox()
-        self.section_box = QtWidgets.QComboBox()
-        self.notes_box = QtWidgets.QComboBox()
+        self.reference_box = eliding_combo(10)
+        self.song_box = eliding_combo(16)
+        self.guide_box = eliding_combo(8)
+        self.speed_box = eliding_combo(5)
+        self.section_box = eliding_combo(12)
+        self.notes_box = eliding_combo(6)
         self.refresh_button = QtWidgets.QPushButton("Refresh")
+        for box, tip in ((self.reference_box, "Show only Takes against this Reference"),
+                         (self.song_box, "Show only Takes of this song (Melody Takes)"),
+                         (self.guide_box, "Show only Takes with the Guide vocal on or off"),
+                         (self.speed_box, "Show only Takes sung at this Speed"),
+                         (self.section_box, "Show only Passes of this Section, or whole-song Takes"),
+                         (self.notes_box, "Show only Takes scored as a line or as Notes")):
+            box.setToolTip(tip)
+        self.refresh_button.setToolTip("Read the saved Takes again")
         self.empty_label = QtWidgets.QLabel(EMPTY_TEXT)
         self.empty_label.setAlignment(QtCore.Qt.AlignCenter)
 
@@ -52,15 +61,18 @@ class HistoryView(QtWidgets.QWidget):
         self.cents_curve = self._cents_plot.plot(pen=pg.mkPen("#f1c40f", width=2), symbol="o", symbolSize=7,
                                                  symbolBrush="#f1c40f")
 
-        top = QtWidgets.QHBoxLayout()
-        for w in (QtWidgets.QLabel("Reference"), self.reference_box, QtWidgets.QLabel("Song"), self.song_box,
-                  QtWidgets.QLabel("Guide vocal"), self.guide_box, QtWidgets.QLabel("Speed"), self.speed_box,
-                  QtWidgets.QLabel("Section"), self.section_box, QtWidgets.QLabel("Notes mode"), self.notes_box):
-            top.addWidget(w)
-        top.addStretch(1)
-        top.addWidget(self.refresh_button)
+        top, more = QtWidgets.QHBoxLayout(), QtWidgets.QHBoxLayout()          # two rows: narrow windows work (#25)
+        for row, items in ((top, (QtWidgets.QLabel("Reference"), self.reference_box, QtWidgets.QLabel("Song"),
+                                  self.song_box, QtWidgets.QLabel("Guide vocal"), self.guide_box)),
+                           (more, (QtWidgets.QLabel("Speed"), self.speed_box, QtWidgets.QLabel("Section"),
+                                   self.section_box, QtWidgets.QLabel("Notes mode"), self.notes_box))):
+            for w in items:
+                row.addWidget(w)
+            row.addStretch(1)
+        more.addWidget(self.refresh_button)
         layout = QtWidgets.QVBoxLayout(self)
         layout.addLayout(top)
+        layout.addLayout(more)
         layout.addWidget(self.empty_label, 1)
         layout.addWidget(self.plot_widget, 1)
 
