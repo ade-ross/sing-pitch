@@ -11,7 +11,7 @@ import numpy as np
 from .audio_input import AudioInput
 from .pitch import PitchTracker
 from .reference import Reference
-from .take_engine import FrameScore, TakeEngine, TakeRecord
+from .take_engine import FrameScore, LogClock, SongClock, TakeEngine, TakeRecord
 from .take_store import save_take
 
 
@@ -22,27 +22,31 @@ class Playback(Protocol):
 
     def position_s(self) -> float: ...
 
+    @property
+    def song_log(self): ...         # playback.SongTimeLog: output time -> song time
+
     def stop(self) -> None: ...
 
     def set_gains(self, backing: float, vocal: float) -> None: ...
 
 
 class LiveTake:
-    """One Take, fed chunk by chunk. Drive from ONE thread. latency_s: see TakeEngine."""
+    """One Take, fed chunk by chunk. Drive from ONE thread. song_clock: see TakeEngine."""
 
-    def __init__(self, tracker: PitchTracker, reference: Reference, sample_rate: int, latency_s: float = 0.0):
+    def __init__(self, tracker: PitchTracker, reference: Reference, sample_rate: int,
+                 song_clock: SongClock | None = None):
         self._tracker = tracker
-        self._engine = TakeEngine(reference, latency_s=latency_s)
+        self._engine = TakeEngine(reference, song_clock=song_clock)
         self._sample_rate = sample_rate
         tracker.reset()
 
     @property
-    def latency_s(self) -> float:
-        return self._engine.latency_s
+    def song_clock(self) -> SongClock:
+        return self._engine.song_clock
 
-    @latency_s.setter
-    def latency_s(self, value: float) -> None:
-        self._engine.latency_s = value
+    @song_clock.setter
+    def song_clock(self, value: SongClock) -> None:
+        self._engine.song_clock = value
 
     def feed(self, chunk: np.ndarray) -> list[FrameScore]:
         return self._engine.push(self._tracker.push(chunk, self._sample_rate))
@@ -57,8 +61,9 @@ class LiveRunner:
     the UI calls drain() from its timer. Stop() ends the Take and saves it.
 
     Melody Takes pass the Backing player and the calibrated loop latency. The Backing starts first; at the first
-    mic chunk the runner reads how far the song already is, so the Take's latency offset becomes
-    latency_s - (song position when the input clock was at 0)."""
+    mic chunk the runner reads how much output the Backing had rendered when the input clock was at 0, and from then
+    on a voice frame at input time t is scored against the song time the Backing's song-time log shows at output
+    time t - latency_s (a LogClock), so pauses (later seeks, loops, Speed) keep the sync."""
 
     def __init__(self, source: AudioInput, tracker: PitchTracker, reference: Reference, home: Path,
                  backing: Playback | None = None, latency_s: float = 0.0):
@@ -77,7 +82,7 @@ class LiveRunner:
     def start(self) -> None:
         """Open the Backing and the input, then start the worker: a Start that fails leaves no thread behind."""
         self._error = None
-        self._take = LiveTake(self._tracker, self._reference, self._source.sample_rate, self._latency_s)
+        self._take = LiveTake(self._tracker, self._reference, self._source.sample_rate)
         if self._backing is None:
             on_chunk = self._chunks.put
         else:
@@ -92,8 +97,9 @@ class LiveRunner:
                 nonlocal first
                 if first:
                     first = False
-                    song_at_zero = self._backing.position_s() - len(chunk) / self._source.sample_rate
-                    self._chunks.put(("align", self._latency_s - song_at_zero))
+                    log = self._backing.song_log
+                    output_at_zero = log.rendered_s - len(chunk) / self._source.sample_rate
+                    self._chunks.put(("align", LogClock(log, self._latency_s, output_at_zero)))
                 self._chunks.put(chunk)
 
         try:
@@ -118,8 +124,8 @@ class LiveRunner:
             if self._error is not None:       # crashed earlier: keep emptying the queue until stop() ends us
                 continue
             try:
-                if isinstance(chunk, tuple):            # ("align", latency): set before the first frame is scored
-                    self._take.latency_s = chunk[1]
+                if isinstance(chunk, tuple):            # ("align", clock): set before the first frame is scored
+                    self._take.song_clock = chunk[1]
                 else:
                     self._scores.put(self._take.feed(chunk))
             except Exception as exc:
@@ -127,8 +133,9 @@ class LiveRunner:
 
     @property
     def latency_s(self) -> float | None:
-        """The Take's latency offset (after alignment to the Backing), for drawing the reference line."""
-        return None if self._take is None else self._take.latency_s
+        """The song clock's offset at the Take start (voice time - song time while the song plays linearly), for
+        drawing the reference line on the voice clock."""
+        return None if self._take is None else self._take.song_clock.offset_s
 
     def drain(self) -> list[FrameScore]:
         out: list[FrameScore] = []

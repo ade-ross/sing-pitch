@@ -3,7 +3,7 @@ import pytest
 from melody_helpers import reference_line, voice_following
 
 from sing_pitch.reference import Band, Melody
-from sing_pitch.take_engine import TakeEngine, replay_scores, score_take
+from sing_pitch.take_engine import LinearClock, TakeEngine, linear_song_times, replay_scores, score_take
 
 MELODY = [(-900, 0.6), (-700, 0.6), (-500, 0.6), (-400, 0.6), (-200, 0.6), (-500, 0.6), (-900, 1.0)]  # C D E F G E C
 
@@ -16,7 +16,7 @@ def sung_octaves_from(notes, octaves):
 def test_a_melody_sung_whole_octaves_away_has_that_octave_shift_and_full_marks(k):
     line = reference_line(MELODY)
     frames = voice_following(sung_octaves_from(MELODY, k), 0.2)
-    s = score_take(frames, Melody(line, "do-re-mi"), latency_s=0.2)
+    s = score_take(frames, Melody(line, "do-re-mi"), song_times=linear_song_times(frames, 0.2))
     assert s.octave_shift == k
     assert s.pct_in_tune >= 98.0 and s.median_abs_cents < 1.0
 
@@ -24,7 +24,7 @@ def test_a_melody_sung_whole_octaves_away_has_that_octave_shift_and_full_marks(k
 def test_a_melody_sung_an_octave_down_is_all_green_in_the_replay_too():
     line = reference_line(MELODY)
     frames = voice_following(sung_octaves_from(MELODY, -1), 0.2)
-    scores = replay_scores(frames, Melody(line, "x"), latency_s=0.2)
+    scores = replay_scores(frames, Melody(line, "x"), song_times=linear_song_times(frames, 0.2))
     assert all(x.band is Band.GREEN for x in scores[40:100])
 
 
@@ -48,7 +48,7 @@ def test_octave_shift_is_stored_in_the_table_and_a_rescore_reproduces_it(tmp_pat
     from sing_pitch.take_store import rescore_take, save_take, summary_path
 
     song = library_song(tmp_path, reference_line(MELODY))
-    eng = TakeEngine(Melody.from_song(song), latency_s=0.2, started_at=datetime(2026, 11, 23, 21, 0, 0))
+    eng = TakeEngine(Melody.from_song(song), song_clock=LinearClock(0.2), started_at=datetime(2026, 11, 23, 21, 0, 0))
     eng.push(voice_following(sung_octaves_from(MELODY, -1), 0.2))
     saved = save_take(tmp_path, eng.stop())
     assert saved.summary.octave_shift == -1

@@ -1,4 +1,7 @@
-"""Take store: each Take = raw pitch line (takes/<id>.npz) + one row in takes.csv. Nothing else."""
+"""Take store: each Take = raw pitch line (takes/<id>.npz) + one row in takes.csv. Nothing else.
+
+The npz also keeps `song_t`, the song time each frame was scored against (NaN = no song playing). Takes saved
+before the song-time log have no song_t: their song times are t - latency_offset_s, as they were scored then."""
 from __future__ import annotations
 
 import csv
@@ -12,7 +15,7 @@ from .. import __version__
 from ..config import DEFAULT_SCORE_CONFIG, ScoreConfig
 from ..pitch import PitchFrame
 from ..reference import Key, Melody, NearestNote, Reference
-from ..take_engine import TakeRecord, score_take
+from ..take_engine import TakeRecord, linear_song_times, score_take
 
 # The ONE summary table. Columns for later tickets (steadiness, octave shift, key, song) exist from the start
 # so the file never changes shape; values not measured yet are left empty.
@@ -64,6 +67,8 @@ def save_take(home: Path, record: TakeRecord) -> TakeRecord:
         hz=np.array([x.hz for x in f], dtype=np.float64),
         confidence=np.array([x.confidence for x in f], dtype=np.float64),
         loudness_db=np.array([x.loudness_db for x in f], dtype=np.float64),
+        **({} if record.song_times is None else
+           {"song_t": np.array([np.nan if x is None else x for x in record.song_times], dtype=np.float64)}),
     )
     path = summary_path(home)
     new_file = not path.exists()
@@ -81,6 +86,19 @@ def load_frames(home: Path, take_id: str) -> list[PitchFrame]:
             PitchFrame(float(t), float(hz), float(c), float(db))
             for t, hz, c, db in zip(z["t"], z["hz"], z["confidence"], z["loudness_db"])
         ]
+
+
+def _song_times(home: Path, take_id: str, row: dict, frames: list[PitchFrame]) -> list[float | None]:
+    with np.load(_take_path(home, take_id)) as z:
+        if "song_t" in z.files:
+            return [None if np.isnan(x) else float(x) for x in z["song_t"]]
+    return linear_song_times(frames, float(row["latency_offset_s"] or 0.0))
+
+
+def saved_song_times(home: Path, take_id: str) -> list[float | None]:
+    """Per frame, the song time the saved Take was scored against (old Takes: t - latency_offset_s)."""
+    row = next(r for r in _rows(home) if r["id"] == take_id)
+    return _song_times(home, take_id, row, load_frames(home, take_id))
 
 
 def _rows(home: Path) -> list[dict]:
@@ -118,7 +136,7 @@ def saved_reference(home: Path, take_id: str) -> Reference:
 
 
 def saved_latency(home: Path, take_id: str) -> float:
-    """The latency offset the Take was scored with (0 for Nearest note and Key)."""
+    """The song clock's offset at the Take start (0 for Nearest note and Key): where the reference line is drawn."""
     row = next(r for r in _rows(home) if r["id"] == take_id)
     return float(row["latency_offset_s"] or 0.0)
 
@@ -139,15 +157,17 @@ def rescore_take(
         reference = _reference_for(row, home)
     frames = load_frames(home, take_id)
     latency = float(row["latency_offset_s"] or 0.0)
+    song_times = _song_times(home, take_id, row, frames)
     record = TakeRecord(
         id=take_id,
         started_at=datetime.fromisoformat(row["started_at"]),
         reference_kind=row["reference"],
         frames=tuple(frames),
-        summary=score_take(frames, reference, config, latency),
+        summary=score_take(frames, reference, config, song_times),
         key=row["key"] or None,
         song_id=row["song_id"] or None,
         latency_offset_s=latency,
+        song_times=tuple(song_times),
     )
     if write:
         rows = [_row(record) if r["id"] == take_id else r for r in rows]

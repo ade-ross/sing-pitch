@@ -7,6 +7,7 @@ from frames import hz_at
 from melody_helpers import library_song, reference_line
 
 from sing_pitch.audio_input import ArrayInput
+from sing_pitch.playback import SongTimeLog
 from sing_pitch.pitch.swiftf0 import SwiftF0Tracker
 from sing_pitch.settings import Settings
 
@@ -19,6 +20,8 @@ class FakeBacking:
     def __init__(self, path=None, vocals=None):
         self.path, self.vocals, self.started, self.stopped = path, vocals, False, False
         self.gains = []
+        self.song_log = SongTimeLog(SR)
+        self.song_log.append(0, 0.0)             # playing from the song start, nothing rendered yet
 
     def set_gains(self, backing, vocal):
         self.gains.append((backing, vocal))

@@ -23,7 +23,7 @@ from ..reference import Band, Key, Melody, NearestNote, Reference
 from ..replay import Replay
 from ..settings import DEFAULT_OUTPUT, Settings
 from ..take_engine import FrameScore, TakeRecord, replay_scores
-from ..take_store import last_take_id, load_frames, saved_latency, saved_reference
+from ..take_store import last_take_id, load_frames, saved_latency, saved_reference, saved_song_times
 
 WINDOW_S = 10.0       # seconds of line on screen
 TICK_MS = 33          # ~30 Hz redraw
@@ -268,7 +268,8 @@ class MainWindow(QtWidgets.QWidget):
         try:
             reference = saved_reference(self._home, take_id)       # a Melody Take whose song was removed raises here
             latency = saved_latency(self._home, take_id)
-            replay = Replay(replay_scores(load_frames(self._home, take_id), reference, latency_s=latency))
+            song_times = saved_song_times(self._home, take_id)
+            replay = Replay(replay_scores(load_frames(self._home, take_id), reference, song_times=song_times))
         except Exception as exc:
             self.summary_label.setText(f"Cannot replay Take {take_id}: {exc}")
             return
