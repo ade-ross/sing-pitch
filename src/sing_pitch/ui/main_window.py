@@ -24,13 +24,15 @@ from ..playback.outputs import OutputKind, default_output_name, headphone_warnin
 from ..reference import Band, Key, Melody, NearestNote, Reference
 from ..replay import Replay
 from ..settings import DEFAULT_OUTPUT, Settings
-from ..take_engine import AUTO, FrameScore, LinearClock, SampledClock, SongClock, TakeRecord, pinned, replay_scores
+from ..take_engine import (AUTO, FrameScore, LinearClock, SampledClock, SongClock, TakeRecord, pinned, project_song_time,
+                           replay_scores)
 from ..take_store import (last_take_id, load_frames, saved_clock_times, saved_latency, saved_octave,
                           saved_reference, saved_song_times)
 from .timeline import Timeline
 from .speed_prep import SpeedPreparer
 
-WINDOW_S = 10.0       # seconds of line on screen
+PAST_S = 4.0          # the plot is centred on now: this much of the voice and the Reference behind the now-line...
+FUTURE_S = 4.0        # ...and this much of the Reference ahead of it
 TICK_MS = 33          # ~30 Hz redraw
 SPEED_MIN, SPEED_MAX, SPEED_STEP = 50, 120, 5     # Speed in percent of the original
 SPEED_DEBOUNCE_MS = 400   # +/- pressed several times: stretch only the Speed he stops on
@@ -246,11 +248,15 @@ class MainWindow(QtWidgets.QWidget):
         plot.addItem(self._unscored)
         self._guide_curves = [plot.plot(pen=GUIDE_PEN, connect="finite") for _ in (12, -12)]   # Guide lines
         self._ref_curve = plot.plot(pen=REFERENCE_PEN, connect="finite")
+        self._now_line = pg.InfiniteLine(pos=0.0, angle=90, movable=False, pen=pg.mkPen(255, 255, 255, 110, width=1))
+        self._now_line.setZValue(5)
+        plot.addItem(self._now_line)
         self._curve = plot.plot(pen=pg.mkPen("#777777", width=1), connect="finite")
         self._dots = pg.ScatterPlotItem(size=6, pen=None)
         plot.addItem(self._dots)
         self._plot = plot
         self._set_y(self._centre)
+        self._set_now(0.0)
 
         top = QtWidgets.QHBoxLayout()
         for w in (QtWidgets.QLabel("Input"), self.device_box, QtWidgets.QLabel("Reference"), self.reference_box,
@@ -633,6 +639,11 @@ class MainWindow(QtWidgets.QWidget):
             return Melody.from_song(Library(self._home).get(song_id))
         return NearestNote()
 
+    def _set_now(self, now: float) -> None:
+        """Centre the plot on voice time `now`: the now-line in the middle, PAST_S behind it and FUTURE_S ahead."""
+        self._now_line.setValue(now)
+        self._plot.setXRange(now - PAST_S, now + FUTURE_S, padding=0)
+
     def _set_y(self, centre: float) -> None:
         self._centre = centre
         lo, hi = int(round(centre)) - HALF_RANGE, int(round(centre)) + HALF_RANGE
@@ -666,6 +677,7 @@ class MainWindow(QtWidgets.QWidget):
         self._show_melody(reference, latency, octave_k)
         self._t.clear(), self._midi.clear(), self._band.clear(), self._out.clear(), self._oct.clear()
         self._oct_known = False
+        self._set_now(0.0)
         self.replay_button.setText("Stop replay")
         self.button.setEnabled(False)
         self.summary_label.setText(f"Replaying Take {take_id}...")
@@ -746,6 +758,7 @@ class MainWindow(QtWidgets.QWidget):
         self.pause_button.setEnabled(backing is not None)
         self._t.clear(), self._midi.clear(), self._band.clear(), self._out.clear(), self._oct.clear()
         self._oct_known = False
+        self._set_now(0.0)
         self.button.setText("Stop")
         for w in (self.device_box, self.reference_box, self.key_box, self.drone_box, self.song_box,
                   self.octave_box, self.calibrate_button):
@@ -796,7 +809,7 @@ class MainWindow(QtWidgets.QWidget):
                 self._oct = deque(s.octave for _ in self._oct)
             self._oct.append(s.octave)
         if scores:
-            while self._t[-1] - self._t[0] > WINDOW_S:
+            while self._t[-1] - self._t[0] > PAST_S:
                 self._t.popleft(), self._midi.popleft(), self._band.popleft(), self._out.popleft(), self._oct.popleft()
             last = scores[-1]
             if last.band is None:
@@ -860,15 +873,47 @@ class MainWindow(QtWidgets.QWidget):
         octs = np.fromiter(self._oct, float)
         return octs[np.clip(np.searchsorted(t, x, side="right") - 1, 0, len(t) - 1)]
 
+    def _song_times(self, x: np.ndarray, now: float) -> np.ndarray:
+        """The song time heard at each voice time x of the plot (NaN = no song there). Up to what the Transport has
+        rendered that is the song clock's own answer, so seeks, pauses, Speed changes and loop wraps show as they
+        happened. Beyond it (the right half, up to FUTURE_S ahead of `now`) nothing is known yet: the song is taken to
+        go on from where the rendering ended at its Speed, wrapping at the end of a looped Section to the next Pass's
+        Lead-in, and ending at the song end. A seek, pause, Speed change or Section change made inside those seconds
+        is not foreseen (it shows once rendered); while paused it is drawn as if playing resumed now."""
+        clock = self._draw_clock()
+        song = np.array([np.nan if (t := clock(v)) is None else t for v in x])
+        tail = getattr(clock, "tail", None)
+        tail = tail() if tail is not None else None
+        if tail is None:                                 # a replay's clock knows its whole Take, a linear one goes on
+            return song
+        x_end, song_end, rate = tail
+        backing = self._backing
+        if song_end is None:                             # paused: the song waits where the player stands
+            if backing is None:
+                return song
+            x_end, song_end, rate = now, backing.position_s(), getattr(backing, "speed", 1.0)
+        ahead = x > x_end
+        duration = getattr(backing, "duration_s", None)
+        loop = getattr(backing, "loop", None)
+        loop_end = None if loop is None else min(loop.end_s, duration if duration is not None else loop.end_s)
+        song[ahead] = project_song_time(x[ahead] - x_end, song_end, rate, loop_end,
+                                        0.0 if loop is None else loop.pass_start_s, duration)
+        return song
+
+    def _sample_reference(self, x: np.ndarray, now: float) -> tuple[np.ndarray, np.ndarray, np.ndarray]:
+        """(song time, MIDI, unscored) of the Melody at each voice time x of the plot, past and future halves alike:
+        the one place that turns the plot's x-range into the Reference, for the line, the Guide lines, the Unscored
+        bands and whatever else is drawn in the right half."""
+        song = self._song_times(x, now)
+        midi, unscored = self._melody.sample(song)
+        return song, midi, unscored
+
     def _draw_melody(self, t_end: float) -> None:
-        """The reference line on the voice clock over the visible window: each x asks the clock which song time the
-        singer was (or will be) answering there, so jumps and pauses show as they happened."""
+        """The reference line on the voice clock over the plot's [t_end - PAST_S, t_end + FUTURE_S]."""
         if self._melody is None:
             return
-        clock = self._draw_clock()
-        x = np.arange(t_end - WINDOW_S, t_end + 1.0, DRAW_STEP_S)
-        song = np.array([np.nan if (t := clock(v)) is None else t for v in x])
-        midi, unscored = self._melody.sample(song)
+        x = np.arange(t_end - PAST_S, t_end + FUTURE_S + DRAW_STEP_S, DRAW_STEP_S)
+        _, midi, unscored = self._sample_reference(x, t_end)
         shift = 12.0 * self._octaves_at(x)               # drawn where the Take is scored, not at the singer's octave
         self._ref_curve.setData(x, midi + shift)
         for curve, d in zip(self._guide_curves, (12, -12)):
@@ -907,7 +952,7 @@ class MainWindow(QtWidgets.QWidget):
         self._dots.setData(t[voiced], midi[voiced], brush=[BRUSH[b] for b in bands],
                            symbol=["x" if o else "o" for o in out],   # out-of-key notes are drawn as big crosses
                            size=[11 if o else 6 for o in out])
-        self._plot.setXRange(t[-1] - WINDOW_S, t[-1], padding=0)
+        self._set_now(t[-1])
         self._draw_melody(t[-1])
         if self._replay is not None and self._replay.finished:
             self._end_replay()

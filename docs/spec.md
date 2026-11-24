@@ -135,6 +135,12 @@ he does not play guitar while using it.
 - **Unscored stretches:** reference frames with RMVPE confidence under 0.3, smoothed: dips shorter than 0.12 s between
   reliable frames are filled, reliable runs shorter than 0.12 s are dropped. Greyed on the live and replay plot, left
   out of all five numbers and of Steadiness.
+- **Centred plot:** the now-line sits in the middle of the plot: the last 4 s on its left (the voice and the Reference),
+  the next 4 s on its right (the Reference, its Guide lines and Unscored bands, never the voice). The right half is
+  an approximation: it takes the song to go on from where the Transport's rendering ended, at that Speed, wrapping at the
+  end of a looped Section to the next Pass's Lead-in and ending at the song end; a seek, pause or Speed change made
+  inside those seconds shows once rendered. Paused, it shows what plays on resume. The Octave shift of the last frame
+  is held in the right half (a later Phrase may be scored at another one).
 - **Sync:** the Transport logs which song time it rendered at each output time. A voice frame heard at input time t
   is scored against the song time rendered at t − calibrated latency (a LogClock over that log), so pauses (later
   seeks, loops, Speed) keep sync. The song time of every frame is saved with the Take (npz `song_t`); Takes saved
