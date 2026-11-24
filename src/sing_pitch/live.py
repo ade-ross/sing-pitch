@@ -1,6 +1,8 @@
 """Glue without a UI: audio chunks -> pitch tracker -> Take engine. Qt-free and device-free, so it is testable."""
 from __future__ import annotations
 
+import dataclasses
+import math
 import queue
 import threading
 from pathlib import Path
@@ -24,6 +26,21 @@ def pass_tag(loop, pass_index: int) -> PassTag:
     return PassTag(name, loop.start_s, loop.end_s, pass_index)
 
 
+def _guide_settings(history: list[tuple[float, float]], frames) -> tuple[str, float]:
+    """(guide_vocal, guide_gain) of a Take: `history` = [(voice time, Guide vocal gain from then on)], oldest first,
+    the first entry at -inf. The Guide vocal is "on" when its gain is above 0; "mixed" when it was on for part of the
+    Take; the gain is the highest one heard (0 when off)."""
+    if frames:
+        first, last = frames[0].t, frames[-1].t
+        gains = [next(g for t, g in reversed(history) if t <= first)] + [g for t, g in history if first < t <= last]
+    else:
+        gains = [history[-1][1]]
+    on = [g > 0 for g in gains]
+    if not any(on):
+        return "off", 0.0
+    return ("on" if all(on) else "mixed"), round(max(gains), 3)
+
+
 def _too_short(record: TakeRecord) -> bool:
     return record.summary.n_scored * FRAME_S < MIN_TAKE_SCORED_S
 
@@ -41,6 +58,10 @@ class Playback(Protocol):
     def stop(self) -> None: ...
 
     on_event: object             # settable: called from the audio thread with each TransportEvent
+
+    # Optional, read once at start() (a player without them counts as Guide vocal off, Speed 100):
+    #   current_gains: tuple[float, float]   (Backing, Guide vocal) in effect
+    #   speed: float                 Speed in effect, 1.0 = original
 
     def set_gains(self, backing: float, vocal: float) -> None: ...
 
@@ -110,7 +131,12 @@ class LiveRunner:
     A Section loop works the same way: each "pass_started" event closes the Take there and opens the next one, tagged
     with the Section and the pass index (PassTag), so every Pass is its own Take and its Lead-in is never scored.
     "loop_ended" closes the last Pass Take and opens an untagged one. A Pass that starts before the song clock exists
-    (the loop was on at Start) tags the first Take."""
+    (the loop was on at Start) tags the first Take.
+
+    Each saved Take records the practice settings it was sung with. Speed: a "speed_changed" outside a loop is a
+    boundary too (a Take is never half at one Speed); inside a loop the Transport applies it at a Pass boundary, which
+    is a boundary already. Guide vocal: the runner keeps the history of the Guide vocal gain ("gains_changed" events)
+    and a Take that saw it both on and off is "mixed"."""
 
     def __init__(self, source: AudioInput, tracker: PitchTracker, reference: Reference, home: Path,
                  backing: Playback | None = None, latency_s: float = 0.0):
@@ -123,8 +149,12 @@ class LiveRunner:
         self._chunks: queue.SimpleQueue = queue.SimpleQueue()
         self._scores: queue.SimpleQueue = queue.SimpleQueue()
         self._take: LiveTake | None = None
-        self._cuts: list[tuple[float, PassTag | None]] = []   # (input time, tag of the next Take) of boundaries not
+        self._cuts: list[tuple[float, PassTag | None, int | None]] = []   # (input time, tag of the next Take, its
+                                                              # Speed percent or None = as before) of boundaries not
                                                               # yet reached by the frames (worker only)
+        self._speed_pct = 100                     # Speed of the running Take (worker only)
+        self._speed_next: int | None = None       # a Speed applied at a Pass boundary, for the cut that follows
+        self._guide: list[tuple[float, float]] = [(-math.inf, 0.0)]    # (voice time, Guide vocal gain) (worker only)
         self._saved: list[TakeRecord] = []        # Takes saved so far in this run (worker, then stop())
         self._saved_news: queue.SimpleQueue = queue.SimpleQueue()
         self._thread: threading.Thread | None = None
@@ -134,6 +164,9 @@ class LiveRunner:
         """Open the Backing and the input, then start the worker: a Start that fails leaves no thread behind."""
         self._error = None
         self._cuts, self._saved = [], []
+        self._speed_pct = round(100 * getattr(self._backing, "speed", 1.0))
+        self._speed_next = None
+        self._guide = [(-math.inf, getattr(self._backing, "current_gains", (1.0, 0.0))[1])]
         self._take = LiveTake(self._tracker, self._reference, self._source.sample_rate)
         if self._backing is None:
             on_chunk = self._chunks.put
@@ -167,9 +200,17 @@ class LiveRunner:
 
     def _on_event(self, event) -> None:       # audio thread: only hand over, in order with the chunks
         if event.kind in ("jumped", "loop_ended"):
-            self._chunks.put(("jump", (event.output_s, None)))
+            self._chunks.put(("jump", (event.output_s, None, None)))
         elif event.kind == "pass_started":
-            self._chunks.put(("jump", (event.output_s, pass_tag(event.loop, event.pass_index))))
+            self._chunks.put(("jump", (event.output_s, pass_tag(event.loop, event.pass_index), None)))
+        elif event.kind == "speed_changed":
+            pct = round(100 * event.speed)
+            if event.loop is None:
+                self._chunks.put(("jump", (event.output_s, None, pct)))
+            else:                         # applied at a Pass boundary: the pass_started that follows is the cut
+                self._chunks.put(("speed", pct))
+        elif event.kind == "gains_changed":
+            self._chunks.put(("gains", (event.output_s, event.gains[1])))
 
     @staticmethod
     def _quietly(cleanup) -> None:
@@ -193,12 +234,22 @@ class LiveRunner:
     def _control(self, kind: str, value) -> None:
         if kind == "align":             # ("align", clock): set before the first frame is scored
             self._take.song_clock = value
-        elif kind == "jump":            # ("jump", (output_s, tag)): a boundary before the clock exists has no Take
-            output_s, tag = value       # to close, so the first Take simply takes its tag
+        elif kind == "speed":           # ("speed", percent): applies to the next cut
+            self._speed_next = value
+        elif kind == "gains":           # ("gains", (output_s, Guide vocal gain)): from that voice time on
+            output_s, gain = value
             if isinstance(self._take.song_clock, LogClock):
-                self._cuts.append((output_s + self._take.song_clock.offset_s, tag))
+                self._guide.append((output_s + self._take.song_clock.offset_s, gain))
+            else:                       # before the clock exists: it is how the first Take starts
+                self._guide = [(-math.inf, gain)]
+        elif kind == "jump":            # ("jump", (output_s, tag, speed)): a boundary before the clock exists has no
+            output_s, tag, pct = value  # Take to close, so the first Take simply takes its tag and Speed
+            pct, self._speed_next = pct if pct is not None else self._speed_next, None
+            if isinstance(self._take.song_clock, LogClock):
+                self._cuts.append((output_s + self._take.song_clock.offset_s, tag, pct))
             else:
                 self._take.pass_tag = tag
+                self._speed_pct = pct if pct is not None else self._speed_pct
 
     def _route(self, frames: list[PitchFrame]) -> list[FrameScore]:
         """Tracker frames to the current Take; at each pending jump the Take is closed and the next one opened."""
@@ -209,12 +260,19 @@ class LiveRunner:
                 break
             scores += self._take.push_frames(frames[:first_after])
             frames = frames[first_after:]
-            self._next_take(self._cuts.pop(0)[1])
+            _, tag, pct = self._cuts.pop(0)
+            self._next_take(tag, pct)
         return scores + self._take.push_frames(frames)
 
-    def _next_take(self, tag: PassTag | None = None) -> None:
+    def _with_settings(self, record: TakeRecord) -> TakeRecord:
+        guide, gain = _guide_settings(self._guide, record.frames)
+        return dataclasses.replace(record, guide_vocal=guide, guide_gain=gain, speed_pct=self._speed_pct)
+
+    def _next_take(self, tag: PassTag | None = None, speed_pct: int | None = None) -> None:
         old, clock = self._take, self._take.song_clock
-        record = old.close()
+        record = self._with_settings(old.close())
+        if speed_pct is not None:
+            self._speed_pct = speed_pct
         if not _too_short(record):
             saved = save_take(self._home, record)
             self._saved.append(saved)
@@ -261,7 +319,7 @@ class LiveRunner:
         self._thread.join()
         if self._error is not None:
             raise self._error
-        record = self._take.finish()
+        record = self._with_settings(self._take.finish())
         if self._saved and _too_short(record):
             return self._saved[-1]
         return save_take(self._home, record)

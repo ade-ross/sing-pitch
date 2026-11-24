@@ -7,9 +7,10 @@ import pyqtgraph as pg
 from PySide6 import QtCore, QtWidgets
 
 from ..config import data_dir
-from ..history import History, Series, load_history
+from ..history import WHOLE_SONG, History, Series, load_history
 
 REFERENCE_LABEL = {"nearest": "Nearest note", "key": "Key", "melody": "Melody"}
+GUIDE_LABEL = {"off": "Guide off", "on": "Guide on", "mixed": "Guide switched mid-Take"}
 EMPTY_TEXT = "No Takes yet. Sing a Take and it will show up here."
 EMPTY_FILTER_TEXT = "No scored Takes match this filter."
 
@@ -23,6 +24,9 @@ class HistoryView(QtWidgets.QWidget):
 
         self.reference_box = QtWidgets.QComboBox()
         self.song_box = QtWidgets.QComboBox()
+        self.guide_box = QtWidgets.QComboBox()
+        self.speed_box = QtWidgets.QComboBox()
+        self.section_box = QtWidgets.QComboBox()
         self.refresh_button = QtWidgets.QPushButton("Refresh")
         self.empty_label = QtWidgets.QLabel(EMPTY_TEXT)
         self.empty_label.setAlignment(QtCore.Qt.AlignCenter)
@@ -46,7 +50,9 @@ class HistoryView(QtWidgets.QWidget):
                                                  symbolBrush="#f1c40f")
 
         top = QtWidgets.QHBoxLayout()
-        for w in (QtWidgets.QLabel("Reference"), self.reference_box, QtWidgets.QLabel("Song"), self.song_box):
+        for w in (QtWidgets.QLabel("Reference"), self.reference_box, QtWidgets.QLabel("Song"), self.song_box,
+                  QtWidgets.QLabel("Guide vocal"), self.guide_box, QtWidgets.QLabel("Speed"), self.speed_box,
+                  QtWidgets.QLabel("Section"), self.section_box):
             top.addWidget(w)
         top.addStretch(1)
         top.addWidget(self.refresh_button)
@@ -56,31 +62,40 @@ class HistoryView(QtWidgets.QWidget):
         layout.addWidget(self.plot_widget, 1)
 
         self.refresh_button.clicked.connect(self.reload)
-        self.reference_box.currentIndexChanged.connect(self._apply_filters)
-        self.song_box.currentIndexChanged.connect(self._apply_filters)
+        for box in self._boxes():
+            box.currentIndexChanged.connect(self._apply_filters)
         self.reload()
+
+    def _boxes(self) -> tuple[QtWidgets.QComboBox, ...]:
+        return self.reference_box, self.song_box, self.guide_box, self.speed_box, self.section_box
 
     def reload(self) -> None:
         """Re-read the summary table and rebuild the filter boxes, keeping the current choice when it still exists."""
         self.history: History = load_history(self._home)
-        keep_ref, keep_song = self.reference_box.currentData(), self.song_box.currentData()
-        for box, label, items, keep in (
-            (self.reference_box, "All", self.history.references, keep_ref),
-            (self.song_box, "All", self.history.songs, keep_song),
-        ):
+        h = self.history
+        choices = (   # (box, items as (label, value), enabled)
+            (self.reference_box, [(REFERENCE_LABEL.get(r, r), r) for r in h.references], not h.is_empty),
+            (self.song_box, [(s, s) for s in h.songs], bool(h.songs)),   # songs exist only once Melody Takes are saved
+            (self.guide_box, [(GUIDE_LABEL[g], g) for g in h.guide_states], len(h.guide_states) > 1),
+            (self.speed_box, [(f"{p} %", p) for p in h.speeds], len(h.speeds) > 1),
+            (self.section_box, [("Whole song", WHOLE_SONG)] * bool(h.sections) + [(s, s) for s in h.sections],
+             bool(h.sections)),
+        )
+        for box, items, enabled in choices:
+            keep = box.currentData()
             box.blockSignals(True)
             box.clear()
-            box.addItem(label, None)
-            for item in items:
-                box.addItem(REFERENCE_LABEL.get(item, item) if box is self.reference_box else item, item)
+            box.addItem("All", None)
+            for label, value in items:
+                box.addItem(label, value)
             box.setCurrentIndex(max(box.findData(keep), 0))
             box.blockSignals(False)
-        self.reference_box.setEnabled(not self.history.is_empty)
-        self.song_box.setEnabled(bool(self.history.songs))  # songs exist only once Melody Takes are saved
+            box.setEnabled(enabled)
         self._apply_filters()
 
     def _apply_filters(self) -> None:
-        self.show_series(self.history.series(self.reference_box.currentData(), self.song_box.currentData()))
+        ref, song, guide, speed, section = (box.currentData() for box in self._boxes())
+        self.show_series(self.history.series(ref, song, guide, speed, section))
 
     def show_series(self, series: Series) -> None:
         if series.started_at:

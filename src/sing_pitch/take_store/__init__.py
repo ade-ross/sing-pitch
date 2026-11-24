@@ -23,9 +23,28 @@ COLUMNS = (
     "id", "started_at", "reference", "key", "song_id", "octave_shift", "pct_in_tune", "median_abs_cents",
     "tendency", "steadiness_cents", "lowest_note", "highest_note", "n_voiced_frames", "n_scored_frames",
     "duration_s", "out_of_key_count", "latency_offset_s", "app_version", "section_name", "pass_index",
+    "guide_vocal", "guide_gain", "speed_pct",
 )
 # Columns added after the first release go at the END; a table with an older header is rewritten with the new one
-# on the next save, its old rows left empty in the new columns (no Section = not a Pass).
+# on the next save, its old rows left empty in the new columns (no Section = not a Pass; an empty guide_vocal /
+# speed_pct reads as guide off / Speed 100, see row_settings).
+
+GUIDE_STATES = ("off", "on", "mixed")
+
+
+def row_settings(row: dict) -> tuple[str, float, int]:
+    """(guide_vocal, guide_gain, speed_pct) of a table row; rows saved before these columns read as guide off, 0,
+    Speed 100."""
+    try:
+        gain = float(row.get("guide_gain") or 0.0)
+    except ValueError:
+        gain = 0.0
+    try:
+        speed = int(float(row.get("speed_pct") or 100))
+    except ValueError:
+        speed = 100
+    guide = row.get("guide_vocal") or "off"
+    return (guide if guide in GUIDE_STATES else "off"), gain, speed
 
 
 def summary_path(home: Path) -> Path:
@@ -49,6 +68,7 @@ def _row(record: TakeRecord) -> dict:
         "duration_s": round(s.duration_s, 3), "out_of_key_count": s.out_of_key_count,
         "latency_offset_s": record.latency_offset_s, "app_version": __version__,
         "section_name": cell(record.section_name), "pass_index": cell(record.pass_index),
+        "guide_vocal": record.guide_vocal, "guide_gain": record.guide_gain, "speed_pct": record.speed_pct,
     }
 
 
@@ -178,6 +198,7 @@ def rescore_take(
     frames = load_frames(home, take_id)
     latency = float(row["latency_offset_s"] or 0.0)
     song_times = _song_times(home, take_id, row, frames)
+    guide_vocal, guide_gain, speed_pct = row_settings(row)
     record = TakeRecord(
         id=take_id,
         started_at=datetime.fromisoformat(row["started_at"]),
@@ -190,6 +211,7 @@ def rescore_take(
         song_times=tuple(song_times),
         section_name=row.get("section_name") or None,
         pass_index=int(row["pass_index"]) if row.get("pass_index") else None,
+        guide_vocal=guide_vocal, guide_gain=guide_gain, speed_pct=speed_pct,
     )
     if write:
         _write_rows(summary_path(home), [_row(record) if r["id"] == take_id else r for r in rows])

@@ -47,13 +47,17 @@ class TransportEvent:
     """Something that changed the song-time mapping, at the first output frame it applies to.
     Kinds: "paused", "resumed", "speed_changed", "jumped" (a seek: song_t is where the song goes on), and for a loop
     "pass_started" (pass_index 1, 2, ...; song_t = start - Lead-in), "pass_ended" (the Pass that just ended) and
-    "loop_ended" (looping switched off, or ended by a seek)."""
+    "loop_ended" (looping switched off, or ended by a seek). "speed_changed" carries the new `speed` and, when it
+    applied at a Pass boundary, the `loop` (outside a loop, loop is None). "gains_changed" carries the target `gains`
+    (Backing, Guide vocal): the first block the new gains apply to."""
 
     kind: str
     output_s: float
     song_t: float
     pass_index: int | None = None
     loop: Loop | None = None
+    speed: float | None = None
+    gains: Gains | None = None
 
 
 @dataclass(frozen=True)
@@ -133,6 +137,7 @@ class Transport:
         self._loop: Loop | None = None      # in effect (render thread only)
         self._pass = 0                      # index of the Pass playing (render thread only)
         self._block0 = 0                    # output frame of the block being rendered (render thread only)
+        self._wrap_out_s = 0.0              # output time of the Pass boundary being applied (render thread only)
         self.log = SongTimeLog(sample_rate)
 
     @staticmethod
@@ -206,13 +211,10 @@ class Transport:
             kind = "resumed" if self._playing else "paused"
             events = (TransportEvent(kind, self.log.rendered_s, self.position_s),)
         fade_from = None
-        if (swap := self._pending_speed) is not None:
-            self._pending_speed = None
-            if self.log.rendered_s > 0:
-                events += (TransportEvent("speed_changed", self.log.rendered_s, self.position_s),)
-                if self._playing:
-                    fade_from = (self._audio, self._vocal, self._speed)
-            self._speed, self._audio, self._vocal = swap
+        if self._pending_speed is not None and self._loop is None:    # in a loop it waits for the next Pass (_wrap)
+            if self.log.rendered_s > 0 and self._playing:
+                fade_from = (self._audio, self._vocal, self._speed)
+            events += self._apply_speed()
         if self._seeks:   # after a Speed swap, so a crossfade in this block fades both Speeds at the new position
             target = None
             while self._seeks:
@@ -230,13 +232,16 @@ class Transport:
                 self._loop, self._pass = loop, 0
                 events += self._wrap(0)
         end = self._gains
+        if end != self._applied:
+            events += (TransportEvent("gains_changed", self.log.rendered_s, self.position_s, gains=end),)
         if not self._playing:
             self.log.append(frames, None)
             self._applied = end
             return Block(np.zeros((frames, 2), np.float32), np.full(frames, np.nan), events)
-        speed, start = self._speed, self._applied
+        start = self._applied
         parts, times, pos = [], [], 0
         while pos < frames:                  # one segment per stretch of song; a loop wrap starts a new one
+            speed = self._speed              # a wrap may change it
             count = frames - pos
             if self._loop is not None:
                 left = math.ceil((min(self._loop.end_s * self._sr, self._song_frames) - self._n) / speed - 1e-9)
@@ -259,6 +264,16 @@ class Transport:
         self._applied = end
         return Block(np.concatenate(parts), np.concatenate(times), events)
 
+    def _apply_speed(self) -> tuple[TransportEvent, ...]:
+        """Swap in the Speed asked for by set_speed (before the first block it is only the starting Speed)."""
+        speed, audio, vocal = self._pending_speed
+        self._pending_speed = None
+        self._speed, self._audio, self._vocal = speed, audio, vocal
+        if self.log.rendered_s <= 0:
+            return ()
+        return (TransportEvent("speed_changed", self.log.rendered_s if self._loop is None else self._wrap_out_s,
+                               self.position_s, loop=self._loop, speed=speed),)
+
     def _end_loop(self, pos: int) -> tuple[TransportEvent, ...]:
         if self._loop is None:
             return ()
@@ -268,14 +283,15 @@ class Transport:
 
     def _wrap(self, pos: int) -> tuple[TransportEvent, ...]:
         """A Pass boundary at frame `pos` of the block being rendered: the next Pass starts at start - Lead-in.
-        Ticket #15 hook: a Speed change asked for during a loop is applied here, so a Pass is never half at one Speed
-        (today set_speed applies at the next block)."""
-        out_s = (self._block0 + pos) / self._sr
+        A Speed change asked for during the loop is applied here, so a Pass is never half at one Speed."""
+        out_s = self._wrap_out_s = (self._block0 + pos) / self._sr
         events: tuple[TransportEvent, ...] = ()
         if self._pass:
             events = (TransportEvent("pass_ended", out_s, self.position_s, self._pass, self._loop),)
         self._pass += 1
         self._n = round(self._loop.pass_start_s * self._sr)
+        if self._pending_speed is not None:
+            events += self._apply_speed()
         return events + (TransportEvent("pass_started", out_s, self.position_s, self._pass, self._loop),)
 
     @staticmethod

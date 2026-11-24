@@ -1,7 +1,7 @@
 import csv
 from datetime import datetime
 
-from sing_pitch.history import History, load_history
+from sing_pitch.history import WHOLE_SONG, History, load_history
 from sing_pitch.take_store import COLUMNS
 
 
@@ -91,3 +91,57 @@ def test_a_garbled_row_is_skipped_not_fatal(tmp_path):
         "a,not-a-date,nearest,55,20\n"
         "b,2026-11-10T10:00:00,nearest,55,20\n")
     assert load_history(tmp_path).series().pct_in_tune == [55.0]
+
+
+# --- filters on the practice settings (ticket #15) ------------------------------------------------------------------
+
+def practice_table(home):
+    write_table(home, [
+        row("a", 10, reference="melody", song="s1", pct="40", guide_vocal="on", guide_gain="1.0", speed_pct="100"),
+        row("b", 11, reference="melody", song="s1", pct="50", guide_vocal="off", guide_gain="0.0", speed_pct="100",
+            section_name="Chorus 1", pass_index="1"),
+        row("c", 12, reference="melody", song="s1", pct="60", guide_vocal="off", guide_gain="0.0", speed_pct="70",
+            section_name="Chorus 1", pass_index="2"),
+        row("d", 13, reference="melody", song="s1", pct="65", guide_vocal="mixed", guide_gain="0.8", speed_pct="70",
+            section_name="Verse 2", pass_index="1"),
+        row("e", 14, reference="nearest", pct="30"),              # no settings at all: an old row
+    ])
+    return load_history(home)
+
+
+def test_filter_by_guide_vocal(tmp_path):
+    h = practice_table(tmp_path)
+    assert h.guide_states == ["off", "on", "mixed"]
+    assert h.series(guide_vocal="on").pct_in_tune == [40.0]
+    assert h.series(guide_vocal="mixed").pct_in_tune == [65.0]
+    assert h.series(guide_vocal="off").pct_in_tune == [50.0, 60.0, 30.0]       # the old row reads as guide off
+
+
+def test_filter_by_speed(tmp_path):
+    h = practice_table(tmp_path)
+    assert h.speeds == [70, 100]
+    assert h.series(speed=70).pct_in_tune == [60.0, 65.0]
+    assert h.series(speed=100).pct_in_tune == [40.0, 50.0, 30.0]               # the old row reads as Speed 100
+
+
+def test_filter_by_section_or_whole_song(tmp_path):
+    h = practice_table(tmp_path)
+    assert h.sections == ["Chorus 1", "Verse 2"]
+    assert h.series(section="Chorus 1").pct_in_tune == [50.0, 60.0]
+    assert h.series(section=WHOLE_SONG).pct_in_tune == [40.0, 30.0]
+    assert h.series(section="Bridge").pct_in_tune == []
+
+
+def test_filters_combine(tmp_path):
+    h = practice_table(tmp_path)
+    assert h.series(section="Chorus 1", speed=70, guide_vocal="off").pct_in_tune == [60.0]
+    assert h.series(section="Chorus 1", guide_vocal="on").pct_in_tune == []
+    assert h.series(song="s1", reference="melody", speed=100).pct_in_tune == [40.0, 50.0]
+
+
+def test_a_table_from_before_these_columns_has_only_off_and_100(tmp_path):
+    (tmp_path / "takes.csv").write_text(
+        "id,started_at,reference,pct_in_tune,median_abs_cents\n"
+        "a,2026-11-10T10:00:00,nearest,55,20\n")
+    h = load_history(tmp_path)
+    assert (h.guide_states, h.speeds, h.sections) == (["off"], [100], [])

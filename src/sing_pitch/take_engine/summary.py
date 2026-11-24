@@ -56,6 +56,9 @@ class TakeRecord:
     song_times: tuple[float | None, ...] | None = None   # per frame, the song time it was scored against
     section_name: str | None = None     # a Pass Take: its Section (None = not a Pass)
     pass_index: int | None = None
+    guide_vocal: str = "off"            # "on" | "off" | "mixed" (switched during the Take)
+    guide_gain: float = 0.0             # the Guide vocal volume (0-1) while it was on; 0 when off
+    speed_pct: int = 100                # Speed the Take was sung at (a Speed change starts a new Take)
 
 
 def count_out_of_key(scores: Sequence) -> int:

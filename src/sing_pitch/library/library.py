@@ -16,6 +16,7 @@ from pathlib import Path
 
 import numpy as np
 
+from .player_settings import PLAYER, PlayerSettingsStore
 from .ports import ReferenceLine
 from .sections import SECTIONS, SectionStore
 
@@ -90,6 +91,10 @@ class Library:
         """The song's saved Sections and unnamed mark."""
         return SectionStore(self.get(song_id).dir)
 
+    def player_settings(self, song_id: str) -> PlayerSettingsStore:
+        """How the song was last set up in the player (Guide vocal, volumes, Speed, Section)."""
+        return PlayerSettingsStore(self.get(song_id).dir)
+
     def find_by_source(self, source_key: str) -> Song | None:
         return next((s for s in self.list_songs() if s.meta.source_key == source_key), None)
 
@@ -111,8 +116,9 @@ class Library:
         if replacing is None:
             staging.rename(final)
             return Song(meta, final)
-        if (final / SECTIONS).exists():        # a re-import keeps the Sections he marked (song times stay valid)
-            shutil.copy2(final / SECTIONS, staging / SECTIONS)
+        for kept in (SECTIONS, PLAYER):        # a re-import keeps the Sections he marked (song times stay valid) and
+            if (final / kept).exists():        # how he had the player set up
+                shutil.copy2(final / kept, staging / kept)
         old = self.root / f".old-{uuid.uuid4().hex[:8]}"
         final.rename(old)
         try:
