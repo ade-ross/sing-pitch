@@ -28,6 +28,26 @@ _Avoid_: song mode, karaoke
 The song with its vocal removed, played in headphones during a Melody Take.
 _Avoid_: instrumental, accompaniment
 
+**Guide vocal**:
+The original singer's isolated vocal, optionally played with the Backing during a Melody Take at a volume Simone sets.
+_Avoid_: original voice, vocal track
+
+**Section**:
+A stretch of a song between a start and an end point, marked by Simone on the timeline and optionally saved by name.
+_Avoid_: part, region, loop
+
+**Pass**:
+One time through a looped Section; each Pass is scored and saved as its own Take.
+_Avoid_: repetition, loop iteration
+
+**Lead-in**:
+The ~2 s of song played before a Section's start on every Pass, never scored.
+_Avoid_: pre-roll, count-in
+
+**Speed**:
+The playback tempo of the song as a percentage of the original (50–120 %), with pitch unchanged.
+_Avoid_: tempo, rate
+
 **Drone**:
 A held key note played in headphones during a Key Take.
 

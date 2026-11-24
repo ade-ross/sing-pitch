@@ -118,7 +118,12 @@ he does not play guitar while using it.
   - **Steadiness:** SD in cents around the note's own median, over held notes longer than about 0.5 s, with the first
     and last ~120 ms or 15% removed (Dai & Dixon 2019).
 - **Octave shift:** per Take, the whole-octave offset (−2…+2) that minimises median absolute error. It is fixed for
-  the whole Take.
+  the whole Take. Within-Take octave jumps are not forgiven. Live view: the shift is re-estimated from the scored
+  frames so far until about 2 s of singing (125 frames) are scored, then kept; the summary and the saved row use the
+  whole-Take shift, so the first seconds on screen can differ from them.
+- **Unscored stretches:** reference frames with RMVPE confidence under 0.3, smoothed: dips shorter than 0.12 s between
+  reliable frames are filled, reliable runs shorter than 0.12 s are dropped. Greyed on the live and replay plot, left
+  out of all five numbers and of Steadiness.
 - **Sync:** Melody scoring compares the voice frame at time t (corrected for input, tracker and output latency) with
   the reference at t.
 - **Build order:** Nearest note plus the Take log, then History, then Key plus Drone, then import and stem split, then
