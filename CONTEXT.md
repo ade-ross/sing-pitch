@@ -56,11 +56,38 @@ A part of a Melody where the extracted reference pitch is unreliable; shown grey
 _Avoid_: gap, ignored part
 
 **Octave shift**:
-The single whole-octave offset between Simone's voice and the original singer, detected once per Take.
+The whole-octave offset between Simone's voice and the original singer, chosen per Phrase (Auto) or pinned by Simone for the whole Take.
+
+**Phrase**:
+A run of singing between pauses of about half a second or more; the unit an Auto Octave shift is chosen for.
+_Avoid_: line, segment
+
+**Notes mode**:
+A view and scoring mode where the reference melody is shown and scored as flat note bars on exact semitones instead of the continuous line.
+_Avoid_: piano roll, discrete mode, simplified view
+
+**Minimum note length**:
+The Notes-mode setting (0.1–4 s, or one note per reference Phrase) below which melody movements merge into the neighbouring note; each note takes the semitone the singer holds longest.
+_Avoid_: threshold, interval
+
+**Guide lines**:
+Faint copies of the reference melody one octave above and below the active Octave shift.
 
 **Band**:
-How far from the Reference a moment is: green within ±25 cents, yellow 25–50, red beyond ±50.
+How far from the Reference a moment is: green within the Tolerance (default ±25 cents), yellow up to twice it (±50), red beyond.
 _Avoid_: zone, tolerance
+
+**Tolerance**:
+How far from the target pitch still counts as in tune, set by Simone (±10 to ±100 cents, default ±25); it sets the green Band, and yellow reaches twice the Tolerance.
+_Avoid_: range, threshold, leniency
+
+**Timing window**:
+How early or late (up to ±100 ms) a Phrase may be sung and still be scored on pitch alone: each Phrase gets one timing shift, chosen with its Octave shift, and every moment of it is scored strictly at that shift.
+_Avoid_: timing tolerance, slack
+
+**Count-in**:
+The between-Pass option where one bar of metronome clicks at the song's tempo (scaled by Speed) plays before the Section starts, in place of the Lead-in.
+_Avoid_: pre-roll, click track
 
 **In tune**:
 In the green Band. "% in tune" is the share of sung time in green.

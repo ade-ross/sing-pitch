@@ -72,3 +72,161 @@ def test_stop_closes_the_stream_and_is_safe_twice():
     player.stop()
     player.stop()
     assert streams[0].closed
+
+
+def player_with_vocal(backing, vocal, **kw):
+    streams = []
+
+    def factory(**k):
+        streams.append(FakeStream(**k))
+        return streams[-1]
+
+    return BackingPlayer(backing, 48000, vocal=vocal, stream_factory=factory, sample_rate=48000, **kw), streams
+
+
+def test_the_guide_vocal_is_off_by_default_and_the_backing_plays_as_before():
+    player, streams = player_with_vocal(np.full((3000, 2), 0.5, np.float32), np.full(3000, 0.25, np.float32))
+    player.start()
+    assert np.allclose(streams[0].pull(1024), 0.5)
+
+
+def test_gains_mix_the_vocal_stem_linearly_with_the_backing():
+    player, streams = player_with_vocal(np.full((8192, 2), 0.5, np.float32), np.full((8192, 2), 0.25, np.float32))
+    player.set_gains(backing=0.5, vocal=2.0)
+    player.start()                                        # start() takes the gains as they are: no ramp from silence
+    assert np.allclose(streams[0].pull(1024), 0.5 * 0.5 + 0.25 * 2.0)
+
+
+def test_a_gain_change_while_playing_applies_from_the_next_block_with_a_ramp_and_no_step():
+    player, streams = player_with_vocal(np.zeros((8192, 2), np.float32), np.ones((8192, 2), np.float32))
+    player.set_gains(backing=1.0, vocal=0.0)
+    player.start()
+    assert np.allclose(streams[0].pull(1024), 0.0)
+    player.set_gains(backing=1.0, vocal=1.0)              # guide vocal switched on mid-Take
+    ramp = streams[0].pull(1024)[:, 0]
+    assert ramp[0] < 0.01 and abs(ramp[-1] - 1.0) < 1e-6 and np.max(np.diff(ramp)) < 0.002
+    assert np.allclose(streams[0].pull(1024), 1.0)
+    player.set_gains(backing=1.0, vocal=0.0)              # and off again: silent after one block
+    down = streams[0].pull(1024)[:, 0]
+    assert abs(down[0] - 1.0) < 0.002 and down[-1] == 0.0
+    assert np.allclose(streams[0].pull(1024), 0.0)
+
+
+def test_the_vocal_stem_is_mono_resampled_and_aligned_to_the_backing():
+    player, streams = player_with_vocal(np.zeros((2000, 2), np.float32), np.ones(1000, np.float32))
+    player.set_gains(backing=1.0, vocal=1.0)
+    player.start()
+    out = streams[0].pull(2048)
+    assert np.allclose(out[:1000], 1.0) and np.allclose(out[1000:], 0.0)       # shorter vocal pads with silence
+    assert np.allclose(out[:, 0], out[:, 1])
+
+
+def test_from_file_loads_the_vocal_stem_beside_the_backing(tmp_path):
+    sf.write(str(tmp_path / "backing.wav"), np.full((4800, 2), 0.5, np.float32), 48000)
+    sf.write(str(tmp_path / "vocals.wav"), np.full(4800, 0.25, np.float32), 48000)
+    player = BackingPlayer.from_file(tmp_path / "backing.wav", tmp_path / "vocals.wav", stream_factory=FakeStream,
+                                     sample_rate=48000)
+    player.set_gains(backing=1.0, vocal=1.0)
+    player.start()
+    assert np.allclose(player._stream.pull(1024), 0.75)
+
+
+def test_the_player_pauses_and_resumes_through_its_transport_and_logs_song_time():
+    song = np.stack([np.arange(4096, dtype=np.float32) / 4096] * 2, axis=1)
+    player, streams = player_with(song)
+    player.start()
+    streams[0].pull(1024)
+    player.pause()
+    assert np.all(streams[0].pull(1024) == 0.0) and player.position_s() == 1024 / 48000
+    player.play()
+    assert np.allclose(streams[0].pull(1024), song[1024:2048])
+    log = player.song_log
+    assert log.rendered_s == 3072 / 48000
+    assert log.song_time(1500 / 48000) is None and abs(log.song_time(2500 / 48000) - 1476 / 48000) < 1e-9
+
+
+def test_the_player_seeks_and_hands_its_transport_events_to_the_listener():
+    song = np.stack([np.arange(48000, dtype=np.float32) / 48000] * 2, axis=1)
+    player, streams = player_with(song)
+    got = []
+    player.on_event = got.append                 # called from the audio thread; must only hand over
+    player.start()
+    streams[0].pull(1024)
+    player.seek(0.5)
+    out = streams[0].pull(1024)
+    assert np.allclose(out[:, 0], song[24000:25024, 0])
+    assert [(e.kind, e.output_s, e.song_t) for e in got] == [("jumped", 1024 / 48000, 0.5)]
+    assert player.song_log.song_time(1500 / 48000) == 0.5 + 476 / 48000
+
+
+def stretched_twice(song):
+    """Stand-in for the stretcher at 50 %: every frame twice."""
+    return np.repeat(song, 2, axis=0)
+
+
+def test_the_player_plays_stretched_stems_at_the_speed_it_is_given_and_logs_song_time_in_original_seconds():
+    song = np.stack([np.arange(4096, dtype=np.float32) / 4096] * 2, axis=1)
+    player, streams = player_with(song)
+    player.set_speed(0.5, stretched_twice(song))               # before start: the Take starts at 50 %
+    assert player.speed == 0.5
+    player.start()
+    out = streams[0].pull(1024)
+    assert np.allclose(out, stretched_twice(song)[:1024])
+    assert player.position_s() == 512 / 48000 and player.duration_s == 4096 / 48000
+    assert abs(player.song_log.song_time(1000 / 48000) - 500 / 48000) < 1e-9
+
+
+def test_a_speed_set_while_playing_applies_from_the_next_block_and_the_next_start_keeps_it():
+    song = np.stack([np.arange(8192, dtype=np.float32) / 8192] * 2, axis=1)
+    vocal = np.ones((8192, 2), np.float32)
+    player, streams = player_with_vocal(song, vocal)
+    player.start()
+    streams[0].pull(1024)
+    player.set_speed(0.5, stretched_twice(song), stretched_twice(vocal))
+    streams[0].pull(1024)
+    assert player.speed == 0.5 and abs(player.position_s() - (1024 + 512) / 48000) < 1e-9
+    player.start()                                             # a new Take: song start, still at 50 %
+    streams[1].pull(1024)
+    assert abs(player.position_s() - 512 / 48000) < 1e-9
+
+
+def test_a_loop_set_before_start_plays_from_the_lead_in_and_a_loop_set_while_playing_applies_at_once():
+    from sing_pitch.playback.transport import Loop
+
+    song = np.stack([np.arange(480000, dtype=np.float32)] * 2, axis=1)
+    player, streams = player_with(song)
+    events = []
+    player.on_event = events.append
+    player.set_loop(Loop(3.0, 4.0, "Chorus", lead_in_s=2.0))
+    player.start()
+    assert streams[0].pull(1024)[0, 0] == 48000.0 and [e.kind for e in events] == ["pass_started"]
+    assert player.loop.name == "Chorus"
+    player.set_loop(None)
+    streams[0].pull(1024)
+    assert [e.kind for e in events] == ["pass_started", "pass_ended", "loop_ended"] and player.loop is None
+    player.start()                                     # off stays off for the next start
+    assert streams[1].pull(1024)[0, 0] == 0.0
+
+
+def test_the_player_keeps_or_drops_its_loop_as_the_transport_decides():
+    """Review 5 #4: a Section past the song end is looped up to the song end; a seek beyond that ends the loop in
+    the Transport, and the player must not keep asking for it (it would come back at the next start)."""
+    from sing_pitch.playback.transport import Loop
+    song = np.zeros((48000, 2), np.float32)                       # 1 s
+    player, streams = player_with(song)
+    player.start()
+    player.set_loop(Loop(0.5, 2.0, lead_in_s=0.1))                # fitted: 0.5 .. 1.0
+    streams[0].pull(1024)
+    assert player.seek(0.9) is True and player.loop is not None
+    streams[0].pull(1024)
+    assert player.transport.loop is not None
+    short, streams = player_with(np.zeros((480000, 2), np.float32))
+    short.start()
+    short.set_loop(Loop(5.0, 5.05, lead_in_s=0.1))                # widened: 5.0 .. 5.2
+    streams[0].pull(1024)
+    assert short.seek(5.15) is True and short.loop is not None    # the Transport keeps looping: so does the player
+    streams[0].pull(1024)
+    assert short.transport.loop is not None
+    assert short.seek(6.0) is False and short.loop is None
+    streams[0].pull(1024)
+    assert short.transport.loop is None

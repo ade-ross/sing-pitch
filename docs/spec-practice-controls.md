@@ -29,7 +29,12 @@ Melody Takes get a practice transport:
 - **Timeline:** shows the whole song with the reference melody. He clicks it to jump anywhere, and drags across it to
   mark a Section, which he can save by name.
 - **Loop:** a looped Section repeats with a ~2 s Lead-in before each Pass. Each Pass is scored and saved as its own
-  Take.
+  Take. While it repeats the Section is drawn brighter and "Loop · Pass N · last 92 %" counts every wrap. Unticking Loop
+  (or L) lets the song play on past the Section; Clear (or Esc) removes the mark or the shown Section from the timeline and
+  stops the loop; saved Sections stay saved (Delete removes them).
+- **Moving around:** click the timeline, the arrow keys (5 s) or drag the playhead: the same while playing and while
+  paused. A jump closes the Take as before; jumps made while paused add no further cut. A second arrow press made before
+  the first jump is applied starts from where the first one goes.
 - **Speed:** 50–120% in 5% steps, with pitch unchanged. The scoring line follows the new speed.
 - **Take settings:** each Take records its Guide vocal state, Speed and Section, and History can filter on them.
 - **Keyboard:** shortcuts cover play/pause, loop, jumps and Speed, so his hands stay free.
@@ -92,7 +97,8 @@ Melody Takes get a practice transport:
   still measured by the existing calibration.
 - **Pass and Take boundaries:** the Transport emits events (pass started, pass ended, jumped, speed changed). The
   live runner turns them into Take boundaries. A jump outside a loop closes the Take and opens a new one. Loop
-  wrap-around closes one Pass Take and opens the next. A Take with under ~3 s of scored singing is discarded. Lead-in
+  wrap-around closes one Pass Take and opens the next. A Take with under ~3 s of scored singing is discarded; a Pass
+  Take is kept when it scored at least half of its Section's singable time (so Sections under 3 s still save). Lead-in
   frames are marked as not scored.
 - **Speed:** pitch-preserving time-stretch with Rubber Band (best quality available; the implementer verifies an
   install that works on Apple Silicon). The Backing and the vocal stem are each pre-rendered whole at the chosen
@@ -101,7 +107,11 @@ Melody Takes get a practice transport:
   at the next Pass.
 - **Sections:** stored per song in the library as name, start and end (original-tempo seconds). Unnamed marks are
   kept until replaced.
-- **Per-song player settings:** Guide vocal on/off, the two volumes, and the last Speed and Section, stored per song.
+- **Per-song player settings:** Guide vocal on/off, the two volumes, and the last Speed and Section, stored per song;
+  also the Loop tick (QA #32: the Section comes back looping, `loop` in player.json).
+- **Start while a Speed is prepared (QA #32):** Start waits, saying "Starting when 70 % is ready… (Start again to
+  cancel)", and the Take starts by itself when the stems are ready. A Speed change meanwhile waits for the new one; a
+  failed stretch, a replay, or no song any more gives up and says so.
 - **Take record:** new summary-table columns `guide_vocal` (on, off or mixed when it changed mid-Take), `guide_gain`,
   `speed_pct`, `section_name` (or start–end), `pass_index`. Existing rows read as guide off, speed 100, no section.
 - **UI:** a timeline widget with the reference melody, playhead, click to seek, drag for a Section and handles for its
@@ -126,7 +136,7 @@ Melody Takes get a practice transport:
   the same voice must fail.
 - **Pass tests:**
   - Three loop wraps give three Takes, each tagged with Section and pass index, with Lead-in frames unscored.
-  - A Take under 3 s is discarded.
+  - A Take under 3 s is discarded; a Pass Take under half its Section is discarded.
   - Re-scoring a Pass Take reproduces its numbers.
 - **Speed tests:** a stretched stem keeps its pitch (a 220 Hz tone stays within a few cents after stretching), and
   its length is the original divided by the Speed fraction. A cached Speed is not recomputed.
@@ -147,3 +157,58 @@ Melody Takes get a practice transport:
 
 The Lead-in is about 2 s by default. It is the planner's choice: long enough to hear the beat at 50% Speed, and short
 enough not to waste time at 100%.
+
+## Notes mode (#19)
+
+The Notes box shows and scores the Melody as flat bars on exact semitones, each labelled with its note name, instead of
+the continuous line; the Guide lines become bars too, an octave either side, and the bars run through both halves of
+the centred plot. The bars come from one pure function of the reference line, its scored mask and the Minimum note
+length (`reference/notes.py`): the scored frames are split into reference Phrases (pauses of 0.5 s or more), rounded
+to semitones, and any run shorter than the Minimum note length is merged into its nearer-pitched neighbour until none
+is left; each note takes the semitone held longest over its span (a slide E-F-F#-G held on G is a G, never the mean).
+The slider runs 0.1-4 s; its far end gives one note per Phrase. Unscored stretches stay unscored. In Notes mode the
+target is the note's semitone (the Octave shift applies as before), so live scoring, replay and re-score use the same
+bars and reproduce the numbers; the segmentation is cached per song and length.
+
+**Per-note scoring (#41).** Each note is scored once, on the voice's median pitch over it: the frames scored against
+that note's bar (at the Phrase's timing shift, see spec.md Timing window), their cents from the bar, the median of those; green within the
+Tolerance, yellow to twice it. % in tune is the share of the sung notes (notes with at least one scored frame), by note
+length, that are green; median cents off and tendency are the length-weighted medians of the notes' cents. Steadiness
+and Range still come from the frames. On screen the dots still colour per frame against the bar; once the song is past
+a note's end plus the Timing window its bar turns the verdict's colour (live and on replay, `take_engine.NoteTally`;
+the summary uses the same verdicts). The verdict is final once given (QA #45): the window closes notes at the song time
+of the newest frame it has tallied, not of the song heard now (the tracker's frames lag it), and frames of a closed
+note that still arrive are left out. Live and summary use the same verdicts unless the live Phrase's Octave or timing
+shift, estimated on the first seconds, differs from the whole Phrase's. Takes record `note_scoring` (`note`); Notes rows saved before #41 re-score frame by
+frame. Limit, measured on TULIP 0:30–2:00 with the perfect singer: a bar that merges several sung notes is judged on the
+voice's median against the most-held semitone, so the ceiling falls with the Minimum note length (the original's own
+median is within ±25 c of its bar for 86 % of the note length at 0.1 s, 75 % at 0.5 s, 49 % at 1.5 s, 34 % per Phrase).
+Each Take records `note_mode` (off/on)
+and `min_note_s` (seconds, or `phrase`) at the end of takes.csv; old rows read as off. History filters by Notes mode,
+and the toggle and length are remembered per song in player.json. Both are locked during a Take.
+
+## Count-in and clicks inside a loop (#42)
+
+**Between Passes** is a choice next to Loop: **Lead-in** (as before, ~2 s of song before the Section) or **Count-in**
+(one bar of metronome clicks, the song silent, then the song starts exactly at the Section start). The Count-in is
+`transport.CountIn(bpm, beats_per_bar)` on the `Loop`: a Pass then starts one bar of song time before the Section
+(`pass_start_s = start - bar`, which may lie before the song start), and the Transport renders that stretch as clicks
+instead of song. Because the bar is measured in song time, the clicks scale with Speed by themselves (at 70 % a beat
+lasts beat / 0.7 output seconds), the last click lands one beat before the Section start, and the Pass mask that
+leaves the Lead-in unscored leaves the Count-in unscored too. Clicks go through the same output as the Backing and
+ignore both volume sliders; the first beat of the bar is higher and louder.
+
+**Tempo:** `library/tempo.py` beat-tracks the Backing with `librosa.beat.beat_track` (librosa comes with the `import`
+extra, through audio-separator) and stores `<song>/tempo.json` = `{bpm, beats_s}`. The importer does it after the
+reference line; for songs imported before, the window does it the first time Count-in is chosen, on a worker thread
+(`ui/tempo_find.py`, ~20 s the first time). Without librosa, or when it fails, the tempo is unknown: the BPM box shows
+"? BPM", the label says "tempo unknown — set BPM (Lead-in until then)", and the Lead-in plays until a BPM is typed.
+BPM 0 or an empty box means "use the detected tempo" (QA #48): with one known the box goes back to it, says so, and
+forgets his own BPM. A typed BPM under 30 becomes 30 and the label says the range. The BPM box (editable, 30-300) and the Beats-per-bar box (1-12, default 4) sit beside the choice. A BPM Simone types
+is kept in `player.json` (`bpm`; None = the detected one) together with `between` and `beats_per_bar`, and wins over
+the detected tempo. Changing any of the three during a loop restarts it at Pass 1 with the new Count-in.
+Detected for tulip-limited: 143.55 BPM.
+
+**A click inside a looping Section** (or an arrow jump that lands inside it) ends the Pass playing and starts the next
+Pass right there, without a Lead-in or Count-in; the loop goes on and wraps at the Section end as usual. A click
+anywhere else, the Lead-in included, ends the loop as before.

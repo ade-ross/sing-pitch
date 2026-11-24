@@ -16,7 +16,9 @@ from pathlib import Path
 
 import numpy as np
 
+from .player_settings import PLAYER, PlayerSettingsStore
 from .ports import ReferenceLine
+from .sections import SECTIONS, SectionStore
 
 VOCALS, BACKING, REFERENCE, META = "vocals.wav", "backing.wav", "reference.npz", "meta.json"
 
@@ -74,16 +76,36 @@ class Library:
         self.root = Path(home) / "songs"
 
     def list_songs(self) -> list[Song]:
+        return self.scan()[0]
+
+    def scan(self) -> tuple[list[Song], list[str]]:
+        """(the songs that can be read, one message per song folder that was skipped). A folder whose meta.json is
+        unreadable (cut off, not JSON, fields missing) is skipped: one bad song never hides the others."""
         if not self.root.exists():
-            return []
-        songs = [self._open(d) for d in sorted(self.root.iterdir()) if (d / META).exists()]
-        return sorted(songs, key=lambda s: s.meta.title.lower())
+            return [], []
+        songs, problems = [], []
+        for d in sorted(self.root.iterdir()):
+            if not (d / META).exists():
+                continue
+            try:
+                songs.append(self._open(d))
+            except (ValueError, TypeError, KeyError, OSError) as exc:      # JSON errors are ValueErrors
+                problems.append(f"{d.name}/{META} cannot be read ({type(exc).__name__}: {exc})")
+        return sorted(songs, key=lambda s: s.meta.title.lower()), problems
 
     def get(self, song_id: str) -> Song:
         d = self.root / song_id
         if not (d / META).exists():
             raise KeyError(f"no song {song_id!r} in the library")
         return self._open(d)
+
+    def sections(self, song_id: str) -> SectionStore:
+        """The song's saved Sections and unnamed mark."""
+        return SectionStore(self.get(song_id).dir)
+
+    def player_settings(self, song_id: str) -> PlayerSettingsStore:
+        """How the song was last set up in the player (Guide vocal, volumes, Speed, Section)."""
+        return PlayerSettingsStore(self.get(song_id).dir)
 
     def find_by_source(self, source_key: str) -> Song | None:
         return next((s for s in self.list_songs() if s.meta.source_key == source_key), None)
@@ -106,6 +128,9 @@ class Library:
         if replacing is None:
             staging.rename(final)
             return Song(meta, final)
+        for kept in (SECTIONS, PLAYER):        # a re-import keeps the Sections he marked (song times stay valid) and
+            if (final / kept).exists():        # how he had the player set up
+                shutil.copy2(final / kept, staging / kept)
         old = self.root / f".old-{uuid.uuid4().hex[:8]}"
         final.rename(old)
         try:

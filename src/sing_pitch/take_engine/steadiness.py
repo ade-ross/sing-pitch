@@ -8,6 +8,11 @@ from typing import Sequence
 from ..config import ScoreConfig
 
 
+def _held_note(s) -> str | None:
+    """The note a frame belongs to: the unmerged line's, so the Notes slider does not change what is held."""
+    return s.line_note or s.note_name
+
+
 def _notes(scores: Sequence) -> list[list]:
     """Held notes = runs of consecutive voiced, scored frames measured against the same note."""
     notes: list[list] = []
@@ -17,7 +22,7 @@ def _notes(scores: Sequence) -> list[list]:
             if run:
                 notes.append(run)
             run = []
-        elif run and run[-1].note_name != s.note_name:
+        elif run and _held_note(run[-1]) != _held_note(s):
             notes.append(run)
             run = [s]
         else:

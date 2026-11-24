@@ -7,6 +7,7 @@ from frames import hz_at
 from melody_helpers import library_song, reference_line
 
 from sing_pitch.audio_input import ArrayInput
+from sing_pitch.playback import SongTimeLog
 from sing_pitch.pitch.swiftf0 import SwiftF0Tracker
 from sing_pitch.settings import Settings
 
@@ -16,8 +17,19 @@ NOTES = [(-900, 0.6), (-500, 0.6), (-200, 0.8)]
 class FakeBacking:
     duration_s, finished = 2.0, False
 
-    def __init__(self, path=None):
-        self.path, self.started, self.stopped = path, False, False
+    def __init__(self, path=None, vocals=None):
+        self.path, self.vocals, self.started, self.stopped = path, vocals, False, False
+        self.gains = []
+        self.speed, self.speeds = 1.0, []
+        self.song_log = SongTimeLog(SR)
+        self.song_log.append(0, 0.0)             # playing from the song start, nothing rendered yet
+
+    def set_gains(self, backing, vocal):
+        self.gains.append((backing, vocal))
+
+    def set_speed(self, speed, backing=None, vocal=None):
+        self.speed = speed
+        self.speeds.append((speed, backing, vocal))
 
     def start(self):
         self.started = True
@@ -32,8 +44,8 @@ class FakeBacking:
 def window(qtbot, home, audio, output=("WF-1000XM5", "headphones"), backings=None, **kw):
     from sing_pitch.ui import MainWindow
 
-    def make_backing(path):
-        b = FakeBacking(path)
+    def make_backing(path, vocals=None):
+        b = FakeBacking(path, vocals)
         if backings is not None:
             backings.append(b)
         return b
@@ -198,3 +210,28 @@ def test_calibrating_an_output_with_no_name_is_remembered_for_the_next_melody_ta
     win.toggle()
     assert "not calibrated" not in win.summary_label.text()
     assert abs(win._runner.latency_s - 0.27) < 0.05 if win._runner else True
+
+
+def test_guide_vocal_toggle_and_two_sliders_are_for_melody_and_act_on_the_backing_player_mid_take(qtbot, tmp_path):
+    song = library_song(tmp_path, reference_line(NOTES))
+    backings = []
+    win = window(qtbot, tmp_path, quiet(2.0), backings=backings)
+    controls = (win.guide_box, win.guide_slider, win.backing_slider)
+    assert not any(c.isEnabled() for c in controls)                   # Nearest note
+    win.reference_box.setCurrentText("Melody")
+    assert all(c.isEnabled() for c in controls)
+    win.toggle()
+    assert backings[0].vocals == song.vocals_path
+    assert backings[0].gains[-1] == (1.0, 0.0)                         # Guide vocal starts off
+    assert all(c.isEnabled() for c in controls)                        # usable mid-Take
+    win.guide_box.setChecked(True)
+    assert backings[0].gains[-1] == (1.0, 1.0)
+    win.guide_slider.setValue(40)
+    assert backings[0].gains[-1] == (1.0, 0.4)
+    win.backing_slider.setValue(50)
+    assert backings[0].gains[-1] == (0.5, 0.4)
+    win.guide_box.setChecked(False)
+    assert backings[0].gains[-1] == (0.5, 0.0)
+    win.toggle()
+    win.reference_box.setCurrentText("Key")
+    assert not any(c.isEnabled() for c in controls)

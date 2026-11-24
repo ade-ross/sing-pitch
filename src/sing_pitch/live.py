@@ -1,18 +1,66 @@
 """Glue without a UI: audio chunks -> pitch tracker -> Take engine. Qt-free and device-free, so it is testable."""
 from __future__ import annotations
 
+import dataclasses
+import math
 import queue
 import threading
+from datetime import datetime, timedelta
 from pathlib import Path
 from typing import Protocol
 
 import numpy as np
 
 from .audio_input import AudioInput
-from .pitch import PitchTracker
+from .config import DEFAULT_SCORE_CONFIG, ScoreConfig
+from .pitch import PitchFrame, PitchTracker
 from .reference import Reference
-from .take_engine import FrameScore, TakeEngine, TakeRecord
+from .take_engine import AUTO, FrameScore, LogClock, OctaveSetting, PassTag, SongClock, TakeEngine, TakeRecord
 from .take_store import save_take
+
+FRAME_S = 0.016              # one tracker frame
+MIN_TAKE_SCORED_S = 3.0      # a Take closed by a jump with less scored singing than this is discarded
+MIN_PASS_FRACTION = 0.5      # a Pass Take is kept when it scored this share of its Section's singable time...
+MIN_PASS_SCORED_S = 0.3      # ...but at least this much, and never more is asked than MIN_TAKE_SCORED_S
+
+
+def pass_tag(loop, pass_index: int) -> PassTag:
+    """The tag of Pass `pass_index` of a playback.transport.Loop; an unnamed mark is named by its span."""
+    name = loop.name or f"{loop.start_s:.1f}-{loop.end_s:.1f} s"
+    return PassTag(name, loop.start_s, loop.end_s, pass_index)
+
+
+def _guide_settings(history: list[tuple[float, float]], frames) -> tuple[str, float]:
+    """(guide_vocal, guide_gain) of a Take: `history` = [(voice time, Guide vocal gain from then on)], oldest first,
+    the first entry at -inf. The Guide vocal is "on" when its gain is above 0; "mixed" when it was on for part of the
+    Take; the gain is the highest one heard (0 when off)."""
+    if frames:
+        first, last = frames[0].t, frames[-1].t
+        gains = [next(g for t, g in reversed(history) if t <= first)] + [g for t, g in history if first < t <= last]
+    else:
+        gains = [history[-1][1]]
+    on = [g > 0 for g in gains]
+    if not any(on):
+        return "off", 0.0
+    return ("on" if all(on) else "mixed"), round(max(gains), 3)
+
+
+def _singable_s(reference: Reference, tag: PassTag) -> float:
+    """Song seconds of the Section the Reference can score (a Reference without a line: the whole Section)."""
+    if not hasattr(reference, "sample"):
+        return tag.end_s - tag.start_s
+    midi, _ = reference.sample(np.arange(tag.start_s, tag.end_s, FRAME_S))
+    return float(np.isfinite(midi).sum()) * FRAME_S
+
+
+def _too_short(record: TakeRecord, reference: Reference, tag: PassTag | None) -> bool:
+    """Too little scored singing to keep: under MIN_TAKE_SCORED_S, or for a Pass under MIN_PASS_FRACTION of its
+    Section's singable time (in voice seconds at its Speed), so Sections shorter than 3 s still save their Passes."""
+    need = MIN_TAKE_SCORED_S
+    if tag is not None:
+        voice_s = _singable_s(reference, tag) / (record.speed_pct / 100)
+        need = min(need, max(MIN_PASS_SCORED_S, MIN_PASS_FRACTION * voice_s))
+    return record.summary.n_scored * FRAME_S < need
 
 
 class Playback(Protocol):
@@ -22,28 +70,64 @@ class Playback(Protocol):
 
     def position_s(self) -> float: ...
 
+    @property
+    def song_log(self): ...         # playback.SongTimeLog: output time -> song time
+
     def stop(self) -> None: ...
+
+    on_event: object             # settable: called from the audio thread with each TransportEvent
+
+    # Optional, read once at start() (a player without them counts as Guide vocal off, Speed 100):
+    #   current_gains: tuple[float, float]   (Backing, Guide vocal) in effect
+    #   speed: float                 Speed in effect, 1.0 = original
+
+    def set_gains(self, backing: float, vocal: float) -> None: ...
+
+    def set_speed(self, speed: float, backing=None, vocal=None) -> None: ...
 
 
 class LiveTake:
-    """One Take, fed chunk by chunk. Drive from ONE thread. latency_s: see TakeEngine."""
+    """One Take, fed chunk by chunk. Drive from ONE thread. song_clock: see TakeEngine."""
 
-    def __init__(self, tracker: PitchTracker, reference: Reference, sample_rate: int, latency_s: float = 0.0):
+    def __init__(self, tracker: PitchTracker, reference: Reference, sample_rate: int,
+                 song_clock: SongClock | None = None, reset_tracker: bool = True, pass_tag: PassTag | None = None,
+                 started_at: datetime | None = None, octave: OctaveSetting = AUTO,
+                 config: ScoreConfig = DEFAULT_SCORE_CONFIG):
+        """reset_tracker False: a Take that goes on from the previous one's audio (after a jump or a loop wrap), so
+        the tracker keeps its state and its frame times. pass_tag, started_at, octave, config: see TakeEngine."""
         self._tracker = tracker
-        self._engine = TakeEngine(reference, latency_s=latency_s)
+        self._engine = TakeEngine(reference, config, song_clock=song_clock, pass_tag=pass_tag, started_at=started_at,
+                                  octave=octave)
         self._sample_rate = sample_rate
-        tracker.reset()
+        if reset_tracker:
+            tracker.reset()
 
     @property
-    def latency_s(self) -> float:
-        return self._engine.latency_s
+    def song_clock(self) -> SongClock:
+        return self._engine.song_clock
 
-    @latency_s.setter
-    def latency_s(self, value: float) -> None:
-        self._engine.latency_s = value
+    @song_clock.setter
+    def song_clock(self, value: SongClock) -> None:
+        self._engine.song_clock = value
+
+    @property
+    def pass_tag(self) -> PassTag | None:
+        return self._engine.pass_tag
+
+    @pass_tag.setter
+    def pass_tag(self, value: PassTag | None) -> None:
+        self._engine.pass_tag = value
 
     def feed(self, chunk: np.ndarray) -> list[FrameScore]:
         return self._engine.push(self._tracker.push(chunk, self._sample_rate))
+
+    def push_frames(self, frames: list[PitchFrame]) -> list[FrameScore]:
+        """Frames the tracker already made (the runner splits them between Takes)."""
+        return self._engine.push(frames)
+
+    def close(self) -> TakeRecord:
+        """End this Take here, leaving the tracker alone."""
+        return self._engine.stop()
 
     def finish(self) -> TakeRecord:
         self._engine.push(self._tracker.flush())
@@ -55,30 +139,72 @@ class LiveRunner:
     the UI calls drain() from its timer. Stop() ends the Take and saves it.
 
     Melody Takes pass the Backing player and the calibrated loop latency. The Backing starts first; at the first
-    mic chunk the runner reads how far the song already is, so the Take's latency offset becomes
-    latency_s - (song position when the input clock was at 0)."""
+    mic chunk the runner reads how much output the Backing had rendered when the input clock was at 0, and from then
+    on a voice frame at input time t is scored against the song time the Backing's song-time log shows at output
+    time t - latency_s (a LogClock), so pauses and seeks (later loops, Speed) keep the sync.
+
+    A jump (the Backing's "jumped" event) closes the current Take and opens the next one: voice frames before the
+    jump's input time (event output time + the clock's offset) belong to the old Take, the rest to the new one. A Take
+    closed that way with less than MIN_TAKE_SCORED_S of scored singing is discarded (a Pass Take: less than
+    MIN_PASS_FRACTION of its Section, see _too_short); the others are saved at once
+    and listed by drain_saved(). On stop() the last Take is saved too, unless it is that short and an earlier Take of
+    the run was saved (a run always leaves at least one Take).
+
+    A Section loop works the same way: each "pass_started" event closes the Take there and opens the next one, tagged
+    with the Section and the pass index (PassTag), so every Pass is its own Take and its Lead-in is never scored.
+    "loop_ended" closes the last Pass Take and opens an untagged one. A Pass that starts before the song clock exists
+    (the loop was on at Start) tags the first Take.
+
+    Each saved Take records the practice settings it was sung with. Speed: a "speed_changed" outside a loop is a
+    boundary too (a Take is never half at one Speed); inside a loop the Transport applies it at a Pass boundary, which
+    is a boundary already. Guide vocal: the runner keeps the history of the Guide vocal gain ("gains_changed" events)
+    and a Take that saw it both on and off is "mixed"."""
 
     def __init__(self, source: AudioInput, tracker: PitchTracker, reference: Reference, home: Path,
-                 backing: Playback | None = None, latency_s: float = 0.0):
+                 backing: Playback | None = None, latency_s: float = 0.0, octave: OctaveSetting = AUTO,
+                 config: ScoreConfig = DEFAULT_SCORE_CONFIG):
         self._source = source
+        self._config = config                     # every Take of the run is scored with it (Tolerance, Timing window)
         self._tracker = tracker
         self._reference = reference
         self._home = home
         self._backing = backing
         self._latency_s = latency_s
+        self._octave = octave                     # every Take of the run is scored with it
         self._chunks: queue.SimpleQueue = queue.SimpleQueue()
         self._scores: queue.SimpleQueue = queue.SimpleQueue()
         self._take: LiveTake | None = None
+        self._cuts: list[tuple[float, PassTag | None, int | None]] = []   # (input time, tag of the next Take, its
+                                                              # Speed percent or None = as before) of boundaries not
+                                                              # yet reached by the frames (worker only)
+        self._speed_pct = 100                     # Speed of the running Take (worker only)
+        self._speed_next: int | None = None       # a Speed applied at a Pass boundary, for the cut that follows
+        self._guide: list[tuple[float, float]] = [(-math.inf, 0.0)]    # (voice time, Guide vocal gain) (worker only)
+        self._saved: list[TakeRecord] = []        # Takes saved so far in this run (worker, then stop())
+        self._saved_news: queue.SimpleQueue = queue.SimpleQueue()
+        self._cut_news: queue.SimpleQueue = queue.SimpleQueue()    # voice time of each Take boundary passed
         self._thread: threading.Thread | None = None
         self._error: Exception | None = None      # what killed the worker, if anything
+        self._run_started = datetime.now()        # wall clock at input time 0: a cut's Take starts at this + its time
+        self._received = 0                        # mic samples delivered so far (audio thread writes, UI reads)
 
     def start(self) -> None:
         """Open the Backing and the input, then start the worker: a Start that fails leaves no thread behind."""
         self._error = None
-        self._take = LiveTake(self._tracker, self._reference, self._source.sample_rate, self._latency_s)
+        self._cuts, self._saved = [], []
+        self._speed_pct = round(100 * getattr(self._backing, "speed", 1.0))
+        self._speed_next = None
+        self._guide = [(-math.inf, getattr(self._backing, "current_gains", (1.0, 0.0))[1])]
+        self._run_started = datetime.now()
+        self._received = 0
+        self._take = LiveTake(self._tracker, self._reference, self._source.sample_rate, started_at=self._run_started,
+                              octave=self._octave, config=self._config)
         if self._backing is None:
-            on_chunk = self._chunks.put
+            def on_chunk(chunk: np.ndarray) -> None:      # PortAudio thread
+                self._received += len(chunk)
+                self._chunks.put(chunk)
         else:
+            self._backing.on_event = self._on_event
             try:
                 self._backing.start()
             except Exception:
@@ -90,8 +216,10 @@ class LiveRunner:
                 nonlocal first
                 if first:
                     first = False
-                    song_at_zero = self._backing.position_s() - len(chunk) / self._source.sample_rate
-                    self._chunks.put(("align", self._latency_s - song_at_zero))
+                    log = self._backing.song_log
+                    output_at_zero = log.rendered_s - len(chunk) / self._source.sample_rate
+                    self._chunks.put(("align", LogClock(log, self._latency_s, output_at_zero)))
+                self._received += len(chunk)
                 self._chunks.put(chunk)
 
         try:
@@ -103,6 +231,20 @@ class LiveRunner:
             raise
         self._thread = threading.Thread(target=self._work, name="sing-pitch-tracker", daemon=True)
         self._thread.start()          # chunks that arrived meanwhile wait in the queue
+
+    def _on_event(self, event) -> None:       # audio thread: only hand over, in order with the chunks
+        if event.kind in ("jumped", "loop_ended"):
+            self._chunks.put(("jump", (event.output_s, None, None)))
+        elif event.kind == "pass_started":
+            self._chunks.put(("jump", (event.output_s, pass_tag(event.loop, event.pass_index), None)))
+        elif event.kind == "speed_changed":
+            pct = round(100 * event.speed)
+            if event.loop is None:
+                self._chunks.put(("jump", (event.output_s, None, pct)))
+            else:                         # applied at a Pass boundary: the pass_started that follows is the cut
+                self._chunks.put(("speed", pct))
+        elif event.kind == "gains_changed":
+            self._chunks.put(("gains", (event.output_s, event.gains[1])))
 
     @staticmethod
     def _quietly(cleanup) -> None:
@@ -116,17 +258,104 @@ class LiveRunner:
             if self._error is not None:       # crashed earlier: keep emptying the queue until stop() ends us
                 continue
             try:
-                if isinstance(chunk, tuple):            # ("align", latency): set before the first frame is scored
-                    self._take.latency_s = chunk[1]
+                if isinstance(chunk, tuple):
+                    self._control(*chunk)
                 else:
-                    self._scores.put(self._take.feed(chunk))
+                    self._scores.put(self._route(self._tracker.push(chunk, self._source.sample_rate)))
             except Exception as exc:
                 self._error = exc
 
+    def _control(self, kind: str, value) -> None:
+        if kind == "align":             # ("align", clock): set before the first frame is scored
+            self._take.song_clock = value
+        elif kind == "speed":           # ("speed", percent): applies to the next cut
+            self._speed_next = value
+        elif kind == "gains":           # ("gains", (output_s, Guide vocal gain)): from that voice time on
+            output_s, gain = value
+            if isinstance(self._take.song_clock, LogClock):
+                self._guide.append((output_s + self._take.song_clock.offset_s, gain))
+            else:                       # before the clock exists: it is how the first Take starts
+                self._guide = [(-math.inf, gain)]
+        elif kind == "jump":            # ("jump", (output_s, tag, speed)): a boundary before the clock exists has no
+            output_s, tag, pct = value  # Take to close, so the first Take simply takes its tag and Speed
+            pct, self._speed_next = pct if pct is not None else self._speed_next, None
+            if isinstance(self._take.song_clock, LogClock):
+                self._cuts.append((output_s + self._take.song_clock.offset_s, tag, pct))
+            else:
+                self._take.pass_tag = tag
+                self._speed_pct = pct if pct is not None else self._speed_pct
+
+    def _route(self, frames: list[PitchFrame]) -> list[FrameScore]:
+        """Tracker frames to the current Take; at each pending jump the Take is closed and the next one opened."""
+        scores: list[FrameScore] = []
+        while self._cuts and frames:
+            first_after = next((i for i, f in enumerate(frames) if f.t >= self._cuts[0][0]), None)
+            if first_after is None:
+                break
+            scores += self._take.push_frames(frames[:first_after])
+            frames = frames[first_after:]
+            at, tag, pct = self._cuts.pop(0)
+            self._next_take(tag, pct, at)
+        return scores + self._take.push_frames(frames)
+
+    def _with_settings(self, record: TakeRecord) -> TakeRecord:
+        guide, gain = _guide_settings(self._guide, record.frames)
+        return dataclasses.replace(record, guide_vocal=guide, guide_gain=gain, speed_pct=self._speed_pct)
+
+    def _next_take(self, tag: PassTag | None = None, speed_pct: int | None = None, at: float = 0.0) -> None:
+        """Close the running Take and open the next one at voice time `at`: it started at the run start + `at` (not
+        when the worker got here), so Takes cut a few seconds apart get their own started_at and id."""
+        old, clock = self._take, self._take.song_clock
+        record = self._with_settings(old.close())
+        if speed_pct is not None:
+            self._speed_pct = speed_pct
+        if not _too_short(record, self._reference, old.pass_tag):
+            saved = save_take(self._home, record)
+            self._saved.append(saved)
+            self._saved_news.put(saved)
+        self._take = LiveTake(self._tracker, self._reference, self._source.sample_rate, song_clock=clock,
+                              reset_tracker=False, pass_tag=tag, octave=self._octave, config=self._config,
+                              started_at=self._run_started + timedelta(seconds=max(0.0, at)))
+        self._cut_news.put(at)           # before any score of the new Take is handed over (see drain_cuts)
+
+    def drain_saved(self) -> list[TakeRecord]:
+        """Takes saved at a jump or a loop wrap since the last call (the last Take of the run comes from stop())."""
+        out: list[TakeRecord] = []
+        while True:
+            try:
+                out.append(self._saved_news.get_nowait())
+            except queue.Empty:
+                return out
+
+    def drain_cuts(self) -> list[float]:
+        """Voice times of the Take boundaries (jumps, loop wraps, Speed changes) the worker has passed since the last
+        call, oldest first. A boundary is listed before any score after it reaches drain(): call this after drain()
+        and every score of the new Take drained so far has its boundary here."""
+        out: list[float] = []
+        while True:
+            try:
+                out.append(self._cut_news.get_nowait())
+            except queue.Empty:
+                return out
+
+    @property
+    def song_clock(self) -> SongClock | None:
+        """Voice time -> song time of the running Take (the same clock across jumps)."""
+        return None if self._take is None else self._take.song_clock
+
     @property
     def latency_s(self) -> float | None:
-        """The Take's latency offset (after alignment to the Backing), for drawing the reference line."""
-        return None if self._take is None else self._take.latency_s
+        """The song clock's offset at the Take start (voice time - song time while the song plays linearly), for
+        drawing the reference line on the voice clock."""
+        return None if self._take is None else self._take.song_clock.offset_s
+
+    @property
+    def heard_t(self) -> float:
+        """The voice time of what is in the headphones now: the newest mic sample's time plus the input's own latency.
+        The calibrated latency is the output part plus the input part, so in song terms this is the rendered output
+        minus the output part of the latency. Every tracker frame is older than this by the tracker's look-ahead
+        (SwiftF0: ~0.18 s) and the queueing, so the plot's now-line is drawn here, not at the newest frame."""
+        return self._received / self._source.sample_rate + getattr(self._source, "latency_s", 0.0)
 
     def drain(self) -> list[FrameScore]:
         out: list[FrameScore] = []
@@ -139,6 +368,12 @@ class LiveRunner:
             raise self._error
         return out
 
+    def _pop_error(self) -> Exception:
+        """The worker's exception, no longer kept here and in no local of the raising frame: its traceback holds
+        frames whose `self` is this runner, so keeping it is a cycle only gc would free, on any thread (ui/gui_gc.py)."""
+        error, self._error = self._error, None
+        return error
+
     def stop(self) -> TakeRecord:
         self._source.stop()
         if self._backing is not None:
@@ -146,5 +381,8 @@ class LiveRunner:
         self._chunks.put(None)
         self._thread.join()
         if self._error is not None:
-            raise self._error
-        return save_take(self._home, self._take.finish())
+            raise self._pop_error()
+        record = self._with_settings(self._take.finish())
+        if self._saved and _too_short(record, self._reference, self._take.pass_tag):
+            return self._saved[-1]
+        return save_take(self._home, record)

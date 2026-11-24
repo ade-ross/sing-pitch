@@ -17,6 +17,8 @@ class Target:
 
     midi: float | None            # target pitch as float MIDI; None = unscored (Melody only)
     in_key: bool | None = None    # Key Reference only: False = outside the key
+    line_midi: float | None = None   # Melody only: the line itself where midi is a Notes-mode bar (None = same as midi)
+    note: int | None = None          # Notes mode: which note (index in note_list) midi is the bar of
 
 
 class Reference(Protocol):
@@ -25,5 +27,6 @@ class Reference(Protocol):
     kind: Literal["nearest", "key", "melody"]
 
     def target(self, t: float, sung_midi: float) -> Target:
-        """t = time on the Take clock (already latency-corrected by the engine)."""
+        """t = time on the Take clock (already latency-corrected by the engine). A Melody also takes window_s, the
+        Timing window (see Melody.target)."""
         ...

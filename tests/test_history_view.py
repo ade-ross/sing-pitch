@@ -3,6 +3,8 @@ from datetime import datetime
 
 from test_history import row, write_table
 
+from sing_pitch.history import WHOLE_SONG
+
 
 def test_empty_table_shows_empty_state_and_does_not_crash(qtbot, tmp_path):
     from sing_pitch.ui.history_view import HistoryView
@@ -65,3 +67,66 @@ def test_main_window_opens_history(qtbot, tmp_path):
     win.history_button.click()
     assert win.history_window is not None and win.history_window.isVisible()
     win.history_window.close()
+
+
+def test_guide_vocal_speed_and_section_filters_narrow_the_plot(qtbot, tmp_path):
+    from sing_pitch.ui.history_view import HistoryView
+    from test_history import practice_table
+
+    practice_table(tmp_path)
+    v = HistoryView(tmp_path)
+    qtbot.addWidget(v)
+    assert list(v.pct_curve.getData()[1]) == [40.0, 50.0, 60.0, 65.0, 30.0]
+    v.guide_box.setCurrentIndex(v.guide_box.findData("off"))
+    assert list(v.pct_curve.getData()[1]) == [50.0, 60.0, 30.0]
+    v.speed_box.setCurrentIndex(v.speed_box.findData(70))
+    assert list(v.pct_curve.getData()[1]) == [60.0]
+    v.guide_box.setCurrentIndex(0)
+    v.speed_box.setCurrentIndex(0)
+    v.section_box.setCurrentIndex(v.section_box.findData("Chorus 1"))
+    assert list(v.pct_curve.getData()[1]) == [50.0, 60.0]
+    v.section_box.setCurrentIndex(v.section_box.findData(WHOLE_SONG))
+    assert list(v.pct_curve.getData()[1]) == [40.0, 30.0]
+    assert not v.grab().isNull()
+
+
+def test_filter_boxes_keep_their_choice_over_a_refresh(qtbot, tmp_path):
+    from sing_pitch.ui.history_view import HistoryView
+    from test_history import practice_table
+
+    practice_table(tmp_path)
+    v = HistoryView(tmp_path)
+    qtbot.addWidget(v)
+    v.speed_box.setCurrentIndex(v.speed_box.findData(70))
+    v.reload()
+    assert v.speed_box.currentData() == 70 and list(v.pct_curve.getData()[1]) == [60.0, 65.0]
+
+
+def test_the_cents_chart_shows_every_take_however_bad(qtbot, tmp_path):
+    from sing_pitch.ui.history_view import HistoryView
+
+    write_table(tmp_path, [row("a", 10, med="116"), row("b", 11, med="20"), row("c", 12, med="148")])
+    v = HistoryView(tmp_path)
+    qtbot.addWidget(v)
+    top = v._cents_plot.viewRange()[1][1]
+    assert top >= 148 and top <= 148 * 1.5          # the worst Take is inside, and the chart is not mostly empty
+
+
+def test_the_cents_chart_never_zooms_in_below_fifty_cents(qtbot, tmp_path):
+    from sing_pitch.ui.history_view import HistoryView
+
+    write_table(tmp_path, [row("a", 10, med="4"), row("b", 11, med="6")])
+    v = HistoryView(tmp_path)
+    qtbot.addWidget(v)
+    assert v._cents_plot.viewRange()[1] == [0, 50]
+
+
+def test_the_cents_chart_follows_the_filter(qtbot, tmp_path):
+    from sing_pitch.ui.history_view import HistoryView
+
+    write_table(tmp_path, [row("a", 10, med="200"), row("b", 11, reference="melody", song="s1", med="30")])
+    v = HistoryView(tmp_path)
+    qtbot.addWidget(v)
+    assert v._cents_plot.viewRange()[1][1] >= 200
+    v.reference_box.setCurrentIndex(v.reference_box.findData("melody"))
+    assert v._cents_plot.viewRange()[1] == [0, 50]

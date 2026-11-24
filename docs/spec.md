@@ -69,9 +69,9 @@ he does not play guitar while using it.
 23. As Simone, I want the reference melody line drawn next to mine, so that I can see what I should sing.
 24. As Simone, I want stretches where the extracted reference is unreliable greyed out and left out of every score, so
     that extraction errors never count as my errors.
-25. As Simone, I want the app to detect the one Octave shift between me and the original singer for each Take, so that
+25. As Simone, I want the app to detect the Octave shift between me and the original singer for each Phrase, so that
     singing a song an octave lower is not marked wrong.
-26. As Simone, I want octave jumps within a Take not forgiven note by note, so that real errors are not hidden.
+26. As Simone, I want octave jumps within a Phrase not forgiven note by note, so that real errors are not hidden.
 27. As Simone, I want imported songs kept in a library, so that I can sing a song again without re-importing it.
 28. As Simone, I want a History view plotting % in tune and median cents off over dates, so that I can see whether I
     am improving.
@@ -107,25 +107,88 @@ he does not play guitar while using it.
     record. Pure logic with no audio device and no UI.
   - **Take store:** each Take is saved as its raw pitch line plus one row in a single summary table.
   - **Song library / importer:** download, separate, extract, store.
-  - **Playback:** Backing or Drone to the headphones, with a latency offset used by the Take engine.
+  - **Playback:** Drone, or the Transport (Backing + Guide vocal; pure core + thin sounddevice shell) whose song-time
+    log the Take engine reads.
   - **UI:** live view, Take summary, History.
 - **Scoring:**
-  - **Bands:** ±25 cents and ±50 cents. The ±50 line is the research convention for "in tune" (Berkowska & Dalla Bella
-    2013). The ±25 line is the planner's choice, set near where untrained listeners start to hear an error (about
-    20–30 cents, Larrouy-Maestri group, abstracts only).
-  - **% in tune:** green time divided by voiced, scored time.
-  - **Median cents off:** median of the absolute error. **Tendency:** sign of the median signed error.
+  - **Bands:** green within the Tolerance, yellow up to twice it, red beyond. The Tolerance defaults to ±25 cents
+    (green ±25, yellow to ±50). The ±50 line is the research convention for "in tune" (Berkowska & Dalla Bella 2013);
+    the ±25 line is the planner's choice, set near where untrained listeners start to hear an error (about 20–30
+    cents, Larrouy-Maestri group, abstracts only). Simone sets the Tolerance with a slider (±10 to ±100 cents, 5-cent
+    steps; #41). It applies to every Reference, is remembered in settings.json, is locked during a Take and is saved
+    with each Take (`tolerance_cents`); the summary, the History legend and a History filter show it.
+  - **Timing window (Melody, QA #44):** each Phrase gets one timing shift, how late (+) or early (−) the voice is,
+    searched from −100 to +100 ms in 10 ms steps. It is chosen together with the Phrase's Octave shift, in one search:
+    the pair (k, shift) whose Reference, the line at song time − shift plus 12 k, gives the smallest median absolute
+    error over the Phrase's scored frames (ties within 0.5 c go to the smaller mean error with each frame capped at
+    300 c, then the smaller |k|, then the smaller |shift|; a pinned Octave searches the shift only). Every frame of the
+    Phrase is then scored strictly at that shift, so it forgives timing, not pitch: a voice 40 cents sharp the whole
+    time scores ~7 % in tune and shows ~40 c. The line is read between its 10 ms frames where two neighbours are within
+    a semitone (a glide or vibrato), at the nearest frame across a note change and on Notes-mode bars. A shift never
+    moves a frame across an Unscored stretch (it is held at the edge of the scored run), so whether a frame is scored
+    does not change. The held note for Steadiness is still read at the frame's own song time. Live, the open Phrase's
+    pair is re-estimated as it grows; after ~2 s of scored singing its octave is kept and its shift re-estimated each
+    time the Phrase's scored frames double; the summary uses whole-Phrase pairs. Saved as `timing_window_s` and
+    `timing_shift_ms` (the Take's median shift over its scored frames). History of the rule: #41 took, per frame, the
+    reference frame within ±100 ms closest to the voice; on a vocal with vibrato that hid a constant 40 c error (75 %
+    in tune, 8 c). Rows without `timing_shift_ms` re-score with that #41 rule.
+  - **% in tune:** green time divided by voiced, scored time. Notes mode (#41): the green share of the sung notes'
+    length, each note judged once (see spec-practice-controls.md, Notes mode).
+  - **Median cents off:** median of the absolute error. **Tendency:** sign of the median signed error. In Notes mode
+    both are the length-weighted medians over the notes' verdicts.
+  - **Old Takes:** a row without `tolerance_cents` (saved before #41) is re-scored as it was scored: ±25 cents, no
+    Timing window, Notes mode frame by frame (`take_store.row_config`), so its numbers stay as saved. A row with
+    `timing_window_s` but no `timing_shift_ms` (saved by #41) re-scores with the per-frame window. A replay and a
+    re-score always use the Take's saved scoring, never the slider.
   - **Steadiness:** SD in cents around the note's own median, over held notes longer than about 0.5 s, with the first
     and last ~120 ms or 15% removed (Dai & Dixon 2019).
-- **Octave shift:** per Take, the whole-octave offset (−2…+2) that minimises median absolute error. It is fixed for
-  the whole Take. Within-Take octave jumps are not forgiven. Live view: the shift is re-estimated from the scored
-  frames so far until about 2 s of singing (125 frames) are scored, then kept; the summary and the saved row use the
-  whole-Take shift, so the first seconds on screen can differ from them.
+    A held note is a run of frames on one note of the unmerged Melody line, so Steadiness does not change with the
+    Notes slider. Tracker octave blips (a run of up to 0.3 s that sits 1000 cents or more from the median of the
+    scored frames a second either side) are left out of Steadiness and of the range. **Range:** the 5th to 95th
+    percentile of the scored frames, blips left out. Takes saved before 2026-11-24 keep their saved numbers; a
+    re-score uses these rules.
+- **Octave shift:** per Phrase (Auto, the default) or pinned for the whole Take. A Phrase is a run of singing between
+  pauses of about 0.5 s or more (`phrase_gap_s`); voiced runs shorter than 48 ms do not count. Phrase boundaries are
+  a pure function of the frames and their voiced mask, the same live and on re-score. Auto gives each Phrase the
+  whole octave k in −2…+2 closest to its Reference (smallest median absolute error, ties to the smaller |k|), so a
+  verse sung an octave down and a chorus at pitch in one Take are both in tune. An octave jump inside a Phrase is
+  still not forgiven. The Octave box next to Speed offers Auto, −2, −1, 0, +1; a pinned value applies to every Phrase
+  of the Take and is remembered per song with the other player settings. Live view: each Phrase's k is re-estimated
+  while the Phrase grows, until about 2 s of it (125 scored frames) are scored, then kept for the rest of that
+  Phrase; the summary and the saved row use each Phrase's whole-Phrase k, so the first seconds of a Phrase on screen
+  can differ from them. The blue line is drawn at the active k (live and on replay, each frame at the k it was scored
+  at), with faint Guide lines one octave above and below; the y-window follows the voice and the coming Reference (see Vertical range). `octave_shift` in the
+  summary is the pinned k, or for Auto the most common Phrase shift (ties to the one with more scored frames, then
+  the smaller |k|); `octave_mode` (auto / pinned) is a new column of takes.csv. Takes saved before this have an empty
+  `octave_mode` and re-score with one shift for the whole Take, exactly as they were scored.
+- **Vertical range:** 24 semitones (12 either side of a centre in whole semitones), because 4 s of a song spans up to
+  ~20. The centre follows the median of the last 2 s of voice and the coming 4 s of the Reference at the Octave shift
+  drawn (the voice only when it is within 5 semitones of it, i.e. not an octave off), and it moves only when that
+  content would come within 1 semitone of an edge (hysteresis); a move then centres on the next 10 s of the Reference
+  too and eases over ~0.3 s. One stray voice frame or one wild Reference frame moves nothing. With no Reference (Nearest
+  note, Key) the voice median alone moves it, when it is 4 semitones off the centre.
+- **Speed presets and replaying from History:** buttons 70 / 85 / 100 % next to the Speed box set it (same preparation
+  and cache path). History lists the Takes (newest first) with a Replay button and double-click; the main window then
+  replays that Take with its saved Reference, song, Octave, Notes and Speed on the controls, and puts the controls back
+  when the replay ends. Nothing is remembered or stretched by a replay; a missing song or a running Take says so.
 - **Unscored stretches:** reference frames with RMVPE confidence under 0.3, smoothed: dips shorter than 0.12 s between
   reliable frames are filled, reliable runs shorter than 0.12 s are dropped. Greyed on the live and replay plot, left
   out of all five numbers and of Steadiness.
-- **Sync:** Melody scoring compares the voice frame at time t (corrected for input, tracker and output latency) with
-  the reference at t.
+- **Centred plot:** the now-line sits in the middle of the plot: the last 4 s on its left (the voice and the Reference),
+  the next 4 s on its right (the Reference, its Guide lines and Unscored bands, never the voice). The right half is
+  an approximation: it takes the song to go on from where the Transport's rendering ended, at that Speed, wrapping at the
+  end of a looped Section to the next Pass's Lead-in and ending at the song end; a seek, pause or Speed change made
+  inside those seconds shows once rendered. Paused, it shows what plays on resume. The Octave shift of the last frame
+  is held in the right half (a later Phrase may be scored at another one).
+  The now-line is the song heard in the headphones now (the newest mic sample's time plus the input latency, i.e. the
+  rendered output minus the output part of the calibrated latency), not the newest voice frame: the voice is drawn
+  where it was sung, so it ends ~0.2 s left of the line (the tracker's look-ahead). The x axis is voice time with
+  every pause of the song folded away (`PauseFold`): while paused the whole plot stands still and singing is neither
+  drawn nor scored; on resume it goes on from the same place, and the Take is not split. Replays do the same.
+- **Sync:** the Transport logs which song time it rendered at each output time. A voice frame heard at input time t
+  is scored against the song time rendered at t − calibrated latency (a LogClock over that log), so pauses (later
+  seeks, loops, Speed) keep sync. The song time of every frame is saved with the Take (npz `song_t`); Takes saved
+  before this have none and are re-scored with t − `latency_offset_s`, as they were scored.
 - **Build order:** Nearest note plus the Take log, then History, then Key plus Drone, then import and stem split, then
   Melody, then Unscored stretches and Octave shift. Each step is usable on its own.
 
