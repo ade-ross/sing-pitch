@@ -18,7 +18,7 @@ from .. import __version__
 from ..config import DEFAULT_SCORE_CONFIG, ScoreConfig
 from ..pitch import PitchFrame
 from ..reference import Key, Melody, NearestNote, Reference
-from ..take_engine import TakeRecord, linear_song_times, score_take
+from ..take_engine import AUTO, LEGACY, OctaveSetting, TakeRecord, linear_song_times, pinned, score_take
 
 # The ONE summary table. Columns for later tickets (steadiness, octave shift, key, song) exist from the start
 # so the file never changes shape; values not measured yet are left empty.
@@ -26,11 +26,12 @@ COLUMNS = (
     "id", "started_at", "reference", "key", "song_id", "octave_shift", "pct_in_tune", "median_abs_cents",
     "tendency", "steadiness_cents", "lowest_note", "highest_note", "n_voiced_frames", "n_scored_frames",
     "duration_s", "out_of_key_count", "latency_offset_s", "app_version", "section_name", "pass_index",
-    "guide_vocal", "guide_gain", "speed_pct",
+    "guide_vocal", "guide_gain", "speed_pct", "octave_mode",
 )
 # Columns added after the first release go at the END; a table with an older header is rewritten with the new one
 # on the next save, its old rows left empty in the new columns (no Section = not a Pass; an empty guide_vocal /
-# speed_pct reads as guide off / Speed 100, see row_settings).
+# speed_pct reads as guide off / Speed 100, see row_settings; an empty octave_mode = one Octave shift per Take, how
+# Takes were scored before Octave shift per Phrase, and they re-score that way, see row_octave).
 
 GUIDE_STATES = ("off", "on", "mixed")
 
@@ -48,6 +49,20 @@ def row_settings(row: dict) -> tuple[str, float, int]:
         speed = 100
     guide = row.get("guide_vocal") or "off"
     return (guide if guide in GUIDE_STATES else "off"), gain, speed
+
+
+def row_octave(row: dict) -> OctaveSetting:
+    """How a saved Take's Octave shift was chosen: "auto" per Phrase, "pinned" at the row's octave_shift, anything
+    else (rows from before the column) one shift for the whole Take."""
+    mode = row.get("octave_mode") or ""
+    if mode == "auto":
+        return AUTO
+    if mode == "pinned":
+        try:
+            return pinned(int(float(row.get("octave_shift") or 0)))
+        except ValueError:
+            return pinned(0)
+    return LEGACY
 
 
 def summary_path(home: Path) -> Path:
@@ -72,6 +87,7 @@ def _row(record: TakeRecord) -> dict:
         "latency_offset_s": record.latency_offset_s, "app_version": __version__,
         "section_name": cell(record.section_name), "pass_index": cell(record.pass_index),
         "guide_vocal": record.guide_vocal, "guide_gain": record.guide_gain, "speed_pct": record.speed_pct,
+        "octave_mode": s.octave_mode,
     }
 
 
@@ -201,6 +217,11 @@ def saved_reference(home: Path, take_id: str) -> Reference:
     return _reference_for(next(r for r in _rows(home) if r["id"] == take_id), home)
 
 
+def saved_octave(home: Path, take_id: str) -> OctaveSetting:
+    """How the saved Take's Octave shift was chosen: what a replay or re-score must use to reproduce its numbers."""
+    return row_octave(next(r for r in _rows(home) if r["id"] == take_id))
+
+
 def saved_latency(home: Path, take_id: str) -> float:
     """The song clock's offset at the Take start (0 for Nearest note and Key): where the reference line is drawn."""
     row = next(r for r in _rows(home) if r["id"] == take_id)
@@ -230,7 +251,7 @@ def rescore_take(
         started_at=datetime.fromisoformat(row["started_at"]),
         reference_kind=row["reference"],
         frames=tuple(frames),
-        summary=score_take(frames, reference, config, song_times),
+        summary=score_take(frames, reference, config, song_times, row_octave(row)),
         key=row["key"] or None,
         song_id=row["song_id"] or None,
         latency_offset_s=latency,

@@ -25,7 +25,8 @@ class TakeSummary:
     lowest_note: str | None
     highest_note: str | None
     steadiness_cents: float | None = None    # ticket #2
-    octave_shift: int = 0                    # ticket #7
+    octave_shift: int = 0                    # ticket #7: pinned k, or (Auto) the most common Phrase shift
+    octave_mode: str = ""                    # ticket #17: "auto" | "pinned"; "" = one shift per Take (old Takes, Nearest note, Key)
     out_of_key_count: int = 0                # Key Takes: out-of-key notes sung (a held note counts once)
 
 

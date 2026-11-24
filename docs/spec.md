@@ -69,9 +69,9 @@ he does not play guitar while using it.
 23. As Simone, I want the reference melody line drawn next to mine, so that I can see what I should sing.
 24. As Simone, I want stretches where the extracted reference is unreliable greyed out and left out of every score, so
     that extraction errors never count as my errors.
-25. As Simone, I want the app to detect the one Octave shift between me and the original singer for each Take, so that
+25. As Simone, I want the app to detect the Octave shift between me and the original singer for each Phrase, so that
     singing a song an octave lower is not marked wrong.
-26. As Simone, I want octave jumps within a Take not forgiven note by note, so that real errors are not hidden.
+26. As Simone, I want octave jumps within a Phrase not forgiven note by note, so that real errors are not hidden.
 27. As Simone, I want imported songs kept in a library, so that I can sing a song again without re-importing it.
 28. As Simone, I want a History view plotting % in tune and median cents off over dates, so that I can see whether I
     am improving.
@@ -118,10 +118,20 @@ he does not play guitar while using it.
   - **Median cents off:** median of the absolute error. **Tendency:** sign of the median signed error.
   - **Steadiness:** SD in cents around the note's own median, over held notes longer than about 0.5 s, with the first
     and last ~120 ms or 15% removed (Dai & Dixon 2019).
-- **Octave shift:** per Take, the whole-octave offset (−2…+2) that minimises median absolute error. It is fixed for
-  the whole Take. Within-Take octave jumps are not forgiven. Live view: the shift is re-estimated from the scored
-  frames so far until about 2 s of singing (125 frames) are scored, then kept; the summary and the saved row use the
-  whole-Take shift, so the first seconds on screen can differ from them.
+- **Octave shift:** per Phrase (Auto, the default) or pinned for the whole Take. A Phrase is a run of singing between
+  pauses of about 0.5 s or more (`phrase_gap_s`); voiced runs shorter than 48 ms do not count. Phrase boundaries are
+  a pure function of the frames and their voiced mask, the same live and on re-score. Auto gives each Phrase the
+  whole octave k in −2…+2 closest to its Reference (smallest median absolute error, ties to the smaller |k|), so a
+  verse sung an octave down and a chorus at pitch in one Take are both in tune. An octave jump inside a Phrase is
+  still not forgiven. The Octave box next to Speed offers Auto, −2, −1, 0, +1; a pinned value applies to every Phrase
+  of the Take and is remembered per song with the other player settings. Live view: each Phrase's k is re-estimated
+  while the Phrase grows, until about 2 s of it (125 scored frames) are scored, then kept for the rest of that
+  Phrase; the summary and the saved row use each Phrase's whole-Phrase k, so the first seconds of a Phrase on screen
+  can differ from them. The blue line is drawn at the active k (live and on replay, each frame at the k it was scored
+  at), with faint Guide lines one octave above and below; the y-window follows the voice. `octave_shift` in the
+  summary is the pinned k, or for Auto the most common Phrase shift (ties to the one with more scored frames, then
+  the smaller |k|); `octave_mode` (auto / pinned) is a new column of takes.csv. Takes saved before this have an empty
+  `octave_mode` and re-score with one shift for the whole Take, exactly as they were scored.
 - **Unscored stretches:** reference frames with RMVPE confidence under 0.3, smoothed: dips shorter than 0.12 s between
   reliable frames are filled, reliable runs shorter than 0.12 s are dropped. Greyed on the live and replay plot, left
   out of all five numbers and of Steadiness.
