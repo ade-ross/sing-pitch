@@ -251,3 +251,13 @@ def test_a_replay_draws_the_blue_line_at_the_octave_the_take_was_scored(qtbot, t
     lo, hi = win._plot.viewRange()[1]
     assert lo <= np.nanmedian(blue[np.isfinite(blue)]) <= hi
     assert abs(np.nanmedian(blue[np.isfinite(blue)]) - np.nanmedian(np.fromiter(win._midi, float))) < 4
+
+
+def test_the_blue_line_before_the_first_phrase_is_drawn_at_the_octave_of_that_phrase(qtbot, tmp_path):
+    win, song = an_octave_down(tmp_path, qtbot)
+    win.toggle()
+    qtbot.waitUntil(lambda: len(win._t) > 80, timeout=3000)
+    win.tick()
+    t = np.fromiter(win._t, float)
+    assert set(win._oct) == {-1} and t[0] < 0.1
+    win.toggle()

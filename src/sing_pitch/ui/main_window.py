@@ -141,6 +141,7 @@ class MainWindow(QtWidgets.QWidget):
         self._band: deque[Band | None] = deque()
         self._out: deque[bool] = deque()          # True = sung note outside the Key
         self._oct: deque[int] = deque()           # the Octave shift each frame was scored at
+        self._oct_known = False                   # a scored frame has set it (until then the line sits at 0)
         self._centre = 60.0
 
         self.device_box = QtWidgets.QComboBox()
@@ -663,6 +664,7 @@ class MainWindow(QtWidgets.QWidget):
         self._replay_started = time.monotonic()
         self._show_melody(reference, latency)
         self._t.clear(), self._midi.clear(), self._band.clear(), self._out.clear(), self._oct.clear()
+        self._oct_known = False
         self.replay_button.setText("Stop replay")
         self.button.setEnabled(False)
         self.summary_label.setText(f"Replaying Take {take_id}...")
@@ -742,6 +744,7 @@ class MainWindow(QtWidgets.QWidget):
         self.pause_button.setText("Pause")
         self.pause_button.setEnabled(backing is not None)
         self._t.clear(), self._midi.clear(), self._band.clear(), self._out.clear(), self._oct.clear()
+        self._oct_known = False
         self.button.setText("Stop")
         for w in (self.device_box, self.reference_box, self.key_box, self.drone_box, self.song_box,
                   self.octave_box, self.calibrate_button):
@@ -787,6 +790,9 @@ class MainWindow(QtWidgets.QWidget):
             self._midi.append(np.nan if s.midi is None else s.midi)
             self._band.append(s.band)
             self._out.append(s.in_key is False)
+            if not self._oct_known and s.band is not None:      # the first scored frame: the Phrase's octave is known,
+                self._oct_known = True                           # so the silence before it is drawn at it too
+                self._oct = deque(s.octave for _ in self._oct)
             self._oct.append(s.octave)
         if scores:
             while self._t[-1] - self._t[0] > WINDOW_S:

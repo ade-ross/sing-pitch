@@ -143,7 +143,7 @@ class TakeEngine:
         """The Octave shift this frame is scored at. Auto, Melody: the open Phrase's best shift over its scored frames
         so far, re-estimated while the Phrase grows until octave_live_lock_frames of them exist (~2 s of singing),
         then kept for the rest of that Phrase. A new Phrase starts afresh. Frames of a voiced run too short to count
-        yet are scored at the previous Phrase's shift."""
+        yet are scored at the previous Phrase's shift (before the first Phrase: at the run's own best)."""
         if self._octave.mode != "auto" or self._reference.kind != "melody":
             return self._live_octave
         opened = self._phrases.step(frame.t, voiced)
@@ -161,6 +161,8 @@ class TakeEngine:
         if counted and self._run_pairs:
             self._phrase_pairs += self._run_pairs
             self._run_pairs = []
+        if not counted and not self._phrases.spans and self._run_pairs:      # nothing sung yet: the run's own best
+            return best_octave_shift(self._run_pairs, self._config)
         if counted and self._phrase_pairs:
             self._live_octave = best_octave_shift(self._phrase_pairs, self._config)
             self._phrase_locked = len(self._phrase_pairs) >= self._config.octave_live_lock_frames
