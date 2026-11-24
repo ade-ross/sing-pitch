@@ -188,3 +188,22 @@ def test_a_crash_in_the_tracker_during_a_take_stops_it_and_shows_the_error(qtbot
     assert win._runner is None and win.replay_button.isEnabled() and win.device_box.isEnabled()
     assert not (tmp_path / "takes.csv").exists()
 
+
+
+def test_a_dropped_window_is_freed_at_once_not_left_to_the_cycle_collector(qapp, tmp_path):
+    """A window in a reference cycle is freed by gc, which can run on any thread that allocates (the tracker
+    worker). PySide then defers deleting its QWidgets to the UI thread, and that crashed the suite (exit 139)."""
+    import gc
+    import weakref
+
+    from sing_pitch.ui import MainWindow
+
+    gc.collect()
+    gc.disable()
+    try:
+        win = MainWindow(SwiftF0Tracker(), home=tmp_path)
+        ref = weakref.ref(win)
+        del win
+        assert ref() is None, gc.get_referrers(ref())
+    finally:
+        gc.enable()

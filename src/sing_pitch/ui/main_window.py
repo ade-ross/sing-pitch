@@ -103,7 +103,8 @@ class MainWindow(QtWidgets.QWidget):
         self._speed_ready: tuple[str, int, tuple] | None = None   # (song id, percent, stems) loaded for the chosen Speed
         self._speed_job: tuple[int, str, int] | None = None       # (job, song id, percent) being prepared
         self._speed_playing = 100                                 # the percent the player is set to (or will start at)
-        self._preparer = SpeedPreparer(lambda song_id: SpeedCache(Library(self._home).get(song_id).dir, SAMPLE_RATE,
+        home = self._home     # not self in the lambda: window <-> preparer would be a cycle, freed by gc on any thread
+        self._preparer = SpeedPreparer(lambda song_id: SpeedCache(Library(home).get(song_id).dir, SAMPLE_RATE,
                                                                   stretcher), self)
         self._preparer.done.connect(self._speed_prepared)
         self._speed_timer = QtCore.QTimer(self)
@@ -147,8 +148,8 @@ class MainWindow(QtWidgets.QWidget):
         self.speed_label = QtWidgets.QLabel("")
         self.speed_box.valueChanged.connect(self._speed_changed)
         self.song_box.currentIndexChanged.connect(self._speed_changed)
-        for key, step in (("+", 1), ("=", 1), ("-", -1)):
-            QtGui.QShortcut(QtGui.QKeySequence(key), self, activated=lambda step=step: self._step_speed(step))
+        for key, slot in (("+", self.speed_up), ("=", self.speed_up), ("-", self.speed_down)):
+            QtGui.QShortcut(QtGui.QKeySequence(key), self, activated=slot)    # bound method: a lambda keeps self alive
         self.calibrate_button = QtWidgets.QPushButton("Calibrate latency")
         self.calibrate_button.clicked.connect(self.start_calibration)
         self.output_label = QtWidgets.QLabel("")
