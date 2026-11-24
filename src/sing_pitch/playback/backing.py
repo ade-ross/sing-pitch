@@ -8,7 +8,8 @@ import numpy as np
 
 from ..config import SAMPLE_RATE
 from .drone import _open_output
-from .mix import Gains, mix_block
+from .mix import Gains
+from .transport import SongTimeLog, Transport
 
 
 def load_audio(path: Path, sample_rate: int = SAMPLE_RATE) -> np.ndarray:
@@ -37,29 +38,29 @@ def _stereo_at(audio: np.ndarray, rate: int, sample_rate: int) -> np.ndarray:
 
 
 class BackingPlayer:
-    """Plays a stereo array once from the start, silence after the end. position_s() = song time rendered so far
-    (read from any thread). The constant gap between rendered and heard is part of the calibrated latency.
+    """The sounddevice shell around the Transport (transport.py): each output callback renders one Transport block.
+    Plays the song once from the start, silence after the end. position_s() = song time rendered so far and
+    song_log = the Transport's song-time log (both read from any thread). The constant gap between rendered and
+    heard is part of the calibrated latency.
 
-    With a `vocal` stem (the Guide vocal) the output is backing * g_b + vocal * g_v. set_gains() may be called from
-    any thread at any time: the callback ramps from the last block's gains to the new ones within the next block.
+    With a `vocal` stem (the Guide vocal) the output is backing * g_b + vocal * g_v. set_gains(), play() and pause()
+    may be called from any thread at any time and act from the next block (gains ramp within it).
     Defaults: Backing 1.0, Guide vocal 0.0 (off)."""
 
     def __init__(self, audio: np.ndarray, audio_rate: int = SAMPLE_RATE,
                  stream_factory: Callable[..., object] = _open_output, sample_rate: int = SAMPLE_RATE,
                  device: int | None = None, vocal: np.ndarray | None = None, vocal_rate: int | None = None):
-        audio = _stereo_at(audio, audio_rate, sample_rate)
-        if vocal is not None:
-            vocal = _stereo_at(vocal, vocal_rate or audio_rate, sample_rate)
-            vocal = np.ascontiguousarray(np.pad(vocal, ((0, max(0, len(audio) - len(vocal))), (0, 0)))[: len(audio)])
-        self._audio = audio
-        self._vocal = vocal
-        self._gains: Gains = (1.0, 0.0)          # target, written by set_gains (one atomic assignment)
-        self._applied: Gains = self._gains       # what the last block ended on; callback thread only
+        self._audio = _stereo_at(audio, audio_rate, sample_rate)
+        self._vocal = None if vocal is None else _stereo_at(vocal, vocal_rate or audio_rate, sample_rate)
+        self._gains: Gains = (1.0, 0.0)
         self._sr = sample_rate
         self._factory = stream_factory
         self._device = device
-        self._n = 0
+        self._transport = self._new_transport()
         self._stream = None
+
+    def _new_transport(self) -> Transport:
+        return Transport(self._audio, self._vocal, self._sr, gains=self._gains)
 
     @classmethod
     def from_file(cls, path: Path, vocals: Path | None = None, **kwargs) -> BackingPlayer:
@@ -70,29 +71,40 @@ class BackingPlayer:
     def set_gains(self, backing: float, vocal: float) -> None:
         """Linear amplitude gains. Heard from the next block on, ramped within it (no click)."""
         self._gains = (float(backing), float(vocal))
+        self._transport.set_gains(*self._gains)
+
+    def play(self) -> None:
+        self._transport.play()
+
+    def pause(self) -> None:
+        self._transport.pause()
+
+    @property
+    def transport(self) -> Transport:
+        return self._transport
+
+    @property
+    def song_log(self) -> SongTimeLog:
+        return self._transport.log
 
     @property
     def duration_s(self) -> float:
-        return len(self._audio) / self._sr
+        return self._transport.duration_s
 
     @property
     def finished(self) -> bool:
-        return self._n >= len(self._audio)
+        return self._transport.finished
 
     def position_s(self) -> float:
-        return self._n / self._sr
+        return self._transport.position_s
 
     def start(self) -> None:
+        """From the song start, with a fresh song-time log; the gains as they are now (no ramp up from silence)."""
         self.stop()
-        self._n = 0
-        self._applied = self._gains                # no ramp up from nothing at the very start
+        transport = self._transport = self._new_transport()
 
         def callback(outdata, frames, time_info, status):
-            end = self._gains
-            vocal = None if self._vocal is None else self._vocal[self._n : self._n + frames]
-            outdata[:] = mix_block(self._audio[self._n : self._n + frames], vocal, self._applied, end, frames)
-            self._applied = end
-            self._n += frames
+            outdata[:] = transport.render(frames).audio
 
         kwargs = dict(channels=2, samplerate=self._sr, blocksize=1024, dtype="float32", callback=callback)
         if self._device is not None:

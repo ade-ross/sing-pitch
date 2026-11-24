@@ -129,3 +129,17 @@ def test_from_file_loads_the_vocal_stem_beside_the_backing(tmp_path):
     player.set_gains(backing=1.0, vocal=1.0)
     player.start()
     assert np.allclose(player._stream.pull(1024), 0.75)
+
+
+def test_the_player_pauses_and_resumes_through_its_transport_and_logs_song_time():
+    song = np.stack([np.arange(4096, dtype=np.float32) / 4096] * 2, axis=1)
+    player, streams = player_with(song)
+    player.start()
+    streams[0].pull(1024)
+    player.pause()
+    assert np.all(streams[0].pull(1024) == 0.0) and player.position_s() == 1024 / 48000
+    player.play()
+    assert np.allclose(streams[0].pull(1024), song[1024:2048])
+    log = player.song_log
+    assert log.rendered_s == 3072 / 48000
+    assert log.song_time(1500 / 48000) is None and abs(log.song_time(2500 / 48000) - 1476 / 48000) < 1e-9

@@ -9,6 +9,7 @@ from melody_helpers import reference_line
 
 from sing_pitch.audio_input import ArrayInput
 from sing_pitch.live import LiveRunner
+from sing_pitch.playback import SongTimeLog
 from sing_pitch.reference import Melody, NearestNote
 
 
@@ -31,6 +32,8 @@ class QuietTracker(CrashingTracker):
 class Backing:
     def __init__(self, fail_start=False):
         self.fail_start, self.started, self.stopped = fail_start, False, False
+        self.song_log = SongTimeLog(SR)
+        self.song_log.append(0, 0.0)
 
     def start(self):
         if self.fail_start:

@@ -10,6 +10,7 @@ from ..config import DEFAULT_SCORE_CONFIG, ScoreConfig
 from ..music import hz_to_midi, note_name
 from ..pitch import PitchFrame
 from ..reference import Band, Reference
+from .clock import LinearClock, SongClock
 from .gate import VoicingGate, voiced_mask
 from .summary import TakeRecord, TakeSummary, summarise
 
@@ -36,16 +37,18 @@ def band_for(cents: float, config: ScoreConfig) -> Band:
 
 
 def score_frame(
-    frame: PitchFrame, voiced: bool, reference: Reference, config: ScoreConfig, latency_s: float = 0.0,
+    frame: PitchFrame, voiced: bool, reference: Reference, config: ScoreConfig, song_t: float | None,
     octave_shift: int = 0,
 ) -> FrameScore:
-    """latency_s: how late the voice arrives on the Take clock relative to the Reference (Melody only).
-    The voice frame at t is scored against the Reference at t - latency_s.
+    """song_t: the song time this voice frame answers (see clock.py); None = no song was playing then, so a sung
+    frame is shown but never scored. Nearest note and Key ignore it.
     octave_shift k: the voice is k octaves from the original singer, so the target moves by 12 * k semitones."""
     if not voiced:
         return FrameScore(frame.t, None, None, None, None)
     midi = hz_to_midi(frame.hz)
-    target = reference.target(frame.t - latency_s, midi)
+    if song_t is None:
+        return FrameScore(frame.t, midi, None, None, None)
+    target = reference.target(song_t, midi)
     if target.midi is None:       # sung, but the Reference has nothing reliable here: shown, never scored
         return FrameScore(frame.t, midi, None, None, None, target.in_key)
     target_midi = target.midi + 12 * octave_shift
@@ -67,48 +70,57 @@ def best_octave_shift(pairs: Sequence[tuple[float, float]], config: ScoreConfig 
 
 
 def _octave_pairs(
-    frames: Sequence[PitchFrame], voiced: Sequence[bool], reference: Reference, latency_s: float
+    frames: Sequence[PitchFrame], voiced: Sequence[bool], reference: Reference, song_times: Sequence[float | None]
 ) -> list[tuple[float, float]]:
     """(sung MIDI, Reference MIDI) for every voiced frame the Reference scores."""
     pairs = []
-    for f, v in zip(frames, voiced):
-        if v:
+    for f, v, song_t in zip(frames, voiced, song_times):
+        if v and song_t is not None:
             midi = hz_to_midi(f.hz)
-            target = reference.target(f.t - latency_s, midi)
+            target = reference.target(song_t, midi)
             if target.midi is not None:
                 pairs.append((midi, target.midi))
     return pairs
 
 
+def _song_times(frames: Sequence[PitchFrame], song_times: Sequence[float | None] | None) -> Sequence[float | None]:
+    return [f.t for f in frames] if song_times is None else song_times
+
+
 def take_octave_shift(
     frames: Sequence[PitchFrame], reference: Reference, config: ScoreConfig = DEFAULT_SCORE_CONFIG,
-    latency_s: float = 0.0,
+    song_times: Sequence[float | None] | None = None,
 ) -> int:
     """The one Octave shift of a whole Take. Only a Melody has an original singer to be an octave away from."""
     if reference.kind != "melody":
         return 0
-    return best_octave_shift(_octave_pairs(frames, voiced_mask(frames, config), reference, latency_s), config)
+    song_times = _song_times(frames, song_times)
+    return best_octave_shift(_octave_pairs(frames, voiced_mask(frames, config), reference, song_times), config)
 
 
 def replay_scores(
     frames: Sequence[PitchFrame], reference: Reference, config: ScoreConfig = DEFAULT_SCORE_CONFIG,
-    latency_s: float = 0.0, octave_shift: int | None = None,
+    song_times: Sequence[float | None] | None = None, octave_shift: int | None = None,
 ) -> list[FrameScore]:
     """A saved Take's line as live-view scores, one per frame, under the full gate (what the summary counted).
+    song_times: per frame, the song time it answers (None = each frame's own t).
     octave_shift None = the whole Take's own shift, the same one score_take applies."""
+    song_times = _song_times(frames, song_times)
     if octave_shift is None:
-        octave_shift = take_octave_shift(frames, reference, config, latency_s)
+        octave_shift = take_octave_shift(frames, reference, config, song_times)
     mask = voiced_mask(frames, config)
-    return [score_frame(f, v, reference, config, latency_s, octave_shift) for f, v in zip(frames, mask)]
+    return [score_frame(f, v, reference, config, st, octave_shift) for f, v, st in zip(frames, mask, song_times)]
 
 
 def score_take(
     frames: Sequence[PitchFrame], reference: Reference, config: ScoreConfig = DEFAULT_SCORE_CONFIG,
-    latency_s: float = 0.0,
+    song_times: Sequence[float | None] | None = None,
 ) -> TakeSummary:
-    """Final numbers for a whole Take. Also the re-score path: raw frames in, same numbers out."""
-    k = take_octave_shift(frames, reference, config, latency_s)
-    scores = replay_scores(frames, reference, config, latency_s, octave_shift=k)
+    """Final numbers for a whole Take. Also the re-score path: raw frames + their saved song times in, same
+    numbers out."""
+    song_times = _song_times(frames, song_times)
+    k = take_octave_shift(frames, reference, config, song_times)
+    scores = replay_scores(frames, reference, config, song_times, octave_shift=k)
     return dataclasses.replace(summarise(scores, frames, config), octave_shift=k)
 
 
@@ -120,11 +132,12 @@ class TakeEngine:
         reference: Reference,
         config: ScoreConfig = DEFAULT_SCORE_CONFIG,
         started_at: datetime | None = None,
-        latency_s: float = 0.0,
+        song_clock: SongClock | None = None,
     ):
-        """latency_s: total delay of the voice behind the Reference on the Take clock (Melody: calibrated
-        input + output latency, plus the playback start offset). Settable until the first push()."""
-        self.latency_s = latency_s
+        """song_clock: voice time -> the song time it answers (Melody: a LogClock over the Transport's song-time
+        log). Default: each frame's own time. Settable until the first push()."""
+        self.song_clock: SongClock = song_clock or LinearClock()
+        self._song_times: list[float | None] = []
         self._reference = reference
         self._config = config
         self._gate = VoicingGate(config)
@@ -142,13 +155,15 @@ class TakeEngine:
         until octave_live_lock_frames of them exist (~2 s of singing), then kept for the rest of the Take. The
         summary uses the whole Take's own shift, so the first seconds on screen can differ from it."""
         self._frames.extend(frames)
+        song_times = [self.song_clock(f.t) for f in frames]
+        self._song_times.extend(song_times)
         voiced = [self._gate.step(f) for f in frames]
         if self._reference.kind == "melody" and len(self._live_pairs) < self._config.octave_live_lock_frames:
-            self._live_pairs += _octave_pairs(frames, voiced, self._reference, self.latency_s)
+            self._live_pairs += _octave_pairs(frames, voiced, self._reference, song_times)
             self._live_octave = best_octave_shift(self._live_pairs, self._config)
         return [
-            score_frame(f, v, self._reference, self._config, self.latency_s, self._live_octave)
-            for f, v in zip(frames, voiced)
+            score_frame(f, v, self._reference, self._config, st, self._live_octave)
+            for f, v, st in zip(frames, voiced, song_times)
         ]
 
     def stop(self) -> TakeRecord:
@@ -157,8 +172,9 @@ class TakeEngine:
             started_at=self._started_at,
             reference_kind=self._reference.kind,
             frames=tuple(self._frames),
-            summary=score_take(self._frames, self._reference, self._config, self.latency_s),
+            summary=score_take(self._frames, self._reference, self._config, self._song_times),
             key=getattr(self._reference, "name", None) if self._reference.kind == "key" else None,
             song_id=getattr(self._reference, "song_id", None) if self._reference.kind == "melody" else None,
-            latency_offset_s=self.latency_s,
+            latency_offset_s=self.song_clock.offset_s,
+            song_times=tuple(self._song_times),
         )

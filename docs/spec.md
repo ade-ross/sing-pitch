@@ -107,7 +107,8 @@ he does not play guitar while using it.
     record. Pure logic with no audio device and no UI.
   - **Take store:** each Take is saved as its raw pitch line plus one row in a single summary table.
   - **Song library / importer:** download, separate, extract, store.
-  - **Playback:** Backing or Drone to the headphones, with a latency offset used by the Take engine.
+  - **Playback:** Drone, or the Transport (Backing + Guide vocal; pure core + thin sounddevice shell) whose song-time
+    log the Take engine reads.
   - **UI:** live view, Take summary, History.
 - **Scoring:**
   - **Bands:** ±25 cents and ±50 cents. The ±50 line is the research convention for "in tune" (Berkowska & Dalla Bella
@@ -124,8 +125,10 @@ he does not play guitar while using it.
 - **Unscored stretches:** reference frames with RMVPE confidence under 0.3, smoothed: dips shorter than 0.12 s between
   reliable frames are filled, reliable runs shorter than 0.12 s are dropped. Greyed on the live and replay plot, left
   out of all five numbers and of Steadiness.
-- **Sync:** Melody scoring compares the voice frame at time t (corrected for input, tracker and output latency) with
-  the reference at t.
+- **Sync:** the Transport logs which song time it rendered at each output time. A voice frame heard at input time t
+  is scored against the song time rendered at t − calibrated latency (a LogClock over that log), so pauses (later
+  seeks, loops, Speed) keep sync. The song time of every frame is saved with the Take (npz `song_t`); Takes saved
+  before this have none and are re-scored with t − `latency_offset_s`, as they were scored.
 - **Build order:** Nearest note plus the Take log, then History, then Key plus Drone, then import and stem split, then
   Melody, then Unscored stretches and Octave shift. Each step is usable on its own.
 

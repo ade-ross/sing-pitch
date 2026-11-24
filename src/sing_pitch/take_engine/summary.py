@@ -38,7 +38,8 @@ class TakeRecord:
     summary: TakeSummary
     key: str | None = None
     song_id: str | None = None
-    latency_offset_s: float = 0.0
+    latency_offset_s: float = 0.0        # the song clock's offset at the start (linear Takes: the whole story)
+    song_times: tuple[float | None, ...] | None = None   # per frame, the song time it was scored against
 
 
 def count_out_of_key(scores: Sequence) -> int:

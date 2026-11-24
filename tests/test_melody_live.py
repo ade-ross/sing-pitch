@@ -9,7 +9,9 @@ from melody_helpers import reference_line
 from sing_pitch.audio_input import ArrayInput
 from sing_pitch.live import LiveRunner, LiveTake
 from sing_pitch.pitch.swiftf0 import SwiftF0Tracker
+from sing_pitch.playback import SongTimeLog
 from sing_pitch.reference import Melody
+from sing_pitch.take_engine import LinearClock
 
 MELODY = [(-900, 0.6), (-700, 0.6), (-500, 0.6), (-400, 0.6), (-200, 0.6), (-500, 0.6), (-900, 1.0)]  # C D E F G E C
 
@@ -27,7 +29,7 @@ def voice_audio(delay_s: float, tail_s: float = 0.4) -> np.ndarray:
 
 def test_audio_voice_on_the_melody_late_by_the_latency_scores_about_100_in_tune(tracker):
     latency = 0.21
-    take = LiveTake(tracker, Melody(reference_line(MELODY), "do-re-mi"), SR, latency_s=latency)
+    take = LiveTake(tracker, Melody(reference_line(MELODY), "do-re-mi"), SR, song_clock=LinearClock(latency))
     audio = voice_audio(latency)
     for i in range(0, len(audio), 256):
         take.feed(audio[i : i + 256])
@@ -38,10 +40,12 @@ def test_audio_voice_on_the_melody_late_by_the_latency_scores_about_100_in_tune(
 
 
 class FakeBacking:
-    """Stands in for the Backing player: reports how far the song already is when the input starts."""
+    """Stands in for the Backing player: its song-time log shows how far the song already is when the input starts."""
 
     def __init__(self, position_at_input_start: float):
         self.position = position_at_input_start
+        self.song_log = SongTimeLog(SR)
+        self.song_log.append(round(position_at_input_start * SR), 0.0)
         self.started = self.stopped = False
 
     def start(self):
