@@ -29,7 +29,8 @@ uv run sing-pitch import "/path/to/Logic stems folder"   # a Vocals file + other
 uv run pytest -m slow                      # opt-in: real separator + RMVPE on a generated clip (~1 min)
 ```
 
-Songs go to `<data dir>/songs/<song-id>/` (`vocals.wav`, `backing.wav`, `reference.npz` = t, hz, confidence, `meta.json`).
+Songs go to `<data dir>/songs/<song-id>/` (`vocals.wav`, `backing.wav`, `reference.npz` = t, hz, confidence, `meta.json`,
+`tempo.json` = bpm + beat times for the Count-in).
 Models (`rmvpe.onnx`, `audio-separator/`) go to `<data dir>/models/` (override: `SING_PITCH_MODELS`); the first import
 downloads about 1.3 GB, after that import works offline. Importing the same song again returns the stored one
 (`--force` redoes it; `--model` picks another separator model).
