@@ -196,7 +196,8 @@ class Transport:
         self._want_playing = True           # requested (any thread)
         self._playing = True                # in effect (render thread only)
         self._n = 0                         # song frame of the next frame to render
-        self._seeks: deque[float] = deque()  # requested song times (any thread); the last one wins
+        self._seeks: deque[tuple[float, bool]] = deque()  # (song time, the loop goes on) asked for (any thread);
+                                                            # the last one wins
         self._loop_requests: deque[Loop | None] = deque()   # set_loop calls (any thread); the last one wins
         self._loop: Loop | None = None      # in effect (render thread only)
         self._pass = 0                      # index of the Pass playing (render thread only)
@@ -221,17 +222,32 @@ class Transport:
     def set_gains(self, backing: float, vocal: float) -> None:
         self._gains = (float(backing), float(vocal))
 
-    def seek(self, song_s: float) -> None:
+    def seek(self, song_s: float) -> bool:
         """Go on from this song time (original seconds, clamped to the song), from the start of the next block,
-        playing or paused, at whatever Speed is playing."""
-        self._seeks.append(float(song_s))
+        playing or paused, at whatever Speed is playing. Returns whether the loop goes on: song_s lies inside the
+        loop it will play (the fitted one, see set_loop; a loop asked for and not yet applied counts); the next block
+        does exactly that (the next Pass starts at song_s), else the seek ends the loop. The caller shows this
+        answer."""
+        song_s = float(song_s)
+        loop = self._loop_after_requests()
+        keep = loop is not None and loop.start_s <= song_s < loop.end_s
+        self._seeks.append((song_s, keep))
+        return keep
 
     def set_loop(self, loop: Loop | None) -> None:
         """Loop this Section from the next block (None = stop looping, the song runs on). Turning it on goes straight
         to start - Lead-in (or the Count-in) as Pass 1; at the Section end the song wraps back there and the next Pass
-        starts. A seek outside the Section ends the loop; one inside it starts the next Pass there. A Section shorter than MIN_LOOP_S or past the song end is first fitted into the song
+        starts. A seek outside the Section ends the loop; one inside it starts the next Pass there (Pass 1, when the
+        seek comes in the same block as the set_loop). A Section shorter than MIN_LOOP_S or past the song end is first fitted into the song
         (loop shows the fitted one), so every Pass renders some song."""
         self._loop_requests.append(None if loop is None else self._fit_loop(loop))
+
+    def _loop_after_requests(self) -> Loop | None:
+        """The loop the next block plays: the last one asked for, else the one in effect."""
+        try:
+            return self._loop_requests[-1]
+        except IndexError:
+            return self._loop
 
     def _fit_loop(self, loop: Loop) -> Loop | None:
         """The loop clamped to the song and at least MIN_LOOP_S long (the whole song if it is shorter); None for a
@@ -273,7 +289,7 @@ class Transport:
         song; None when none is waiting. A second arrow key pressed before that block starts from here, not from the
         stale position_s."""
         try:
-            target = self._seeks[-1]
+            target = self._seeks[-1][0]
         except IndexError:
             return None
         return min(max(0.0, target), self._song_frames / self._sr)
@@ -316,12 +332,18 @@ class Transport:
                 fade_from = (self._audio, self._vocal, self._speed)
             events += self._apply_speed()
         if self._seeks:   # after a Speed swap, so a crossfade in this block fades both Speeds at the new position
-            target = None
+            target, keep = None, False
             while self._seeks:
-                target = self._seeks.popleft()
-            loop = self._loop
-            if loop is not None and not self._loop_requests and loop.start_s <= target < loop.end_s:
+                target, keep = self._seeks.popleft()
+            asked = self._loop_after_requests() if self._loop_requests else None
+            if keep and asked is not None and asked.start_s <= target < asked.end_s:
+                self._loop_requests.clear()      # a loop asked for, and a seek inside it: its Pass 1 starts there
+                events += self._end_loop(0)
+                self._loop, self._pass = asked, 0
+                events += self._jump_in_loop(target)
+            elif keep and self._loop is not None and self._loop.start_s <= target < self._loop.end_s:
                 events += self._jump_in_loop(target)     # inside the looping Section: the next Pass starts there
+                                                         # (a loop asked for after the seek applies below)
             else:
                 self._loop_requests.clear()      # a seek ends the loop (and wins over a loop asked in the same block)
                 events += self._end_loop(0)
@@ -399,10 +421,10 @@ class Transport:
         """A seek inside the looping Section: the Pass playing ends here and the next one starts at song_s (no Lead-in
         or Count-in: he chose where to go on), so each Take stays one unbroken stretch and the loop goes on."""
         out_s, loop = self.log.rendered_s, self._loop
-        ended = TransportEvent("pass_ended", out_s, self.position_s, self._pass, loop)
+        ended = (TransportEvent("pass_ended", out_s, self.position_s, self._pass, loop),) if self._pass else ()
         self._pass += 1
         self._n = round(song_s * self._sr)
-        return (ended, TransportEvent("pass_started", out_s, self.position_s, self._pass, loop))
+        return ended + (TransportEvent("pass_started", out_s, self.position_s, self._pass, loop),)
 
     def _wrap(self, pos: int) -> tuple[TransportEvent, ...]:
         """A Pass boundary at frame `pos` of the block being rendered: the next Pass starts at start - Lead-in.

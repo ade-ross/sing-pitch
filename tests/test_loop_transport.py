@@ -227,3 +227,40 @@ def test_through_the_player_a_seek_inside_the_section_keeps_the_loop_and_one_out
     assert player.loop == loop
     player.seek(6.0)
     assert player.loop is None
+
+
+def test_inside_or_outside_a_section_is_decided_on_the_fitted_loop():
+    """Review 5 #4: a Section past the song end loops up to the song end; one shorter than MIN_LOOP_S is widened.
+    seek() says whether the loop goes on, judged on that fitted loop, and the next block does exactly that."""
+    tr = Transport(ramp_song(3000), sample_rate=SR)               # a 3 s song
+    tr.set_loop(Loop(2.5, 4.0, lead_in_s=0.5))                    # fitted: 2.5 .. 3.0
+    tr.render(100)
+    assert tr.seek(2.8) is True
+    assert kinds(tr.render(100)) == [("pass_ended", 1), ("pass_started", 2)] and tr.loop is not None
+    short = Transport(ramp_song(10000), sample_rate=SR)
+    short.set_loop(Loop(5.0, 5.05, lead_in_s=0.5))                # widened: 5.0 .. 5.2
+    short.render(100)
+    assert short.seek(5.15) is True                               # outside the drawn Section, inside the loop
+    short.render(10)
+    assert short.loop is not None and 5.15 <= short.position_s < 5.2
+
+
+def test_a_seek_past_the_fitted_loop_ends_it():
+    tr = Transport(ramp_song(10000), sample_rate=SR)
+    tr.set_loop(Loop(5.0, 5.05, lead_in_s=0.5))
+    tr.render(100)
+    assert tr.seek(5.3) is False
+    assert [k for k, _ in kinds(tr.render(100))] == ["pass_ended", "loop_ended", "jumped"] and tr.loop is None
+
+
+def test_a_seek_inside_a_loop_asked_for_in_the_same_block_starts_its_pass_1_there():
+    tr = Transport(ramp_song(10000), sample_rate=SR)
+    tr.render(100)
+    tr.set_loop(Loop(3.0, 4.0))
+    assert tr.seek(3.5) is True
+    b = tr.render(100)
+    assert kinds(b) == [("pass_started", 1)] and tr.loop is not None and b.audio[0, 0] == 3500.0
+    tr.set_loop(None)
+    assert tr.seek(3.5) is False                                  # no loop asked for any more: the seek ends it
+    tr.render(100)
+    assert tr.loop is None

@@ -634,10 +634,8 @@ class MainWindow(QtWidgets.QWidget):
         looping Section it starts the next Pass there and the loop goes on; anywhere else it ends the loop."""
         if self._backing is None:
             return
-        loop = getattr(self._backing, "loop", None)
-        inside = loop is not None and loop.start_s <= song_s < loop.end_s     # inside: the next Pass starts there
-        self._backing.seek(song_s)
-        if not inside:
+        inside = bool(self._backing.seek(song_s))    # the Transport's decision, on its fitted loop: inside, the next
+        if not inside:                                 # Pass starts there
             self._set_loop_box(False)
         self.timeline.set_playhead(song_s)
         self._show_loop()

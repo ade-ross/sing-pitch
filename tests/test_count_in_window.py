@@ -139,3 +139,18 @@ def test_a_click_inside_the_looping_section_jumps_there_and_keeps_looping_and_on
         qa.wait(0.3)
         assert not w.loop_box.isChecked() and w._backing.loop is None and not w.timeline.looping
         assert qa.song_position() >= 10.0
+
+
+def test_the_loop_box_and_the_loop_never_disagree_after_a_click_inside_the_widened_section(tmp_path):
+    """Review 5 #4: a Section shorter than MIN_LOOP_S loops widened to it; a click in the widened part is inside the
+    loop (the Transport goes on looping), so the Loop box stays ticked and the player keeps its loop."""
+    with echo_singer(tmp_path) as qa:
+        w = qa.window
+        qa.mark_section(6.0, 6.05)                                 # loops 6.0 .. 6.2
+        qa.start_take()
+        qa.set("loop_box", True)
+        qa.wait_until(lambda: w.loop_label.text().startswith("Loop · Pass 2"), timeout_s=10)
+        qa.seek(6.15)
+        qa.wait(0.3)
+        looping = w._backing.transport.loop is not None
+        assert looping and w.loop_box.isChecked() and w._backing.loop is not None and w.timeline.looping
