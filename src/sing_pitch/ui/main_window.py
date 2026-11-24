@@ -166,6 +166,7 @@ class MainWindow(QtWidgets.QWidget):
         self._calibration_output: str | None = None   # the Output the running calibration measures
         self._speed_ready: tuple[str, int, tuple] | None = None   # (song id, percent, stems) loaded for the chosen Speed
         self._speed_job: tuple[int, str, int] | None = None       # (job, song id, percent) being prepared
+        self._start_waiting = False      # Start was pressed while the Speed was prepared: the Take starts when it is ready
         self._speed_playing = 100                                 # the percent the player is set to (or will start at)
         home = self._home     # not self in the lambda: window <-> preparer would be a cycle, freed by gc on any thread
         self._preparer = SpeedPreparer(lambda song_id: SpeedCache(Library(home).get(song_id).dir, SAMPLE_RATE,
@@ -1103,6 +1104,22 @@ class MainWindow(QtWidgets.QWidget):
         else:
             self.speed_label.setText(f"preparing {percent} %…")
             self._speed_timer.start()
+        self._start_when_ready()
+
+    def _start_when_ready(self, failed: str | None = None) -> None:
+        """A Start waiting for its Speed: start now when the chosen Speed is ready (or 100 %), keep waiting (saying for
+        which Speed) while it is prepared, give up when it failed or there is no song to start any more."""
+        if not self._start_waiting:
+            return
+        song_id, percent = self._speed_song(), self.speed_box.value()
+        if failed is not None or song_id is None or self._replay is not None or self._calibration is not None:
+            self._start_waiting = False
+            self.summary_label.setText(f"Not started: {failed}" if failed else "Start cancelled.")
+        elif percent == 100 or (self._speed_ready and self._speed_ready[:2] == (song_id, percent)):
+            self._start_waiting = False
+            self._start()
+        else:
+            self.summary_label.setText(f"Starting when {percent} % is ready… (Start again to cancel)")
 
     def _prepare_speed(self) -> None:
         if self._replay is not None:                 # due during a replay: the box shows the Take's Speed; after it
@@ -1131,8 +1148,10 @@ class MainWindow(QtWidgets.QWidget):
             self.speed_box.blockSignals(False)
             self._sync_speed_presets()
             self._remember_player_settings()          # the failed Speed is not kept as the song's Speed
+            self._start_when_ready(failed=f"Speed {percent} % failed: {error}")
             return
         self._speed_ready = (song_id, percent, stems)
+        self._start_when_ready()
         self._set_player_speed(percent, stems)
 
     def _set_player_speed(self, percent: int, stems) -> None:
@@ -1403,6 +1422,10 @@ class MainWindow(QtWidgets.QWidget):
     def toggle(self) -> None:
         if self._replay is not None:
             return
+        if self._start_waiting:                      # pressed again while waiting for the Speed: no Take after all
+            self._start_waiting = False
+            self.summary_label.setText("Start cancelled.")
+            return
         if self._runner is None:
             self._start()
         else:
@@ -1437,8 +1460,9 @@ class MainWindow(QtWidgets.QWidget):
                 latency = self._settings.latency_for(output)
                 percent = self.speed_box.value()
                 stems = None if percent == 100 else self._stems_for_start(reference.song_id, percent)
-                if percent != 100 and stems is None:
-                    self.summary_label.setText(f"Cannot start yet: preparing {percent} %…")
+                if percent != 100 and stems is None:          # starts by itself once ready (QA #32)
+                    self._start_waiting = True
+                    self.summary_label.setText(f"Starting when {percent} % is ready… (Start again to cancel)")
                     return
                 song = Library(self._home).get(reference.song_id)
                 backing = self._backing_factory(song.backing_path, song.vocals_path, **self._output_kwargs())
