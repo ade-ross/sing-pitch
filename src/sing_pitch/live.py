@@ -182,6 +182,7 @@ class LiveRunner:
         self._guide: list[tuple[float, float]] = [(-math.inf, 0.0)]    # (voice time, Guide vocal gain) (worker only)
         self._saved: list[TakeRecord] = []        # Takes saved so far in this run (worker, then stop())
         self._saved_news: queue.SimpleQueue = queue.SimpleQueue()
+        self._cut_news: queue.SimpleQueue = queue.SimpleQueue()    # voice time of each Take boundary passed
         self._thread: threading.Thread | None = None
         self._error: Exception | None = None      # what killed the worker, if anything
         self._run_started = datetime.now()        # wall clock at input time 0: a cut's Take starts at this + its time
@@ -315,6 +316,7 @@ class LiveRunner:
         self._take = LiveTake(self._tracker, self._reference, self._source.sample_rate, song_clock=clock,
                               reset_tracker=False, pass_tag=tag, octave=self._octave, config=self._config,
                               started_at=self._run_started + timedelta(seconds=max(0.0, at)))
+        self._cut_news.put(at)           # before any score of the new Take is handed over (see drain_cuts)
 
     def drain_saved(self) -> list[TakeRecord]:
         """Takes saved at a jump or a loop wrap since the last call (the last Take of the run comes from stop())."""
@@ -322,6 +324,17 @@ class LiveRunner:
         while True:
             try:
                 out.append(self._saved_news.get_nowait())
+            except queue.Empty:
+                return out
+
+    def drain_cuts(self) -> list[float]:
+        """Voice times of the Take boundaries (jumps, loop wraps, Speed changes) the worker has passed since the last
+        call, oldest first. A boundary is listed before any score after it reaches drain(): call this after drain()
+        and every score of the new Take drained so far has its boundary here."""
+        out: list[float] = []
+        while True:
+            try:
+                out.append(self._cut_news.get_nowait())
             except queue.Empty:
                 return out
 

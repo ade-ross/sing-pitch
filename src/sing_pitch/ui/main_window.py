@@ -65,6 +65,7 @@ REFERENCE_PEN = pg.mkPen("#5dade2", width=4)
 VERDICT_PEN = {b: pg.mkPen(c, width=4) for b, c in BAND_COLOUR.items()}   # Notes mode: a bar whose note has its verdict
 GUIDE_PEN = pg.mkPen(93, 173, 226, 150, width=2)    # the Reference an octave above and below: clear, but fainter and thinner than the blue line
 NOTE_LABEL_COLOR = (235, 245, 255)                  # Notes mode: the note name over each bar
+VERDICT_ERAS = 4                                    # Notes mode: the Takes (Passes) before whose verdicts are still drawn
 NOTE_GAP_SAMPLES = 2                                # Notes mode: blank draw samples at the end of a bar, so bars stay apart
 NOTE_LABEL_WIDTH = 270                              # room for "C#4  out of key" at 32 px bold
 NOTE_SLIDER_PHRASE = 41                             # the Minimum note length slider: 1..40 tenths of a second, 41 per Phrase
@@ -198,6 +199,10 @@ class MainWindow(QtWidgets.QWidget):
         self._ahead = np.empty(0)                    # MIDI of the Reference coming in the right half, as drawn
         self._note_tally: NoteTally | None = None   # Notes mode per note: the running Take's (or replay's) notes
         self._verdicts: dict[int, Band] = {}        # ...and the verdict of each note that has ended
+        self._verdicts_since = -math.inf            # voice time the running Take (this Pass) began: verdicts apply after
+        self._verdict_eras: list[tuple[float, dict[int, Band]]] = []   # (voice start, verdicts) of the Takes before
+        self._pending_cuts: list[float] = []        # Take boundaries (voice time) whose later scores are not in yet
+        self._tally_args: tuple[Reference, ScoreConfig] | None = None
 
         self.device_box = eliding_combo()
         self.output_box = eliding_combo()
@@ -1459,7 +1464,7 @@ class MainWindow(QtWidgets.QWidget):
     def ingest(self, scores: list[FrameScore]) -> None:
         fold = self._fold()
         if self._note_tally is not None:
-            self._note_tally.add(scores)
+            self._tally(scores)
         scores = [s for s in scores if not fold.paused(s.t)]     # sung while the song was paused: not drawn
         for s in scores:
             self._t.append(s.t)
@@ -1524,8 +1529,32 @@ class MainWindow(QtWidgets.QWidget):
 
     def _start_note_tally(self, reference: Reference, config: ScoreConfig) -> None:
         """Notes mode scored per note: tally the Take's (or replay's) frames by note, for each note's verdict."""
-        self._verdicts = {}
+        self._verdicts, self._verdicts_since, self._verdict_eras, self._pending_cuts = {}, -math.inf, [], []
+        self._tally_args = (reference, config)
         self._note_tally = NoteTally(reference, config) if scored_per_note(reference, config) else None
+
+    def _tally(self, scores: list[FrameScore]) -> None:
+        """Add scores to the note tally; at each Take boundary (a loop wrap, a jump) the Take before gets its last
+        verdicts and the next one starts afresh, so a Pass is judged on its own singing only."""
+        i = 0
+        while self._pending_cuts:
+            at = self._pending_cuts[0]
+            j = next((k for k in range(i, len(scores)) if scores[k].t >= at), None)
+            if j is None:
+                break
+            self._note_tally.add(scores[i:j])
+            i = j
+            self._pending_cuts.pop(0)
+            self._new_note_era(at)
+        self._note_tally.add(scores[i:])
+
+    def _new_note_era(self, at: float) -> None:
+        """A Take boundary at voice time `at`: every note of the Take before is judged now (one that ends at the
+        Section end too, whose Timing window the song never plays), and kept for drawing that Take's bars."""
+        self._verdicts.update((v.note, v.band) for v in self._note_tally.close_until(math.inf))
+        self._verdict_eras = [*self._verdict_eras, (self._verdicts_since, self._verdicts)][-VERDICT_ERAS:]
+        self._verdicts, self._verdicts_since = {}, at
+        self._note_tally = NoteTally(*self._tally_args)
 
     def _close_notes(self, now: float, fold: PauseFold) -> None:
         """Give each note the song has passed (its end plus the Timing window) its verdict colour."""
@@ -1620,11 +1649,16 @@ class MainWindow(QtWidgets.QWidget):
         if isinstance(self._melody, NotesMelody):
             midi = self._note_bars(x, song, midi, octaves, shift)
             guide = midi.copy()                            # the Guide lines follow every bar, judged or not
-            index = self._melody.note_index_at(song) if self._verdicts else ()
-            for k, band in self._verdicts.items():         # a note that has its verdict: its bar in the verdict colour
-                on = index == k
-                verdict[band][on] = midi[on]
-                midi[on] = np.nan
+            eras = [*self._verdict_eras, (self._verdicts_since, self._verdicts)]
+            if any(v for _, v in eras):                    # a note that has its verdict: its bar in the verdict colour,
+                index = self._melody.note_index_at(song)   # each Take's (Pass's) verdicts over that Take's bars only
+                edges = [fold.to_view(start) for start, _ in eras] + [math.inf]
+                for (_, verdicts), lo, hi in zip(eras, edges, edges[1:]):
+                    span = (x >= lo) & (x < hi)
+                    for k, band in verdicts.items():
+                        on = span & (index == k)
+                        verdict[band][on] = midi[on]
+                        midi[on] = np.nan
         else:
             self._show_labels([])
             guide = midi
@@ -1684,7 +1718,11 @@ class MainWindow(QtWidgets.QWidget):
     def tick(self, drain_only: bool = False) -> None:
         if self._runner is not None:
             try:
-                self.ingest(self._runner.drain())
+                scores = self._runner.drain()
+                cuts = self._runner.drain_cuts()        # after drain(): every drained score's boundary is here
+                if self._note_tally is not None:
+                    self._pending_cuts += cuts
+                self.ingest(scores)
             except Exception:           # the worker thread died: stop() ends the Take and reports why
                 self._stop()
                 return
