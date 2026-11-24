@@ -59,9 +59,9 @@ def row_octave(row: dict) -> OctaveSetting:
         return AUTO
     if mode == "pinned":
         try:
-            return pinned(int(float(row.get("octave_shift") or 0)))
-        except ValueError:
-            return pinned(0)
+            return pinned(int(float(row["octave_shift"])))
+        except (KeyError, TypeError, ValueError):     # a pinned row that lost its shift: do not invent a pinned 0
+            return LEGACY
     return LEGACY
 
 
