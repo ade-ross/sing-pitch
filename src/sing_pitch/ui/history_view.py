@@ -39,13 +39,16 @@ class HistoryView(QtWidgets.QWidget):
         self.speed_box = eliding_combo(5)
         self.section_box = eliding_combo(12)
         self.notes_box = eliding_combo(6)
+        self.tolerance_box = eliding_combo(6)
         self.refresh_button = QtWidgets.QPushButton("Refresh")
         for box, tip in ((self.reference_box, "Show only Takes against this Reference"),
                          (self.song_box, "Show only Takes of this song (Melody Takes)"),
                          (self.guide_box, "Show only Takes with the Guide vocal on or off"),
                          (self.speed_box, "Show only Takes sung at this Speed"),
                          (self.section_box, "Show only Passes of this Section, or whole-song Takes"),
-                         (self.notes_box, "Show only Takes scored as a line or as Notes")):
+                         (self.notes_box, "Show only Takes scored as a line or as Notes"),
+                         (self.tolerance_box, "Show only Takes scored with this Tolerance (how far off still counted "
+                                              "as in tune)")):
             box.setToolTip(tip)
         self.refresh_button.setToolTip("Read the saved Takes again")
         self.takes_table = QtWidgets.QTableWidget(0, len(TABLE_HEADERS))
@@ -88,7 +91,8 @@ class HistoryView(QtWidgets.QWidget):
         for row, items in ((top, (QtWidgets.QLabel("Reference"), self.reference_box, QtWidgets.QLabel("Song"),
                                   self.song_box, QtWidgets.QLabel("Guide vocal"), self.guide_box)),
                            (more, (QtWidgets.QLabel("Speed"), self.speed_box, QtWidgets.QLabel("Section"),
-                                   self.section_box, QtWidgets.QLabel("Notes mode"), self.notes_box))):
+                                   self.section_box, QtWidgets.QLabel("Notes mode"), self.notes_box,
+                                   QtWidgets.QLabel("Tolerance"), self.tolerance_box))):
             for w in items:
                 row.addWidget(w)
             row.addStretch(1)
@@ -113,7 +117,8 @@ class HistoryView(QtWidgets.QWidget):
         self.reload()
 
     def _boxes(self) -> tuple[QtWidgets.QComboBox, ...]:
-        return self.reference_box, self.song_box, self.guide_box, self.speed_box, self.section_box, self.notes_box
+        return (self.reference_box, self.song_box, self.guide_box, self.speed_box, self.section_box, self.notes_box,
+                self.tolerance_box)
 
     def reload(self) -> None:
         """Re-read the summary table and rebuild the filter boxes, keeping the current choice when it still exists."""
@@ -127,6 +132,7 @@ class HistoryView(QtWidgets.QWidget):
             (self.section_box, [("Whole song", WHOLE_SONG)] * bool(h.sections) + [(s, s) for s in h.sections],
              bool(h.sections)),
             (self.notes_box, [(NOTES_LABEL[m], m) for m in h.note_modes], len(h.note_modes) > 1),
+            (self.tolerance_box, [(f"±{c:.0f} c", c) for c in h.tolerances], len(h.tolerances) > 1),
         )
         for box, items, enabled in choices:
             keep = box.currentData()
@@ -141,11 +147,17 @@ class HistoryView(QtWidgets.QWidget):
         self._apply_filters()
 
     def _apply_filters(self) -> None:
-        ref, song, guide, speed, section, notes = (box.currentData() for box in self._boxes())
-        self.show_series(self.history.series(ref, song, guide, speed, section, notes))
+        ref, song, guide, speed, section, notes, tolerance = (box.currentData() for box in self._boxes())
+        self.show_series(self.history.series(ref, song, guide, speed, section, notes, tolerance))
+
+    def pct_label(self) -> str:
+        return self._pct_plot.getAxis("left").labelText
 
     def show_series(self, series: Series) -> None:
         self._fill_table(series)
+        tolerances = sorted(set(series.tolerance_cents))     # the legend says which Tolerance "in tune" means here
+        self._pct_plot.setLabel("left", "% in tune" if not tolerances else f"% in tune (±{tolerances[0]:.0f} c)"
+                                if len(tolerances) == 1 else "% in tune (mixed Tolerance)")
         if series.started_at:
             xs = [t.timestamp() for t in series.started_at]
             self.pct_curve.setData(xs, series.pct_in_tune)

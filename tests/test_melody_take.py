@@ -27,7 +27,8 @@ def test_voice_exactly_on_the_melody_but_late_by_the_latency_scores_100_in_tune(
 def test_the_same_late_voice_without_latency_correction_is_scored_much_worse():
     line = reference_line(MELODY)
     frames = voice_following(MELODY, 0.23)
-    assert score_take(frames, Melody(line, "do-re-mi")).pct_in_tune < 70.0
+    # 230 ms late: the Timing window forgives 100 ms of it, the rest of each 0.6 s note change is still off
+    assert score_take(frames, Melody(line, "do-re-mi")).pct_in_tune < 85.0
 
 
 def test_a_voice_20_cents_sharp_of_the_melody_is_green_and_sharp_30_cents_is_yellow():

@@ -143,7 +143,10 @@ class Melody:
             notes = _NOTES_CACHE[key] = segment_notes(self._t, self._midi, self.scored, min_note_s)
         return NotesMelody(self, float(min_note_s), notes)
 
-    def target(self, t: float, sung_midi: float) -> Target:
+    def target(self, t: float, sung_midi: float, window_s: float = 0.0) -> Target:
+        """The line at song time t. window_s > 0 (the Timing window): of the scored frames within window_s of t, the one
+        whose pitch is closest to sung_midi. Whether t is scored at all does not depend on the window: a time in an
+        Unscored stretch, or outside the line, stays unscored."""
         if not len(self._t):
             return Target(None)
         j = int(np.searchsorted(self._t, t))
@@ -151,7 +154,17 @@ class Melody:
             j -= 1
         if abs(self._t[j] - t) > self._tolerance or not self.scored[j] or not np.isfinite(self._midi[j]):
             return Target(None)
-        return Target(float(self._midi[j]), line_midi=float(self._line_midi[j]))
+        line_midi = float(self._line_midi[j])          # the line at t itself, whatever the window picks (Steadiness)
+        if window_s > 0:
+            lo = int(np.searchsorted(self._t, t - window_s - 1e-9))
+            hi = int(np.searchsorted(self._t, t + window_s + 1e-9, side="right"))
+            near = self._midi[lo:hi]
+            ok = self.scored[lo:hi] & np.isfinite(near)
+            j = lo + int(np.nanargmin(np.where(ok, np.abs(near - sung_midi), np.nan)))    # ok holds j itself
+        return self._target_at(j, line_midi)
+
+    def _target_at(self, j: int, line_midi: float) -> Target:
+        return Target(float(self._midi[j]), line_midi=line_midi)
 
 
 class NotesMelody(Melody):
@@ -166,6 +179,16 @@ class NotesMelody(Melody):
 
     def notes(self, min_note_s: float) -> NotesMelody:
         return Melody(self.line, self.song_id, self.scored).notes(min_note_s)
+
+    def _target_at(self, j: int, line_midi: float) -> Target:
+        return Target(float(self._midi[j]), line_midi=line_midi, note=int(self._note_index[j]))
+
+    def note_spans_s(self) -> tuple[np.ndarray, np.ndarray]:
+        """(end in song time, length in s) of each note in note_list. The length counts its scored frames only."""
+        hop = self._tolerance / 1.5
+        ends = np.array([self._t[n.end - 1] + hop / 2 for n in self.note_list], dtype=np.float64)
+        counts = np.bincount(self._note_index[self._note_index >= 0], minlength=len(self.note_list))
+        return ends, counts[:len(self.note_list)] * hop
 
     def note_index_at(self, song_t: np.ndarray) -> np.ndarray:
         """Which note sounds at each song time (its index in note_list), -1 where none does."""

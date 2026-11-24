@@ -111,11 +111,24 @@ he does not play guitar while using it.
     log the Take engine reads.
   - **UI:** live view, Take summary, History.
 - **Scoring:**
-  - **Bands:** ±25 cents and ±50 cents. The ±50 line is the research convention for "in tune" (Berkowska & Dalla Bella
-    2013). The ±25 line is the planner's choice, set near where untrained listeners start to hear an error (about
-    20–30 cents, Larrouy-Maestri group, abstracts only).
-  - **% in tune:** green time divided by voiced, scored time.
-  - **Median cents off:** median of the absolute error. **Tendency:** sign of the median signed error.
+  - **Bands:** green within the Tolerance, yellow up to twice it, red beyond. The Tolerance defaults to ±25 cents
+    (green ±25, yellow to ±50). The ±50 line is the research convention for "in tune" (Berkowska & Dalla Bella 2013);
+    the ±25 line is the planner's choice, set near where untrained listeners start to hear an error (about 20–30
+    cents, Larrouy-Maestri group, abstracts only). Simone sets the Tolerance with a slider (±10 to ±100 cents, 5-cent
+    steps; #41). It applies to every Reference, is remembered in settings.json, is locked during a Take and is saved
+    with each Take (`tolerance_cents`); the summary, the History legend and a History filter show it.
+  - **Timing window (Melody, #41):** a voice frame is compared with the scored reference frames within ±100 ms of the
+    song time it answers, and the one closest to the voice counts. It forgives timing, not pitch: a voice 40 cents
+    sharp stays out of green. Whether a frame is scored at all does not change: a frame answering an Unscored stretch
+    stays unscored. The Octave shift is still chosen on the frame at its own song time, and so is the held note for
+    Steadiness. Saved as `timing_window_s`.
+  - **% in tune:** green time divided by voiced, scored time. Notes mode (#41): the green share of the sung notes'
+    length, each note judged once (see spec-practice-controls.md, Notes mode).
+  - **Median cents off:** median of the absolute error. **Tendency:** sign of the median signed error. In Notes mode
+    both are the length-weighted medians over the notes' verdicts.
+  - **Old Takes:** a row without `tolerance_cents` (saved before #41) is re-scored as it was scored: ±25 cents, no
+    Timing window, Notes mode frame by frame (`take_store.row_config`), so its numbers stay as saved. A replay and a
+    re-score always use the Take's saved scoring, never the slider.
   - **Steadiness:** SD in cents around the note's own median, over held notes longer than about 0.5 s, with the first
     and last ~120 ms or 15% removed (Dai & Dixon 2019).
     A held note is a run of frames on one note of the unmerged Melody line, so Steadiness does not change with the

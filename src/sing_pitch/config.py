@@ -12,8 +12,12 @@ A4_HZ = 440.0
 
 @dataclass(frozen=True)
 class ScoreConfig:
-    green_cents: float = 25.0       # Band edges: |cents| <= 25 green, <= 50 yellow, beyond red
-    yellow_cents: float = 50.0
+    green_cents: float = 25.0       # Band edges: |cents| <= the Tolerance (default 25) green, <= twice it yellow, beyond
+    yellow_cents: float = 50.0      # red (see with_tolerance)
+    # Timing window (Melody): a voice frame is compared with the scored reference frames within this many seconds of
+    # the song time it answers, and the one closest to the voice counts (forgives timing, not pitch). 0 = the frame at
+    # that song time only: how Takes saved before #41 were scored
+    timing_window_s: float = 0.1
     # voicing gate on raw tracker output (raw values are saved, so Takes can be re-scored with a new gate)
     gate_enter_confidence: float = 0.6
     gate_leave_confidence: float = 0.4
@@ -36,6 +40,19 @@ class ScoreConfig:
     octave_shifts: tuple[int, ...] = (0, -1, 1, -2, 2)     # tie-break order: the smaller shift wins
     octave_live_lock_frames: int = 125
     phrase_gap_s: float = 0.5      # a pause this long ends a Phrase; an Auto Octave shift is chosen per Phrase
+    # Notes mode: each note is scored once, on the voice's median over it (see take_engine/note_scores.py). False = every
+    # frame against its bar: how Notes-mode Takes saved before #41 were scored
+    notes_per_note: bool = True
+
+    @classmethod
+    def with_tolerance(cls, tolerance_cents: float, **kw) -> ScoreConfig:
+        """The scoring with this Tolerance: green within it, yellow up to twice it, red beyond."""
+        return cls(green_cents=float(tolerance_cents), yellow_cents=2.0 * float(tolerance_cents), **kw)
+
+
+TOLERANCE_RANGE = (10, 100)     # the Tolerance Simone can set, in cents, in TOLERANCE_STEP steps
+TOLERANCE_STEP = 5
+DEFAULT_TOLERANCE_CENTS = 25
 
 
 DEFAULT_SCORE_CONFIG = ScoreConfig()
