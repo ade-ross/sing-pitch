@@ -13,7 +13,7 @@ from PySide6 import QtCore, QtGui, QtWidgets
 from ..audio_input import AudioInput, SoundDeviceInput, list_inputs, pick_input
 from ..config import SAMPLE_RATE, data_dir
 from ..calibration import CalibrationRun
-from ..library import Library, PlayerSettings
+from ..library import Library, PlayerSettings, player_settings
 from ..live import LiveRunner, Playback
 from ..music import NOTE_NAMES, note_name
 from ..pitch import PitchTracker
@@ -45,7 +45,6 @@ BRUSH[None] = pg.mkBrush(UNSCORED_COLOUR)
 UNSCORED_SPAN_BRUSH = pg.mkBrush(138, 138, 138, 70)   # Unscored stretch of the Melody, greyed on the plot
 REFERENCE_PEN = pg.mkPen("#5dade2", width=4)
 GUIDE_PEN = pg.mkPen(93, 173, 226, 70, width=2)     # the Reference an octave above and below: fainter than the blue line
-OCTAVE_CHOICES = (None, -2, -1, 0, 1)      # the Octave box: Auto, then a pinned shift
 
 
 def _default_output() -> tuple[str | None, OutputKind]:
@@ -205,7 +204,7 @@ class MainWindow(QtWidgets.QWidget):
         self.speed_box.setToolTip("Speed, pitch unchanged (+ and - change it by 5 %)")
         self.speed_label = QtWidgets.QLabel("")
         self.octave_box = QtWidgets.QComboBox()
-        for k in OCTAVE_CHOICES:
+        for k in (None, *player_settings.OCTAVE_CHOICES):      # Auto, then the pinned shifts
             self.octave_box.addItem("Auto" if k is None else f"{k:+d}" if k else "0", k)
         self.octave_box.setFocusPolicy(QtCore.Qt.NoFocus)
         self.octave_box.setToolTip("Octave shift: Auto picks the octave you sing in for each Phrase; a number pins it "
@@ -521,8 +520,9 @@ class MainWindow(QtWidgets.QWidget):
         self.octave_box.blockSignals(False)
 
     def _octave_setting(self):
+        """Auto, or the box's pinned shift; only a Melody has an original singer to be an octave away from."""
         k = self.octave_box.currentData()
-        return AUTO if k is None else pinned(k)
+        return AUTO if k is None or self.reference_box.currentText() != "Melody" else pinned(k)
 
     # --- Speed -------------------------------------------------------------------------------------------------
     def speed_up(self) -> None:
@@ -654,15 +654,16 @@ class MainWindow(QtWidgets.QWidget):
             latency = saved_latency(self._home, take_id)
             song_times = saved_song_times(self._home, take_id)
             frames = load_frames(self._home, take_id)
-            replay = Replay(replay_scores(frames, reference, song_times=song_times,
-                                          octave=saved_octave(self._home, take_id)))
+            scores = replay_scores(frames, reference, song_times=song_times, octave=saved_octave(self._home, take_id))
+            replay = Replay(scores)
+            octave_k = next((s.octave for s in scores if s.band is not None), 0)      # where the Take was scored
             replay_clock = SampledClock([f.t for f in frames], saved_clock_times(self._home, take_id))   # + Lead-in
         except Exception as exc:
             self.summary_label.setText(f"Cannot replay Take {take_id}: {exc}")
             return
         self._replay, self._replay_clock = replay, replay_clock
         self._replay_started = time.monotonic()
-        self._show_melody(reference, latency)
+        self._show_melody(reference, latency, octave_k)
         self._t.clear(), self._midi.clear(), self._band.clear(), self._out.clear(), self._oct.clear()
         self._oct_known = False
         self.replay_button.setText("Stop replay")

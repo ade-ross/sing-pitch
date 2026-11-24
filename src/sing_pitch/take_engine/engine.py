@@ -144,9 +144,11 @@ class TakeEngine:
         so far, re-estimated while the Phrase grows until octave_live_lock_frames of them exist (~2 s of singing),
         then kept for the rest of that Phrase. A new Phrase starts afresh. Frames of a voiced run too short to count
         yet are scored at the previous Phrase's shift (before the first Phrase: at the run's own best)."""
-        if self._octave.mode != "auto" or self._reference.kind != "melody":
-            return self._live_octave
-        opened = self._phrases.step(frame.t, voiced)
+        opened = self._phrases.step(frame.t, voiced)          # every frame, whatever the mode: phrase_spans() reports it
+        if self._reference.kind != "melody":
+            return 0                                          # only a Melody has an original singer an octave away
+        if self._octave.mode != "auto":
+            return self._live_octave                          # pinned k, or 0 for a legacy Take
         if not voiced:
             self._run_pairs = []
             return self._live_octave

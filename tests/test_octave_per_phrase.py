@@ -261,3 +261,67 @@ def test_the_blue_line_before_the_first_phrase_is_drawn_at_the_octave_of_that_ph
     t = np.fromiter(win._t, float)
     assert set(win._oct) == {-1} and t[0] < 0.1
     win.toggle()
+
+
+# --- review fixes (round 3) --------------------------------------------------------------------------------------
+
+def test_a_pinned_octave_never_shifts_a_nearest_note_or_key_take_live():
+    from frames import sung
+
+    from sing_pitch.reference import Key, NearestNote
+
+    for ref in (NearestNote(), Key(0, "major")):
+        scores = TakeEngine(ref, octave=pinned(-1)).push(sung(hz_at(-1200), 1.0))
+        assert {x.octave for x in scores} == {0}
+        assert all(abs(x.cents) < 150 for x in scores if x.band is not None and x.cents is not None)
+
+
+def test_a_pinned_take_still_reports_its_phrases():
+    frames = voice_of(TAKE)
+    auto, pin = TakeEngine(Melody(reference_of(TAKE), "x")), TakeEngine(Melody(reference_of(TAKE), "x"),
+                                                                          octave=pinned(-1))
+    auto.push(frames), pin.push(frames)
+    assert len(auto.phrase_spans()) == 2 and pin.phrase_spans() == auto.phrase_spans()
+
+
+def test_a_pinned_row_without_its_shift_rescores_as_an_old_take_not_as_pinned_zero():
+    from sing_pitch.take_store import row_octave
+
+    assert row_octave({"octave_mode": "pinned", "octave_shift": ""}) == LEGACY
+    assert row_octave({"octave_mode": "pinned", "octave_shift": "abc"}) == LEGACY
+    assert row_octave({"octave_mode": "pinned", "octave_shift": "-1"}) == pinned(-1)
+    assert row_octave({"octave_mode": "pinned", "octave_shift": "-1.0"}) == pinned(-1)
+
+
+def test_the_octave_box_does_not_pin_a_take_against_key_or_nearest_note(qtbot, tmp_path):
+    win, song = an_octave_down(tmp_path, qtbot)
+    win.octave_box.setCurrentIndex(win.octave_box.findData(-1))
+    assert win._octave_setting() == pinned(-1)
+    for name in ("Key", "Nearest note"):
+        if win.reference_box.findText(name) < 0:
+            continue
+        win.reference_box.setCurrentText(name)
+        assert win._octave_setting() == AUTO
+
+
+@pytest.mark.parametrize("pin", [None, -1])
+def test_a_replay_opens_the_view_at_the_octave_the_take_was_scored(qtbot, tmp_path, pin):
+    win, song = an_octave_down(tmp_path, qtbot)
+    if pin is not None:
+        win.octave_box.setCurrentIndex(win.octave_box.findData(pin))
+    win.toggle()
+    qtbot.waitUntil(lambda: len(win._t) > 80, timeout=3000)
+    win.toggle()
+    win.octave_box.setCurrentIndex(win.octave_box.findData(0))       # the box now says something else
+    ref_midi = np.nanmedian(win._melody.midi_line()[1])
+    win.toggle_replay()
+    assert abs(win._centre - (ref_midi - 12)) < 1.0
+    win.toggle_replay()
+
+
+def test_the_octave_box_choices_come_from_the_player_settings(qtbot, tmp_path, monkeypatch):
+    from sing_pitch.library import player_settings
+
+    monkeypatch.setattr(player_settings, "OCTAVE_CHOICES", (-1, 0))
+    win, _ = an_octave_down(tmp_path, qtbot)
+    assert [win.octave_box.itemText(i) for i in range(win.octave_box.count())] == ["Auto", "-1", "0"]
