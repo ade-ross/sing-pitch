@@ -53,6 +53,18 @@ def test_a_note_exactly_as_long_as_the_minimum_is_kept_despite_the_float32_hop()
     assert [n.midi for n in notes_of(line, 0.3)] == [E4, G4, E4]
 
 
+def test_one_long_continuous_phrase_of_many_short_runs_segments_in_near_linear_time():
+    import time
+
+    rng = np.random.default_rng(0)
+    n = 30000                                          # 5 min of 10 ms frames, no pause: one reference Phrase
+    semis = np.repeat(60 + rng.integers(0, 12, n), rng.integers(1, 7, n))[:n]       # a run of 1-6 frames, ~8 000 runs
+    t0 = time.perf_counter()
+    notes = segment_notes(np.arange(n) * 0.01, semis.astype(float), np.ones(n, bool), 0.3)
+    assert time.perf_counter() - t0 < 1.5              # the pairwise-rescanning version took ~5 s
+    assert notes[0].start == 0 and notes[-1].end == n and all(a.end == b.start for a, b in zip(notes, notes[1:]))
+
+
 def test_per_phrase_gives_one_note_per_reference_phrase():
     # two Phrases (a 0.8 s pause between them), each with three notes
     first = [(-500, 0.3), (-200, 0.6), (-400, 0.3)]
