@@ -719,7 +719,8 @@ class MainWindow(QtWidgets.QWidget):
             scores = replay_scores(frames, reference, song_times=song_times, octave=saved_octave(self._home, take_id))
             replay = Replay(scores)
             octave_k = next((s.octave for s in scores if s.band is not None), 0)      # where the Take was scored
-            replay_clock = SampledClock([f.t for f in frames], saved_clock_times(self._home, take_id))   # + Lead-in
+            replay_clock = SampledClock([f.t for f in frames], saved_clock_times(self._home, take_id),   # + Lead-in
+                                        getattr(reference, "end_s", None))
         except Exception as exc:
             self.summary_label.setText(f"Cannot replay Take {take_id}: {exc}")
             return
