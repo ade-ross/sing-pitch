@@ -248,3 +248,17 @@ def test_a_failed_replay_is_also_said_in_the_history_window(qtbot, tmp_path):
     win.history_window.takes_table.selectRow(0)
     win.history_window.replay_button.click()
     assert "no longer in the library" in win.history_window.status_label.text()
+
+
+def test_replaying_a_key_take_shows_its_key_and_the_old_one_comes_back_after(qtbot, tmp_path):
+    """QA #47: the Key box stayed on the current key (findData compared the Key objects by identity)."""
+    win, _ = melody_window(qtbot, tmp_path)
+    win.reference_box.setCurrentText("Key")
+    win.key_box.setCurrentText("D major")
+    take = sing_a_take(qtbot, win)
+    win.reference_box.setCurrentText("Melody")
+    win.key_box.setCurrentText("C major")
+    win.replay_take(take)
+    assert win.reference_box.currentText() == "Key" and win.key_box.currentText() == "D major"
+    win.toggle_replay()
+    assert win.key_box.currentText() == "C major"

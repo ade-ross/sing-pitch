@@ -1329,8 +1329,8 @@ class MainWindow(QtWidgets.QWidget):
         self.reference_box.setCurrentText(settings["reference"])
         if settings["song"] is not None and self.song_box.findData(settings["song"]) >= 0:
             self.song_box.setCurrentIndex(self.song_box.findData(settings["song"]))
-        if settings["key"] is not None and self.key_box.findData(settings["key"]) >= 0:
-            self.key_box.setCurrentIndex(self.key_box.findData(settings["key"]))
+        if settings["key"] is not None and self.key_box.findText(settings["key"].name) >= 0:     # by name: a saved
+            self.key_box.setCurrentIndex(self.key_box.findText(settings["key"].name))        # Key is another object
         self.octave_box.setCurrentIndex(max(0, self.octave_box.findData(settings["octave"])))
         self.notes_box.setChecked(settings["notes"])
         self.note_length_slider.setValue(slider_of_length(settings["length"]))
