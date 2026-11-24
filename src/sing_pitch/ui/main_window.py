@@ -2,6 +2,7 @@
 from __future__ import annotations
 
 from collections import deque
+import math
 import time
 from pathlib import Path
 from typing import Callable
@@ -35,6 +36,7 @@ from .gui_gc import collect_on_the_ui_thread_only
 from .song_axis import SongTimeAxis
 from .timeline import Timeline
 from .speed_prep import SpeedPreparer
+from .y_window import YWindow
 
 PAST_S = 4.0          # the plot is centred on now: this much of the voice and the Reference behind the now-line...
 FUTURE_S = 4.0        # ...and this much of the Reference ahead of it
@@ -44,7 +46,11 @@ SPEED_DEBOUNCE_MS = 400   # +/- pressed several times: stretch only the Speed he
 END_GRACE_S = 1.0     # Melody: keep listening this long after the Backing ends
 JUMP_S = 5.0          # the arrow keys jump this far
 DRAW_STEP_S = 0.01    # the reference line is drawn at this resolution on the voice clock
-HALF_RANGE = 8        # semitones shown above and below the centre
+HALF_RANGE = 12      # semitones shown above and below the centre (4 s of a song spans up to ~20)
+Y_VOICE_S = 2.0       # the voice's median over this many seconds decides where the vertical range sits
+Y_LOOK_S = 6.0        # a move of the vertical range also looks this many seconds beyond the right half
+Y_EASE = 0.3          # share of the way to the new centre covered per redraw (about 0.3 s for a move)
+Y_EASE_SNAP = 0.05    # semitones: closer than this the range lands on the centre
 BAND_COLOUR = {Band.GREEN: "#2ecc71", Band.YELLOW: "#f1c40f", Band.RED: "#e74c3c"}
 UNSCORED_COLOUR = "#8a8a8a"   # sung where the Reference has nothing reliable: shown, never scored
 BRUSH = {b: pg.mkBrush(c) for b, c in BAND_COLOUR.items()}
@@ -173,7 +179,10 @@ class MainWindow(QtWidgets.QWidget):
         self._out: deque[bool] = deque()          # True = sung note outside the Key
         self._oct: deque[int] = deque()           # the Octave shift each frame was scored at
         self._oct_known = False                   # a scored frame has set it (until then the line sits at 0)
-        self._centre = 60.0
+        self._y = YWindow(60, HALF_RANGE)            # where the vertical range is heading; _y_drawn is what shows
+        self._y_drawn = 60.0
+        self._y_ticks_from: int | None = None
+        self._ahead = np.empty(0)                    # MIDI of the Reference coming in the right half, as drawn
 
         self.device_box = eliding_combo()
         self.output_box = eliding_combo()
@@ -332,7 +341,7 @@ class MainWindow(QtWidgets.QWidget):
         self._dots = pg.ScatterPlotItem(size=6, pen=None)
         plot.addItem(self._dots)
         self._plot = plot
-        self._set_y(self._centre)
+        self._set_y(60)
         self._set_now(0.0)
 
         devices = QtWidgets.QHBoxLayout()               # two short rows, so the window can be narrow (#25)
@@ -973,12 +982,54 @@ class MainWindow(QtWidgets.QWidget):
         """What the plot's x axis says at view times x: the song time heard there (Melody), else the time since Start."""
         return np.asarray(x, dtype=float) if self._melody is None else self._song_times(np.asarray(x, dtype=float))
 
+    @property
+    def _centre(self) -> int:
+        """Where the vertical range is heading (whole semitones); what is drawn catches up with it, see _ease_y."""
+        return self._y.centre
+
     def _set_y(self, centre: float) -> None:
-        self._centre = centre
-        lo, hi = int(round(centre)) - HALF_RANGE, int(round(centre)) + HALF_RANGE
+        """Put the vertical range on `centre` at once (a new Take or replay opens where the voice will be)."""
+        self._y.set(centre)
+        self._y_drawn = float(self._y.centre)
+        self._apply_y()
+
+    def _apply_y(self) -> None:
+        lo, hi = self._y_drawn - HALF_RANGE, self._y_drawn + HALF_RANGE
         self._plot.setYRange(lo, hi, padding=0)
-        ticks = [(m, f"{NOTE_NAMES[m % 12]}{m // 12 - 1}") for m in range(lo - 1, hi + 2)]
-        self._plot.getAxis("left").setTicks([ticks])
+        first = math.floor(lo)
+        if first != self._y_ticks_from:                    # the labels are the same until the view passes a semitone
+            self._y_ticks_from = first
+            ticks = [(m, f"{NOTE_NAMES[m % 12]}{m // 12 - 1}") for m in range(first - 1, first + 2 * HALF_RANGE + 3)]
+            self._plot.getAxis("left").setTicks([ticks])
+
+    def _follow_y(self) -> None:
+        """Once per redraw: let the voice (its median over the last seconds) and the coming Reference decide whether the
+        vertical range must move (see y_window); the picture then eases to it."""
+        voice = np.empty(0)
+        if self._t:
+            t, midi = np.fromiter(self._t, float), np.fromiter(self._midi, float)
+            voice = midi[t >= t[-1] - Y_VOICE_S]
+        self._y.follow(voice, self._ahead, self._further_reference)
+        self._ease_y()
+
+    def _further_reference(self) -> np.ndarray:
+        """MIDI of the Reference in the Y_LOOK_S seconds after the right half, at the Octave shift held (a move of the
+        vertical range centres on this too)."""
+        if self._melody is None or not self._t:
+            return np.empty(0)
+        start = self._now_line.value() + FUTURE_S
+        x = np.arange(start, start + Y_LOOK_S, DRAW_STEP_S)
+        fold = self._fold()
+        _, midi, unscored = self._sample_reference(x, fold)
+        return (midi + 12.0 * self._octaves_at(x, fold))[~unscored]
+
+    def _ease_y(self) -> None:
+        """Move the drawn range a fraction of the way to where it is heading (a pan of a few tenths of a second)."""
+        gap = self._y.centre - self._y_drawn
+        if gap == 0:
+            return
+        self._y_drawn = float(self._y.centre) if abs(gap) < Y_EASE_SNAP else self._y_drawn + Y_EASE * gap
+        self._apply_y()
 
     def toggle_replay(self) -> None:
         """Play the most recent saved Take's pitch line back through the live view."""
@@ -1058,6 +1109,7 @@ class MainWindow(QtWidgets.QWidget):
     def _show_melody(self, reference: Reference, latency_s: float, octave_k: int = 0) -> None:
         self._melody = reference if reference.kind == "melody" else None
         self._melody_latency = latency_s
+        self._ahead = np.empty(0)
         for curve in (self._ref_curve, *self._guide_curves):
             curve.setData([], [])
         self._show_labels([])
@@ -1175,9 +1227,6 @@ class MainWindow(QtWidgets.QWidget):
                 self.note_label.setText(f"{note_name(round(last.midi))}  out of key")
             else:
                 self.note_label.setText(f"{last.note_name}  {last.cents:+.0f} c")
-            voiced = [s.midi for s in scores if s.midi is not None]
-            if voiced and abs(voiced[-1] - self._centre) > HALF_RANGE - 2:
-                self._set_y(voiced[-1])
 
     def start_calibration(self) -> None:
         """Clicks in the headphones; clap or sing "ta" on each. The measured delay becomes the default latency
@@ -1305,6 +1354,8 @@ class MainWindow(QtWidgets.QWidget):
         else:
             self._show_labels([])
         self._ref_curve.setData(x, midi + shift)
+        coming = (x > t_end) & ~unscored
+        self._ahead = (midi + shift)[coming]
         for curve, d in zip(self._guide_curves, (12, -12)):
             curve.setData(x, midi + shift + d)
         edges = np.flatnonzero(np.diff(np.concatenate([[0], unscored.astype(np.int8), [0]])))
@@ -1393,5 +1444,6 @@ class MainWindow(QtWidgets.QWidget):
         now = fold.to_view(self._now_voice())
         self._set_now(now)
         self._draw_melody(now)
+        self._follow_y()
         if self._replay is not None and self._replay.finished:
             self._end_replay(finished=True)
