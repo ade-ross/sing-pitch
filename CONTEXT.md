@@ -74,7 +74,7 @@ _Avoid_: threshold, interval
 Faint copies of the reference melody one octave above and below the active Octave shift.
 
 **Band**:
-How far from the Reference a moment is: green within ±25 cents, yellow 25–50, red beyond ±50.
+How far from the Reference a moment is: green within the Tolerance (default ±25 cents), yellow up to twice it (±50), red beyond.
 _Avoid_: zone, tolerance
 
 **Tolerance**:

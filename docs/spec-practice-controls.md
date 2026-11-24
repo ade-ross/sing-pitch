@@ -164,6 +164,18 @@ to semitones, and any run shorter than the Minimum note length is merged into it
 is left; each note takes the semitone held longest over its span (a slide E-F-F#-G held on G is a G, never the mean).
 The slider runs 0.1-4 s; its far end gives one note per Phrase. Unscored stretches stay unscored. In Notes mode the
 target is the note's semitone (the Octave shift applies as before), so live scoring, replay and re-score use the same
-bars and reproduce the numbers; the segmentation is cached per song and length. Each Take records `note_mode` (off/on)
+bars and reproduce the numbers; the segmentation is cached per song and length.
+
+**Per-note scoring (#41).** Each note is scored once, on the voice's median pitch over it: the frames scored against
+that note's bar (after the ±100 ms Timing window), their cents from the bar, the median of those; green within the
+Tolerance, yellow to twice it. % in tune is the share of the sung notes (notes with at least one scored frame), by note
+length, that are green; median cents off and tendency are the length-weighted medians of the notes' cents. Steadiness
+and Range still come from the frames. On screen the dots still colour per frame against the bar; once the song is past
+a note's end plus the Timing window its bar turns the verdict's colour (live and on replay, `take_engine.NoteTally`;
+the summary uses the same verdicts). Takes record `note_scoring` (`note`); Notes rows saved before #41 re-score frame by
+frame. Limit, measured on TULIP 0:30–2:00 with the perfect singer: a bar that merges several sung notes is judged on the
+voice's median against the most-held semitone, so the ceiling falls with the Minimum note length (the original's own
+median is within ±25 c of its bar for 86 % of the note length at 0.1 s, 75 % at 0.5 s, 49 % at 1.5 s, 34 % per Phrase).
+Each Take records `note_mode` (off/on)
 and `min_note_s` (seconds, or `phrase`) at the end of takes.csv; old rows read as off. History filters by Notes mode,
 and the toggle and length are remembered per song in player.json. Both are locked during a Take.
