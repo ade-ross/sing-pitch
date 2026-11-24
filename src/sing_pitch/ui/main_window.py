@@ -1619,6 +1619,7 @@ class MainWindow(QtWidgets.QWidget):
         verdict = {b: np.full(len(x), np.nan) for b in VERDICT_PEN}
         if isinstance(self._melody, NotesMelody):
             midi = self._note_bars(x, song, midi, octaves, shift)
+            guide = midi.copy()                            # the Guide lines follow every bar, judged or not
             index = self._melody.note_index_at(song) if self._verdicts else ()
             for k, band in self._verdicts.items():         # a note that has its verdict: its bar in the verdict colour
                 on = index == k
@@ -1626,13 +1627,14 @@ class MainWindow(QtWidgets.QWidget):
                 midi[on] = np.nan
         else:
             self._show_labels([])
+            guide = midi
         for band, curve in self._verdict_curves.items():
             curve.setData(x, verdict[band] + shift)
         self._ref_curve.setData(x, midi + shift)
         coming = (x > t_end) & ~unscored
         self._ahead = (midi + shift)[coming]
         for curve, d in zip(self._guide_curves, (12, -12)):
-            curve.setData(x, midi + shift + d)
+            curve.setData(x, guide + shift + d)
         edges = np.flatnonzero(np.diff(np.concatenate([[0], unscored.astype(np.int8), [0]])))
         starts, ends = edges[::2], edges[1::2]
         self._unscored.setOpts(x0=x[starts], x1=x[ends - 1] + DRAW_STEP_S, y0=[0.0] * len(starts),

@@ -110,6 +110,34 @@ def test_in_notes_mode_a_bar_turns_its_verdict_colour_once_the_note_has_ended(qt
     assert np.isfinite(blue).any()                                  # the notes still to come stay blue
 
 
+def test_the_guide_lines_stay_under_a_note_that_has_its_verdict(qtbot, tmp_path):
+    """Review 5 #9: the Guide lines were drawn from the line after verdict notes were blanked out of it, so they
+    vanished under every note that had its verdict."""
+    notes = [(-900, 0.6), (-500, 0.6), (-200, 0.8)]
+    library_song(tmp_path, reference_line(notes), seconds=2.0)
+    s = Settings.load(tmp_path)
+    s.set_latency("WF-1000XM5", 0.0)
+    s.save()
+    audio = np.concatenate([harmonic(hz_at(c), d) for c, d in notes] + [quiet(0.4)])
+    win = window(qtbot, tmp_path, audio)
+    win.reference_box.setCurrentText("Melody")
+    win.notes_box.setChecked(True)
+    win.toggle()
+    qtbot.wait(300)
+    win.tick()
+    win.toggle()
+    win.toggle_replay()
+    qtbot.waitUntil(lambda: 0 in win._verdicts, timeout=4000)
+    win.tick()
+    _, green = win._verdict_curves[Band.GREEN].getData()
+    judged = np.isfinite(green)
+    assert judged.any()
+    for curve, d in zip(win._guide_curves, (12, -12)):
+        _, guide = curve.getData()
+        assert np.allclose(guide[judged], green[judged] + d)        # an octave either side of the judged bar
+    win.toggle_replay()
+
+
 def test_replaying_a_take_from_history_uses_its_saved_tolerance_not_the_slider(qtbot, tmp_path):
     """#41 + #43: History's Replay (replay_take(id)) colours the Take with the Tolerance it was scored with."""
     audio = np.concatenate([quiet(0.2), harmonic(hz_at(40), 1.5), quiet(0.3)])
