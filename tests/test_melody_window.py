@@ -20,11 +20,16 @@ class FakeBacking:
     def __init__(self, path=None, vocals=None):
         self.path, self.vocals, self.started, self.stopped = path, vocals, False, False
         self.gains = []
+        self.speed, self.speeds = 1.0, []
         self.song_log = SongTimeLog(SR)
         self.song_log.append(0, 0.0)             # playing from the song start, nothing rendered yet
 
     def set_gains(self, backing, vocal):
         self.gains.append((backing, vocal))
+
+    def set_speed(self, speed, backing=None, vocal=None):
+        self.speed = speed
+        self.speeds.append((speed, backing, vocal))
 
     def start(self):
         self.started = True

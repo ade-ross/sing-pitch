@@ -107,3 +107,54 @@ def test_a_take_with_a_pause_saves_its_song_times_and_rescores_to_the_same_numbe
     again = rescore_take(tmp_path, saved.id)
     assert again.summary == saved.summary and saved.summary.pct_in_tune >= 98.0
     assert again.song_times == saved.song_times
+
+
+# --- Speed: the voice follows the reference at the chosen Speed, and across a change of Speed ------------------------
+
+def silent_stretched(speed):
+    return np.zeros((round(4.6 * SR / speed), 2), np.float32)
+
+
+def render_with_speed_changes(transport, seconds, changes):
+    """Drive the Transport for `seconds` of output; changes = [(output_s, speed)] requested from that time on. Returns
+    the schedule [(output_s where the new Speed took effect, song_s there, speed)] built from the requests alone."""
+    schedule, pending, t, song_s, speed = [(0.0, 0.0, 1.0)], sorted(changes), 0.0, 0.0, 1.0
+    while t < seconds:
+        if pending and t >= pending[0][0]:
+            _, speed = pending.pop(0)
+            transport.set_speed(speed, silent_stretched(speed))
+            schedule.append((t, song_s, speed))                 # takes effect at this block: the first one at/after t
+        transport.render(BLOCK)
+        t += BLOCK / SR
+        song_s += speed * BLOCK / SR
+    return schedule
+
+
+def heard_from(schedule):
+    def heard(out_s):
+        out0, song0, speed = [s for s in schedule if s[0] <= out_s or s is schedule[0]][-1]
+        return song0 + (out_s - out0) * speed
+    return heard
+
+
+def test_a_voice_following_the_reference_at_70_percent_scores_about_100_in_tune():
+    tr = Transport(silent_song(), sample_rate=SR)
+    tr.set_speed(0.7, silent_stretched(0.7))
+    render_with_speed_changes(tr, 8.0, [])
+    frames = voice(lambda out_s: 0.7 * out_s, 7.0)
+    s = take(LogClock(tr.log, LATENCY, OUT_AT_INPUT_ZERO), frames).summary
+    assert s.n_scored > 250 and s.pct_in_tune >= 98.0 and s.median_abs_cents < 1.0
+    # one constant offset, the old way, is lost as soon as the song runs at another Speed
+    old = take(LinearClock(LATENCY - OUT_AT_INPUT_ZERO), frames).summary
+    assert old.pct_in_tune < 70.0
+
+
+def test_a_speed_change_mid_take_still_scores_about_100_in_tune():
+    tr = Transport(silent_song(), sample_rate=SR)
+    # 100 % -> 70 % -> 50 %. The change takes effect at the first block boundary at or after the request
+    schedule = render_with_speed_changes(tr, 9.0, [(1.5, 0.7), (4.0, 0.5)])
+    assert [round(sp, 1) for _, _, sp in schedule] == [1.0, 0.7, 0.5]
+    frames = voice(heard_from(schedule), 8.0)
+    s = take(LogClock(tr.log, LATENCY, OUT_AT_INPUT_ZERO), frames).summary
+    assert s.n_scored > 250 and s.pct_in_tune >= 98.0 and s.median_abs_cents < 1.0
+    assert take(LinearClock(LATENCY - OUT_AT_INPUT_ZERO), frames).summary.pct_in_tune < 70.0

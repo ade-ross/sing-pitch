@@ -1,0 +1,55 @@
+"""Getting the stretched stems of a song for a Speed without freezing the window: a worker thread loads them from the
+song's cache or renders them (playback/stretch.py), then a Qt signal hands the result back to the UI thread."""
+from __future__ import annotations
+
+import itertools
+import threading
+from typing import Callable
+
+from PySide6 import QtCore
+
+from ..playback.stretch import SpeedCache, Stems
+
+
+class SpeedPreparer(QtCore.QObject):
+    """start() returns a job number at once; `done(job, stems, error)` fires on the UI thread when it is finished
+    (stems is None when it failed). A job for a Speed already in preparation waits for that one; a superseded job still
+    finishes and fills the cache."""
+
+    done = QtCore.Signal(int, object, object)
+
+    def __init__(self, cache_for: Callable[[str], SpeedCache], parent: QtCore.QObject | None = None):
+        super().__init__(parent)
+        self._cache_for = cache_for
+        self._numbers = itertools.count(1)
+        self._lock = threading.Lock()
+        self._inflight: dict[tuple[str, int], list[int]] = {}     # (song, percent) -> the jobs waiting for it
+
+    def is_cached(self, song_id: str, percent: int) -> bool:
+        return self._cache_for(song_id).has(percent)
+
+    def load_now(self, song_id: str, percent: int) -> Stems:
+        """Blocking: only for a Speed that is already cached (a read from disk)."""
+        return self._cache_for(song_id).get(percent)
+
+    def start(self, song_id: str, percent: int) -> int:
+        job, key = next(self._numbers), (song_id, percent)
+        with self._lock:
+            if key in self._inflight:                   # the same Speed is already being made: wait for that one
+                self._inflight[key].append(job)
+                return job
+            self._inflight[key] = [job]
+        cache = self._cache_for(song_id)
+
+        def work() -> None:
+            try:
+                stems, error = cache.get(percent), None
+            except Exception as exc:
+                stems, error = None, exc
+            with self._lock:
+                jobs = self._inflight.pop(key)
+            for waiting in jobs:
+                self.done.emit(waiting, stems, error)   # queued to the UI thread: the receiver lives there
+
+        threading.Thread(target=work, name=f"speed-{percent}", daemon=True).start()
+        return job
