@@ -74,3 +74,45 @@ def test_a_saved_takes_clock_follows_its_song_times_across_a_jump_and_a_pause():
     clock = SampledClock(t, song)
     assert abs(clock(0.5) - 10.5) < 1e-9 and clock(1.5) is None and abs(clock(3.0) - 4.0) < 1e-9
     assert abs(clock(-0.2) - 9.8) < 1e-9 and abs(clock(4.5) - (3.0 + 1.9 + 0.6)) < 1e-9      # beyond the ends: slope 1
+
+
+def drag(timeline, from_s, to_s, steps=5):
+    """A real left-button drag across the strip (press, moves with the button held, release)."""
+    from PySide6 import QtGui, QtWidgets
+
+    vp = timeline.viewport()
+    a, b = pixel_of(timeline, from_s), pixel_of(timeline, to_s)
+
+    def send(kind, pos, buttons):
+        ev = QtGui.QMouseEvent(kind, QtCore.QPointF(pos), QtCore.QPointF(vp.mapToGlobal(pos)), QtCore.Qt.LeftButton,
+                               buttons, QtCore.Qt.NoModifier)
+        QtWidgets.QApplication.sendEvent(vp, ev)
+
+    send(QtCore.QEvent.MouseButtonPress, a, QtCore.Qt.LeftButton)
+    for i in range(1, steps + 1):
+        p = QtCore.QPoint(round(a.x() + (b.x() - a.x()) * i / steps), a.y())
+        send(QtCore.QEvent.MouseMove, p, QtCore.Qt.LeftButton)
+    send(QtCore.QEvent.MouseButtonRelease, b, QtCore.Qt.NoButton)
+
+
+def test_dragging_across_the_strip_marks_a_section_and_does_not_seek(qtbot, timeline):
+    timeline.set_melody(Melody(reference_line(NOTES), "x"), duration_s=4.0)
+    seeks = []
+    timeline.seek_requested.connect(seeks.append)
+    with qtbot.waitSignal(timeline.section_marked, timeout=1000) as got:
+        drag(timeline, 2.5, 1.0)                           # right to left works too
+    start, end = got.args
+    assert abs(start - 1.0) < 0.1 and abs(end - 2.5) < 0.1 and seeks == []
+    assert timeline.section == (start, end)
+
+
+def test_a_section_set_from_outside_is_shown_with_edges_that_can_be_moved(qtbot, timeline):
+    timeline.set_melody(Melody(reference_line(NOTES), "x"), duration_s=4.0)
+    timeline.set_section(1.0, 2.0)
+    assert timeline.section == (1.0, 2.0) and timeline.region.isVisible()
+    with qtbot.waitSignal(timeline.section_changed, timeout=1000) as got:
+        timeline.region.lines[1].setValue(3.0)             # what dragging the right handle does
+        timeline.region.lines[1].sigPositionChangeFinished.emit(timeline.region.lines[1])
+    assert got.args == [1.0, 3.0]
+    timeline.set_section(None)
+    assert timeline.section is None and not timeline.region.isVisible()

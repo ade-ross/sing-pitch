@@ -188,3 +188,21 @@ def test_a_speed_set_while_playing_applies_from_the_next_block_and_the_next_star
     player.start()                                             # a new Take: song start, still at 50 %
     streams[1].pull(1024)
     assert abs(player.position_s() - 512 / 48000) < 1e-9
+
+
+def test_a_loop_set_before_start_plays_from_the_lead_in_and_a_loop_set_while_playing_applies_at_once():
+    from sing_pitch.playback.transport import Loop
+
+    song = np.stack([np.arange(480000, dtype=np.float32)] * 2, axis=1)
+    player, streams = player_with(song)
+    events = []
+    player.on_event = events.append
+    player.set_loop(Loop(3.0, 4.0, "Chorus", lead_in_s=2.0))
+    player.start()
+    assert streams[0].pull(1024)[0, 0] == 48000.0 and [e.kind for e in events] == ["pass_started"]
+    assert player.loop.name == "Chorus"
+    player.set_loop(None)
+    streams[0].pull(1024)
+    assert [e.kind for e in events] == ["pass_started", "pass_ended", "loop_ended"] and player.loop is None
+    player.start()                                     # off stays off for the next start
+    assert streams[1].pull(1024)[0, 0] == 0.0

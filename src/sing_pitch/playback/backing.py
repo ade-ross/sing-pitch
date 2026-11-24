@@ -9,7 +9,7 @@ import numpy as np
 from ..config import SAMPLE_RATE
 from .drone import _open_output
 from .mix import Gains
-from .transport import SongTimeLog, Transport, TransportEvent
+from .transport import Loop, SongTimeLog, Transport, TransportEvent
 
 
 def load_audio(path: Path, sample_rate: int = SAMPLE_RATE) -> np.ndarray:
@@ -54,6 +54,7 @@ class BackingPlayer:
         self._vocal = None if vocal is None else _stereo_at(vocal, vocal_rate or audio_rate, sample_rate)
         self._gains: Gains = (1.0, 0.0)
         self._stretched: tuple[float, np.ndarray, np.ndarray | None] | None = None   # (speed, Backing, vocal) at Speed
+        self._loop: Loop | None = None
         self._sr = sample_rate
         self._factory = stream_factory
         self._device = device
@@ -65,6 +66,8 @@ class BackingPlayer:
         transport = Transport(self._audio, self._vocal, self._sr, gains=self._gains)
         if self._stretched is not None:
             transport.set_speed(*self._stretched)
+        if self._loop is not None:
+            transport.set_loop(self._loop)
         return transport
 
     @classmethod
@@ -93,6 +96,17 @@ class BackingPlayer:
     def speed(self) -> float:
         return 1.0 if self._stretched is None else self._stretched[0]
 
+    def set_loop(self, loop: Loop | None) -> None:
+        """Loop a Section (transport.Loop) from the next block, starting at its Lead-in; None stops looping. Stays for
+        the next start(). Pass events go to on_event. Any thread."""
+        self._loop = loop
+        self._transport.set_loop(loop)
+
+    @property
+    def loop(self) -> Loop | None:
+        """The loop asked for (shown from the next block)."""
+        return self._loop
+
     def play(self) -> None:
         self._transport.play()
 
@@ -100,7 +114,8 @@ class BackingPlayer:
         self._transport.pause()
 
     def seek(self, song_s: float) -> None:
-        """Go on from this song time, from the next block (a "jumped" event goes to on_event)."""
+        """Go on from this song time, from the next block (a "jumped" event goes to on_event). Ends a loop."""
+        self._loop = None
         self._transport.seek(song_s)
 
     @property
