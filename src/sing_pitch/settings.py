@@ -17,6 +17,7 @@ class Settings:
     latency_s: dict[str, float] = field(default_factory=dict)
     last_calibrated: str | None = None
     headphones: list[str] = field(default_factory=list)
+    output_device: str | None = None        # the Output Simone chose by name; None = the system default
 
     @classmethod
     def load(cls, home: Path) -> Settings:
@@ -24,13 +25,14 @@ class Settings:
         try:
             raw = json.loads(path.read_text())
             return cls(Path(home), {k: float(v) for k, v in raw.get("latency_s", {}).items()},
-                       raw.get("last_calibrated"), list(raw.get("headphones", [])))
+                       raw.get("last_calibrated"), list(raw.get("headphones", [])), raw.get("output_device"))
         except (OSError, ValueError, AttributeError, TypeError):
             return cls(Path(home))
 
     def save(self) -> None:
         self.home.mkdir(parents=True, exist_ok=True)
-        data = dict(latency_s=self.latency_s, last_calibrated=self.last_calibrated, headphones=self.headphones)
+        data = dict(latency_s=self.latency_s, last_calibrated=self.last_calibrated, headphones=self.headphones,
+                    output_device=self.output_device)
         (self.home / "settings.json").write_text(json.dumps(data, indent=2) + "\n")
 
     def is_calibrated(self, output: str | None) -> bool:
