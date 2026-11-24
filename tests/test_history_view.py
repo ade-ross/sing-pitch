@@ -100,3 +100,33 @@ def test_filter_boxes_keep_their_choice_over_a_refresh(qtbot, tmp_path):
     v.speed_box.setCurrentIndex(v.speed_box.findData(70))
     v.reload()
     assert v.speed_box.currentData() == 70 and list(v.pct_curve.getData()[1]) == [60.0, 65.0]
+
+
+def test_the_cents_chart_shows_every_take_however_bad(qtbot, tmp_path):
+    from sing_pitch.ui.history_view import HistoryView
+
+    write_table(tmp_path, [row("a", 10, med="116"), row("b", 11, med="20"), row("c", 12, med="148")])
+    v = HistoryView(tmp_path)
+    qtbot.addWidget(v)
+    top = v._cents_plot.viewRange()[1][1]
+    assert top >= 148 and top <= 148 * 1.5          # the worst Take is inside, and the chart is not mostly empty
+
+
+def test_the_cents_chart_never_zooms_in_below_fifty_cents(qtbot, tmp_path):
+    from sing_pitch.ui.history_view import HistoryView
+
+    write_table(tmp_path, [row("a", 10, med="4"), row("b", 11, med="6")])
+    v = HistoryView(tmp_path)
+    qtbot.addWidget(v)
+    assert v._cents_plot.viewRange()[1] == [0, 50]
+
+
+def test_the_cents_chart_follows_the_filter(qtbot, tmp_path):
+    from sing_pitch.ui.history_view import HistoryView
+
+    write_table(tmp_path, [row("a", 10, med="200"), row("b", 11, reference="melody", song="s1", med="30")])
+    v = HistoryView(tmp_path)
+    qtbot.addWidget(v)
+    assert v._cents_plot.viewRange()[1][1] >= 200
+    v.reference_box.setCurrentIndex(v.reference_box.findData("melody"))
+    assert v._cents_plot.viewRange()[1] == [0, 50]

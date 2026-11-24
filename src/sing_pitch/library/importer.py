@@ -88,7 +88,10 @@ class Importer:
             return existing
         staging = self.library.new_staging()
         try:
-            logic_stems.write_stems(lead, others, staging / VOCALS, staging / BACKING)
+            try:
+                logic_stems.write_stems(lead, others, staging / VOCALS, staging / BACKING)
+            except logic_stems.StemsError as e:
+                raise SongImportError(str(e)) from e
             self.progress("extracting the melody line ...")
             save_reference(staging / REFERENCE, self.extractor.extract(staging / VOCALS))
             return self.library.commit(staging, dict(

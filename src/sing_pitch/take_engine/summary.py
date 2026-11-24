@@ -5,10 +5,13 @@ from dataclasses import dataclass
 from datetime import datetime
 from typing import Literal, Sequence
 
+import numpy as np
+
 from ..config import ScoreConfig
 from ..music import note_name
 from ..pitch import PitchFrame
 from ..reference import Band, Reference
+from .blips import without_blips
 from .steadiness import steadiness_cents
 
 
@@ -28,6 +31,7 @@ class TakeSummary:
     octave_shift: int = 0                    # ticket #7: pinned k, or (Auto) the most common Phrase shift
     octave_mode: str = ""                    # ticket #17: "auto" | "pinned"; "" = one shift per Take (old Takes, Nearest note, Key)
     out_of_key_count: int = 0                # Key Takes: out-of-key notes sung (a held note counts once)
+    octave_phrases: tuple[tuple[int, int], ...] = ()   # Auto Takes: (shift, Phrases) per shift used; not saved in takes.csv
 
 
 @dataclass(frozen=True)
@@ -87,7 +91,10 @@ def summarise(scores: Sequence, frames: Sequence[PitchFrame], config: ScoreConfi
         tendency = "centred"
     else:
         tendency = "sharp" if signed > 0 else "flat"
-    midis = [s.midi for s in scored]          # the range is what was judged: unscored stretches are left out
+    steady = without_blips(scores, config)    # Steadiness and Range describe the voice: tracker octave blips are not it
+    midis = [s.midi for s in steady if s.midi is not None and s.cents is not None]   # unscored stretches are left out
+    midis = midis or [s.midi for s in scored]
+    low, high = np.percentile(midis, config.range_percentiles)     # the middle of what was sung: a stray frame is not range
     return TakeSummary(
         n_voiced=len(voiced),
         n_scored=len(scored),
@@ -95,8 +102,8 @@ def summarise(scores: Sequence, frames: Sequence[PitchFrame], config: ScoreConfi
         pct_in_tune=100.0 * sum(s.band is Band.GREEN for s in scored) / len(scored),
         median_abs_cents=statistics.median(abs(s.cents) for s in scored),
         tendency=tendency,
-        lowest_note=note_name(round(min(midis))),
-        highest_note=note_name(round(max(midis))),
+        lowest_note=note_name(round(float(low))),
+        highest_note=note_name(round(float(high))),
         out_of_key_count=count_out_of_key(scores),
-        steadiness_cents=steadiness_cents(scores, config),
+        steadiness_cents=steadiness_cents(steady, config),
     )

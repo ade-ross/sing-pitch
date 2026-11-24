@@ -76,10 +76,22 @@ class Library:
         self.root = Path(home) / "songs"
 
     def list_songs(self) -> list[Song]:
+        return self.scan()[0]
+
+    def scan(self) -> tuple[list[Song], list[str]]:
+        """(the songs that can be read, one message per song folder that was skipped). A folder whose meta.json is
+        unreadable (cut off, not JSON, fields missing) is skipped: one bad song never hides the others."""
         if not self.root.exists():
-            return []
-        songs = [self._open(d) for d in sorted(self.root.iterdir()) if (d / META).exists()]
-        return sorted(songs, key=lambda s: s.meta.title.lower())
+            return [], []
+        songs, problems = [], []
+        for d in sorted(self.root.iterdir()):
+            if not (d / META).exists():
+                continue
+            try:
+                songs.append(self._open(d))
+            except (ValueError, TypeError, KeyError, OSError) as exc:      # JSON errors are ValueErrors
+                problems.append(f"{d.name}/{META} cannot be read ({type(exc).__name__}: {exc})")
+        return sorted(songs, key=lambda s: s.meta.title.lower()), problems
 
     def get(self, song_id: str) -> Song:
         d = self.root / song_id

@@ -118,6 +118,11 @@ he does not play guitar while using it.
   - **Median cents off:** median of the absolute error. **Tendency:** sign of the median signed error.
   - **Steadiness:** SD in cents around the note's own median, over held notes longer than about 0.5 s, with the first
     and last ~120 ms or 15% removed (Dai & Dixon 2019).
+    A held note is a run of frames on one note of the unmerged Melody line, so Steadiness does not change with the
+    Notes slider. Tracker octave blips (a run of up to 0.3 s that sits 1000 cents or more from the median of the
+    scored frames a second either side) are left out of Steadiness and of the range. **Range:** the 5th to 95th
+    percentile of the scored frames, blips left out. Takes saved before 2026-11-24 keep their saved numbers; a
+    re-score uses these rules.
 - **Octave shift:** per Phrase (Auto, the default) or pinned for the whole Take. A Phrase is a run of singing between
   pauses of about 0.5 s or more (`phrase_gap_s`); voiced runs shorter than 48 ms do not count. Phrase boundaries are
   a pure function of the frames and their voiced mask, the same live and on re-score. Auto gives each Phrase the

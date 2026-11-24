@@ -80,6 +80,7 @@ class Melody:
         self.song_id = song_id
         self._t = np.asarray(line.t, dtype=np.float64)
         self._midi = _midi_line(line)
+        self._line_midi = self._midi          # a NotesMelody replaces _midi with its bars; the line stays
         self.scored = scored_mask(line) if scored is None else np.asarray(scored, dtype=bool)
         hop = float(np.median(np.diff(self._t))) if len(self._t) > 1 else 0.01
         self._tolerance = 1.5 * hop
@@ -150,7 +151,7 @@ class Melody:
             j -= 1
         if abs(self._t[j] - t) > self._tolerance or not self.scored[j] or not np.isfinite(self._midi[j]):
             return Target(None)
-        return Target(float(self._midi[j]))
+        return Target(float(self._midi[j]), line_midi=float(self._line_midi[j]))
 
 
 class NotesMelody(Melody):
