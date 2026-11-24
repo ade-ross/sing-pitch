@@ -216,6 +216,14 @@ class MainWindow(QtWidgets.QWidget):
         self.section_name_edit.returnPressed.connect(self.section_name_edit.clearFocus)   # keys go back to the window
         self.save_section_button = QtWidgets.QPushButton("Save")
         self.save_section_button.clicked.connect(self.save_section)
+        self._pending_overwrite: tuple[str, float, float] | None = None     # a Save waiting for Overwrite / Cancel
+        self.overwrite_button = QtWidgets.QPushButton("Overwrite")
+        self.overwrite_button.clicked.connect(self.overwrite_section)
+        self.cancel_overwrite_button = QtWidgets.QPushButton("Cancel")
+        self.cancel_overwrite_button.clicked.connect(self._forget_overwrite)
+        self.overwrite_button.hide()
+        self.cancel_overwrite_button.hide()
+        self.section_name_edit.textChanged.connect(self._forget_overwrite)
         self.rename_section_button = QtWidgets.QPushButton("Rename")
         self.rename_section_button.clicked.connect(self.rename_section)
         self.delete_section_button = QtWidgets.QPushButton("Delete")
@@ -334,6 +342,8 @@ class MainWindow(QtWidgets.QWidget):
                   self.rename_section_button, self.delete_section_button, self.clear_button, self.loop_box,
                   self.loop_label):
             sections.addWidget(w)
+        sections.addWidget(self.overwrite_button)
+        sections.addWidget(self.cancel_overwrite_button)
         sections.addStretch(1)
         warn = QtWidgets.QHBoxLayout()
         warn.addWidget(self.output_label, 1)
@@ -501,8 +511,9 @@ class MainWindow(QtWidgets.QWidget):
     def _section_chosen(self, *_) -> None:
         section = self._chosen_section()
         self.timeline.set_section(*((None,) if section is None else (section.start_s, section.end_s)))
-        if self.section_box.currentData() is not None:
-            self.section_name_edit.setText(self.section_box.currentData())
+        self._forget_overwrite()
+        # the field shows the chosen Section's name; with "unsaved mark" it is empty, so Save cannot land on the last one
+        self.section_name_edit.setText(self.section_box.currentData() or "")
         self._remember_player_settings()
         self._apply_loop()
 
@@ -513,6 +524,8 @@ class MainWindow(QtWidgets.QWidget):
             return
         store.set_mark(start_s, end_s)
         self.timeline.set_section(start_s, end_s)
+        self._forget_overwrite()
+        self.section_name_edit.setText("")                 # the name belonged to the previous mark
         if self.section_box.currentIndex() != 0:
             self.section_box.setCurrentIndex(0)            # shows the mark and re-applies the loop
         else:
@@ -523,6 +536,7 @@ class MainWindow(QtWidgets.QWidget):
         store, name = self._sections(), self.section_box.currentData()
         if store is None:
             return
+        self._forget_overwrite()
         if name is None:
             store.set_mark(start_s, end_s)
         else:
@@ -534,9 +548,36 @@ class MainWindow(QtWidgets.QWidget):
         if store is None or span is None or not name:
             self.summary_label.setText("Mark a Section on the timeline and type its name to save it.")
             return
+        taken = next((s for s in store.saved() if s.name == name), None)
+        if taken is not None and self.section_box.currentData() != name:
+            self._pending_overwrite = (name, *span)      # another Section has this name: ask, inline, before replacing it
+            self.overwrite_button.show()
+            self.cancel_overwrite_button.show()
+            self.summary_label.setText(f"A Section called {name} already exists ({taken.start_s:.1f}-{taken.end_s:.1f} s). "
+                                       f"Overwrite it with the new mark ({span[0]:.1f}-{span[1]:.1f} s), or Cancel?")
+            return
+        self._save_section(store, name, span)
+
+    def _save_section(self, store, name: str, span) -> None:
         store.save(name, *span)
+        self._forget_overwrite()
         self.section_name_edit.clearFocus()          # else L, Space and the arrows keep typing into the field
         self.reload_sections(select=name)
+
+    def overwrite_section(self) -> None:
+        """Overwrite, after Save asked: replace the Section that has this name with the mark that was shown."""
+        pending, store = self._pending_overwrite, self._sections()
+        self._forget_overwrite()
+        if pending is not None and store is not None:
+            self._save_section(store, pending[0], pending[1:])
+
+    def _forget_overwrite(self, *_) -> None:
+        """Drop the Overwrite question (Cancel, or the mark, name or picker changed under it)."""
+        if self._pending_overwrite is not None:
+            self._pending_overwrite = None
+            self.summary_label.setText("")
+        self.overwrite_button.hide()
+        self.cancel_overwrite_button.hide()
 
     def rename_section(self) -> None:
         store, old, new = self._sections(), self.section_box.currentData(), self.section_name_edit.text().strip()
