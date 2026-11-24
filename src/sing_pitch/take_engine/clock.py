@@ -101,8 +101,10 @@ def project_song_time(dt: np.ndarray, song_s: float, rate: float, loop_end_s: fl
     again and again; outside one it is NaN (no song) past song_end_s. Assumes what is playing now keeps playing: a
     seek, pause or Speed change that has not been rendered yet is not foreseen."""
     dt = np.asarray(dt, dtype=np.float64)
+    if loop_end_s is not None and rate > 0 and song_s >= loop_end_s:
+        song_s = loop_pass_start_s          # already past the Section end: the wrap is due, the song goes on from the Lead-in
     song = song_s + dt * rate
-    if loop_end_s is not None and rate > 0 and song_s < loop_end_s:
+    if loop_end_s is not None and rate > 0:
         pass_s = max(loop_end_s - loop_pass_start_s, 1e-6)
         over = song - loop_end_s                        # song seconds past the Section end, as if it ran on
         wrapped = loop_pass_start_s + np.mod(over, pass_s)
