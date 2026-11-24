@@ -292,6 +292,20 @@ def test_the_controls_name_the_length_and_lock_during_a_take(qtbot, tmp_path):
     assert win.notes_box.isEnabled() and win.note_length_slider.isEnabled()
 
 
+def test_dragging_the_length_slider_only_moves_the_label_until_it_is_released(qtbot, tmp_path):
+    win, song, _ = notes_window(qtbot, tmp_path, 3, start=False)
+    previews = []
+    win._preview_song = lambda *_: previews.append(1)          # the test's own spy (not on a window method slot)
+    win.note_length_slider.setSliderDown(True)
+    for v in (4, 5, 6):
+        win.note_length_slider.setValue(v)
+    assert win.note_length_label.text() == "0.6 s" and previews == []              # the label follows live
+    assert Library(tmp_path).player_settings(song.id).load().min_note_s == 0.3     # nothing saved or reloaded yet
+    win.note_length_slider.setSliderDown(False)                                    # released
+    assert previews == [1]
+    assert Library(tmp_path).player_settings(song.id).load().min_note_s == 0.6
+
+
 def visible_labels(win):
     return [(item.toPlainText(), item.pos().x(), item.pos().y()) for item in win._note_labels if item.isVisible()]
 

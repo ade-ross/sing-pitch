@@ -240,7 +240,8 @@ class MainWindow(QtWidgets.QWidget):
         self.note_length_label = QtWidgets.QLabel(format_length(player_settings.DEFAULT_MIN_NOTE_S))
         self.note_length_label.setMinimumWidth(70)
         self.notes_box.toggled.connect(self._notes_changed)                # bound methods: a lambda keeps self alive
-        self.note_length_slider.valueChanged.connect(self._notes_changed)
+        self.note_length_slider.valueChanged.connect(self._note_length_moved)
+        self.note_length_slider.sliderReleased.connect(self._notes_changed)
         self.speed_box.valueChanged.connect(self._speed_changed)
         self.speed_box.valueChanged.connect(self._remember_player_settings)
         for key, slot in (("+", self.speed_up), ("=", self.speed_up), ("-", self.speed_down)):
@@ -570,6 +571,12 @@ class MainWindow(QtWidgets.QWidget):
     def _in_notes_mode(self, melody: Melody) -> Melody:
         """The Melody as the controls want it: its Notes-mode bars when Notes is ticked."""
         return melody.notes(self._note_length()) if self.notes_box.isChecked() else melody
+
+    def _note_length_moved(self, *_) -> None:
+        """The slider moved: the label follows at once; while it is being dragged the song is reloaded only on release."""
+        self.note_length_label.setText(format_length(self._note_length()))
+        if not self.note_length_slider.isSliderDown():
+            self._notes_changed()
 
     def _notes_changed(self, *_) -> None:
         self.note_length_label.setText(format_length(self._note_length()))
