@@ -306,6 +306,20 @@ def test_dragging_the_length_slider_only_moves_the_label_until_it_is_released(qt
     assert Library(tmp_path).player_settings(song.id).load().min_note_s == 0.6
 
 
+def test_the_notes_controls_are_locked_during_a_replay_and_the_preview_follows_them_afterwards(qtbot, tmp_path):
+    win, song, _ = notes_window(qtbot, tmp_path, 3, start=False)
+    eng = TakeEngine(Melody.from_song(song).notes(0.3), song_clock=LinearClock(0.0))
+    eng.push(voice_following(SLIGHTLY_FLAT[:3], 0.0))
+    save_take(tmp_path, eng.stop())
+    win.toggle_replay()
+    assert win._replay is not None
+    assert not win.notes_box.isEnabled() and not win.note_length_slider.isEnabled()      # they would change nothing
+    previews = []
+    win._preview_song = lambda *_: previews.append(1)
+    win.toggle_replay()                                                                    # Stop replay
+    assert win.notes_box.isEnabled() and win.note_length_slider.isEnabled() and previews == [1]
+
+
 def visible_labels(win):
     return [(item.toPlainText(), item.pos().x(), item.pos().y()) for item in win._note_labels if item.isVisible()]
 

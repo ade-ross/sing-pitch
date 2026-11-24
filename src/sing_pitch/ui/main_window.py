@@ -739,6 +739,8 @@ class MainWindow(QtWidgets.QWidget):
         self._set_now(0.0)
         self.replay_button.setText("Stop replay")
         self.button.setEnabled(False)
+        for w in (self.notes_box, self.note_length_slider):       # a replay is drawn as it was scored: they change nothing
+            w.setEnabled(False)
         self.summary_label.setText(f"Replaying Take {take_id}...")
         self._timer.start(TICK_MS)
 
@@ -747,6 +749,9 @@ class MainWindow(QtWidgets.QWidget):
         self._replay = self._replay_clock = None
         self.replay_button.setText("Replay last Take")
         self.button.setEnabled(True)
+        for w in (self.notes_box, self.note_length_slider):
+            w.setEnabled(self.reference_box.currentText() == "Melody")
+        self._preview_song()                                      # the Timeline as the controls now want it
 
     def open_history(self) -> None:
         from .history_view import HistoryView
