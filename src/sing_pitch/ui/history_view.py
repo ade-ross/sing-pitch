@@ -12,6 +12,7 @@ from ..history import WHOLE_SONG, History, Series, load_history
 REFERENCE_LABEL = {"nearest": "Nearest note", "key": "Key", "melody": "Melody"}
 NOTES_LABEL = {"off": "Line", "on": "Notes"}
 GUIDE_LABEL = {"off": "Guide off", "on": "Guide on", "mixed": "Guide switched mid-Take"}
+MIN_CENTS_SPAN = 50      # the median-cents chart is never zoomed in below this: a good Take sits near the bottom
 EMPTY_TEXT = "No Takes yet. Sing a Take and it will show up here."
 EMPTY_FILTER_TEXT = "No scored Takes match this filter."
 
@@ -40,7 +41,7 @@ class HistoryView(QtWidgets.QWidget):
         self._pct_plot.setLabel("left", "% in tune")
         self._pct_plot.setYRange(0, 100)
         self._cents_plot.setLabel("left", "median cents off")
-        self._cents_plot.setYRange(0, 50)
+        self._cents_plot.setYRange(0, MIN_CENTS_SPAN, padding=0)
         for p in (self._pct_plot, self._cents_plot):
             p.showGrid(x=True, y=True, alpha=0.3)
             p.setMouseEnabled(False, False)
@@ -105,6 +106,7 @@ class HistoryView(QtWidgets.QWidget):
             xs = [t.timestamp() for t in series.started_at]
             self.pct_curve.setData(xs, series.pct_in_tune)
             self.cents_curve.setData(xs, series.median_abs_cents)
+            self._cents_plot.setYRange(0, max(MIN_CENTS_SPAN, 1.1 * max(series.median_abs_cents)), padding=0)
         else:
             self.pct_curve.setData([], [])
             self.cents_curve.setData([], [])
