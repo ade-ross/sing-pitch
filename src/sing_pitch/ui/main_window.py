@@ -11,7 +11,7 @@ import pyqtgraph as pg
 from PySide6 import QtCore, QtGui, QtWidgets
 
 from ..audio_input import AudioInput, SoundDeviceInput, list_inputs, pick_input
-from ..config import SAMPLE_RATE, data_dir
+from ..config import SAMPLE_RATE, TOLERANCE_RANGE, TOLERANCE_STEP, ScoreConfig, data_dir
 from ..calibration import CalibrationRun
 from ..library import Library, PlayerSettings, player_settings
 from ..live import LiveRunner, Playback
@@ -25,11 +25,12 @@ from ..reference import Band, Key, Melody, NearestNote, Reference
 from ..reference.melody import NotesMelody
 from ..reference.notes import PER_PHRASE, format_length
 from ..replay import Replay
-from ..settings import DEFAULT_OUTPUT, Settings
-from ..take_engine import (AUTO, FrameScore, LinearClock, PauseFold, SampledClock, SongClock, TakeRecord, pinned,
-                           project_song_time, replay_scores)
-from ..take_store import (last_take_id, load_frames, rescore_take, saved_clock_times, saved_latency, saved_octave,
-                          saved_reference, saved_song_times)
+from ..settings import DEFAULT_OUTPUT, Settings, allowed_tolerance
+from ..take_engine import (AUTO, FrameScore, LinearClock, NoteTally, PauseFold, SampledClock, SongClock, TakeRecord,
+                           pinned, project_song_time, replay_scores)
+from ..take_engine.note_scores import scored_per_note
+from ..take_store import (last_take_id, load_frames, rescore_take, saved_clock_times, saved_config, saved_latency,
+                          saved_octave, saved_reference, saved_song_times)
 from .eliding import eliding_combo
 from .gui_gc import collect_on_the_ui_thread_only
 from .song_axis import SongTimeAxis
@@ -51,6 +52,7 @@ BRUSH = {b: pg.mkBrush(c) for b, c in BAND_COLOUR.items()}
 BRUSH[None] = pg.mkBrush(UNSCORED_COLOUR)
 UNSCORED_SPAN_BRUSH = pg.mkBrush(138, 138, 138, 70)   # Unscored stretch of the Melody, greyed on the plot
 REFERENCE_PEN = pg.mkPen("#5dade2", width=4)
+VERDICT_PEN = {b: pg.mkPen(c, width=4) for b, c in BAND_COLOUR.items()}   # Notes mode: a bar whose note has its verdict
 GUIDE_PEN = pg.mkPen(93, 173, 226, 150, width=2)    # the Reference an octave above and below: clear, but fainter and thinner than the blue line
 NOTE_LABEL_COLOR = (235, 245, 255)                  # Notes mode: the note name over each bar
 NOTE_GAP_SAMPLES = 2                                # Notes mode: blank draw samples at the end of a bar, so bars stay apart
@@ -84,7 +86,8 @@ def describe(record: TakeRecord) -> str:
             octave = "octave per Phrase: " + ", ".join(f"{k:+d} ×{n}".replace("+0", "0") for k, n in s.octave_phrases)
         key = f"{record.song_id}   |   {notes}{octave}   |   "
     return (
-        f"{key}In tune {s.pct_in_tune:.0f}%   |   median {s.median_abs_cents:.0f} cents off   |   "
+        f"{key}In tune {s.pct_in_tune:.0f}% (±{record.tolerance_cents:.0f} c)   |   "
+        f"median {s.median_abs_cents:.0f} cents off   |   "
         f"tends {s.tendency}   |   {steadiness_text(s)}   |   range {s.lowest_note}-{s.highest_note}   |   "
         f"{s.n_scored * 0.016:.1f} s sung   |   saved as {record.id}"
     )
@@ -95,7 +98,8 @@ def pass_text(record: TakeRecord) -> str:
     s = record.summary
     if s.n_scored == 0:
         return f"Pass {record.pass_index} of {record.section_name}: nothing sung in the Section."
-    return (f"Pass {record.pass_index} of {record.section_name}: In tune {s.pct_in_tune:.0f}%   |   "
+    return (f"Pass {record.pass_index} of {record.section_name}: In tune {s.pct_in_tune:.0f}% "
+            f"(±{record.tolerance_cents:.0f} c)   |   "
             f"median {s.median_abs_cents:.0f} cents off   |   tends {s.tendency}   |   saved as {record.id}")
 
 
@@ -174,6 +178,8 @@ class MainWindow(QtWidgets.QWidget):
         self._oct: deque[int] = deque()           # the Octave shift each frame was scored at
         self._oct_known = False                   # a scored frame has set it (until then the line sits at 0)
         self._centre = 60.0
+        self._note_tally: NoteTally | None = None   # Notes mode per note: the running Take's (or replay's) notes
+        self._verdicts: dict[int, Band] = {}        # ...and the verdict of each note that has ended
 
         self.device_box = eliding_combo()
         self.output_box = eliding_combo()
@@ -281,6 +287,20 @@ class MainWindow(QtWidgets.QWidget):
                                            "neighbouring note; far right = one note per Phrase")
         self.note_length_label = QtWidgets.QLabel(format_length(player_settings.DEFAULT_MIN_NOTE_S))
         self.note_length_label.setMinimumWidth(70)
+        self.tolerance_slider = QtWidgets.QSlider(QtCore.Qt.Horizontal)
+        self.tolerance_slider.setRange(*TOLERANCE_RANGE)
+        self.tolerance_slider.setSingleStep(TOLERANCE_STEP)
+        self.tolerance_slider.setPageStep(TOLERANCE_STEP)
+        self.tolerance_slider.setFixedWidth(110)
+        self.tolerance_slider.setFocusPolicy(QtCore.Qt.NoFocus)
+        self.tolerance_slider.setToolTip("Tolerance: how far from the target still counts as in tune (green); yellow "
+                                         "reaches twice as far. All References; fixed during a Take.")
+        self.tolerance_label = QtWidgets.QLabel("")
+        self.tolerance_label.setMinimumWidth(48)
+        self.tolerance_label.setToolTip("The Tolerance now set, in cents (c)")
+        self.tolerance_slider.setValue(self._settings.tolerance_cents)
+        self.tolerance_label.setText(f"±{self.tolerance_slider.value()} c")
+        self.tolerance_slider.valueChanged.connect(self._tolerance_moved)   # bound method: a lambda keeps self alive
         self.notes_box.toggled.connect(self._notes_changed)                # bound methods: a lambda keeps self alive
         self.note_length_slider.valueChanged.connect(self._note_length_moved)
         self.note_length_slider.sliderReleased.connect(self._notes_changed)
@@ -324,6 +344,7 @@ class MainWindow(QtWidgets.QWidget):
         plot.addItem(self._unscored)
         self._guide_curves = [plot.plot(pen=GUIDE_PEN, connect="finite") for _ in (12, -12)]   # Guide lines
         self._ref_curve = plot.plot(pen=REFERENCE_PEN, connect="finite")
+        self._verdict_curves = {b: plot.plot(pen=pen, connect="finite") for b, pen in VERDICT_PEN.items()}
         self._note_labels: list[pg.TextItem] = []      # Notes mode: a pool of note-name labels, reused every frame
         self._now_line = pg.InfiniteLine(pos=0.0, angle=90, movable=False, pen=pg.mkPen(255, 255, 255, 110, width=1))
         self._now_line.setZValue(5)
@@ -361,6 +382,8 @@ class MainWindow(QtWidgets.QWidget):
         sections.addWidget(self.cancel_overwrite_button)
         sections.addStretch(1)
         warn = QtWidgets.QHBoxLayout()
+        for w in (QtWidgets.QLabel("Tolerance"), self.tolerance_slider, self.tolerance_label):
+            warn.addWidget(w)
         warn.addWidget(self.output_label, 1)
         warn.addWidget(self.headphones_button)
         warn.addWidget(self.note_label)                 # a fixed width: what is sung never resizes the window (#35)
@@ -428,6 +451,20 @@ class MainWindow(QtWidgets.QWidget):
         if self.song_box.currentData() is not None:             # "no songs" is not a choice
             self._settings.last_song = self.song_box.currentData()
         self._settings.save()
+
+    def _tolerance_moved(self, value: int) -> None:
+        """The Tolerance slider moved: keep it on a 5-cent step, show it, remember it for the next Take and window."""
+        cents = allowed_tolerance(value)
+        if cents != value:
+            self.tolerance_slider.setValue(cents)          # comes back here with the allowed value
+            return
+        self.tolerance_label.setText(f"±{cents} c")
+        self._settings.tolerance_cents = cents
+        self._settings.save()
+
+    def _score_config(self) -> ScoreConfig:
+        """How the next Take is scored: the Tolerance set (and the default Timing window)."""
+        return ScoreConfig.with_tolerance(self.tolerance_slider.value())
 
     def _name_widgets(self) -> None:
         """Stable objectName()s for scripts (sing_pitch.qa): each public widget is named after its attribute."""
@@ -994,7 +1031,8 @@ class MainWindow(QtWidgets.QWidget):
             latency = saved_latency(self._home, take_id)
             song_times = saved_song_times(self._home, take_id)
             frames = load_frames(self._home, take_id)
-            scores = replay_scores(frames, reference, song_times=song_times, octave=saved_octave(self._home, take_id))
+            config = saved_config(self._home, take_id)          # coloured as it was scored, whatever the slider says
+            scores = replay_scores(frames, reference, config, song_times, saved_octave(self._home, take_id))
             replay = Replay(scores)
             octave_k = next((s.octave for s in scores if s.band is not None), 0)      # where the Take was scored
             replay_clock = SampledClock([f.t for f in frames], saved_clock_times(self._home, take_id),   # + Lead-in
@@ -1005,6 +1043,7 @@ class MainWindow(QtWidgets.QWidget):
         self._replay, self._replay_clock, self._replay_take_id = replay, replay_clock, take_id
         self._replay_started = time.monotonic()
         self._show_melody(reference, latency, octave_k)
+        self._start_note_tally(reference, config)
         self._t.clear(), self._midi.clear(), self._band.clear(), self._out.clear(), self._oct.clear()
         self._oct_known = False
         self._set_now(0.0)
@@ -1058,7 +1097,7 @@ class MainWindow(QtWidgets.QWidget):
     def _show_melody(self, reference: Reference, latency_s: float, octave_k: int = 0) -> None:
         self._melody = reference if reference.kind == "melody" else None
         self._melody_latency = latency_s
-        for curve in (self._ref_curve, *self._guide_curves):
+        for curve in (self._ref_curve, *self._guide_curves, *self._verdict_curves.values()):
             curve.setData([], [])
         self._show_labels([])
         self._unscored.setOpts(x0=[], x1=[], y0=[], y1=[])
@@ -1094,8 +1133,9 @@ class MainWindow(QtWidgets.QWidget):
                 if stems is not None:
                     backing.set_speed(percent / 100, *stems)
                 self._speed_playing = percent
+            config = self._score_config()
             self._runner = LiveRunner(self._input_factory(index), self._tracker, reference, self._home,
-                                      backing=backing, latency_s=latency, octave=self._octave_setting())
+                                      backing=backing, latency_s=latency, octave=self._octave_setting(), config=config)
             self._runner.start()
         except Exception as exc:
             self._runner = None
@@ -1105,6 +1145,7 @@ class MainWindow(QtWidgets.QWidget):
         self._last_pass_pct = None
         self._show_loop()
         self._show_melody(reference, latency, self._octave_setting().k)
+        self._start_note_tally(reference, config)
         self.pause_button.setText("Pause")
         self.pause_button.setEnabled(backing is not None)
         self._t.clear(), self._midi.clear(), self._band.clear(), self._out.clear(), self._oct.clear()
@@ -1112,7 +1153,8 @@ class MainWindow(QtWidgets.QWidget):
         self._set_now(0.0)
         self.button.setText("Stop")
         for w in (self.device_box, self.output_box, self.refresh_button, self.reference_box, self.key_box, self.drone_box,
-                  self.song_box, self.octave_box, self.notes_box, self.note_length_slider, self.calibrate_button):
+                  self.song_box, self.octave_box, self.notes_box, self.note_length_slider, self.calibrate_button,
+                  self.tolerance_slider):
             w.setEnabled(False)
         self.replay_button.setEnabled(False)
         self.summary_label.setText("Singing...")
@@ -1148,12 +1190,15 @@ class MainWindow(QtWidgets.QWidget):
         self.refresh_button.setEnabled(True)
         self.reference_box.setEnabled(True)
         self.calibrate_button.setEnabled(True)
+        self.tolerance_slider.setEnabled(True)
         self._reference_changed()
         self.replay_button.setEnabled(True)
         self.summary_label.setText(describe(record) if record else f"The Take failed: {error}")
 
     def ingest(self, scores: list[FrameScore]) -> None:
         fold = self._fold()
+        if self._note_tally is not None:
+            self._note_tally.add(scores)
         scores = [s for s in scores if not fold.paused(s.t)]     # sung while the song was paused: not drawn
         for s in scores:
             self._t.append(s.t)
@@ -1218,6 +1263,19 @@ class MainWindow(QtWidgets.QWidget):
         self.summary_label.setText(
             f"Latency for {output or DEFAULT_OUTPUT}: {1000 * result.latency_s:.0f} ms "
             f"({result.matched}/8 answers, spread {1000 * result.spread_s:.0f} ms). Saved as the default.")
+
+    def _start_note_tally(self, reference: Reference, config: ScoreConfig) -> None:
+        """Notes mode scored per note: tally the Take's (or replay's) frames by note, for each note's verdict."""
+        self._verdicts = {}
+        self._note_tally = NoteTally(reference, config) if scored_per_note(reference, config) else None
+
+    def _close_notes(self, now: float, fold: PauseFold) -> None:
+        """Give each note the song has passed (its end plus the Timing window) its verdict colour."""
+        if self._note_tally is None:
+            return
+        song_now = self._song_times(np.array([now]), fold)[0]
+        if np.isfinite(song_now):
+            self._verdicts.update((v.note, v.band) for v in self._note_tally.close_until(float(song_now)))
 
     def _draw_clock(self) -> SongClock:
         """Voice time -> song time for drawing: the running Take's clock (it knows every jump and pause), the replayed
@@ -1300,10 +1358,18 @@ class MainWindow(QtWidgets.QWidget):
         song, midi, unscored = self._sample_reference(x, fold)
         octaves = self._octaves_at(x, fold)
         shift = 12.0 * octaves                           # drawn where the Take is scored, not at the singer's octave
+        verdict = {b: np.full(len(x), np.nan) for b in VERDICT_PEN}
         if isinstance(self._melody, NotesMelody):
             midi = self._note_bars(x, song, midi, octaves, shift)
+            index = self._melody.note_index_at(song) if self._verdicts else ()
+            for k, band in self._verdicts.items():         # a note that has its verdict: its bar in the verdict colour
+                on = index == k
+                verdict[band][on] = midi[on]
+                midi[on] = np.nan
         else:
             self._show_labels([])
+        for band, curve in self._verdict_curves.items():
+            curve.setData(x, verdict[band] + shift)
         self._ref_curve.setData(x, midi + shift)
         for curve, d in zip(self._guide_curves, (12, -12)):
             curve.setData(x, midi + shift + d)
@@ -1392,6 +1458,7 @@ class MainWindow(QtWidgets.QWidget):
                            size=[11 if o else 6 for o in out])
         now = fold.to_view(self._now_voice())
         self._set_now(now)
+        self._close_notes(now, fold)
         self._draw_melody(now)
         if self._replay is not None and self._replay.finished:
             self._end_replay(finished=True)

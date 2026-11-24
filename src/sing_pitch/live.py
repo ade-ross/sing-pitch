@@ -12,6 +12,7 @@ from typing import Protocol
 import numpy as np
 
 from .audio_input import AudioInput
+from .config import DEFAULT_SCORE_CONFIG, ScoreConfig
 from .pitch import PitchFrame, PitchTracker
 from .reference import Reference
 from .take_engine import AUTO, FrameScore, LogClock, OctaveSetting, PassTag, SongClock, TakeEngine, TakeRecord
@@ -90,11 +91,12 @@ class LiveTake:
 
     def __init__(self, tracker: PitchTracker, reference: Reference, sample_rate: int,
                  song_clock: SongClock | None = None, reset_tracker: bool = True, pass_tag: PassTag | None = None,
-                 started_at: datetime | None = None, octave: OctaveSetting = AUTO):
+                 started_at: datetime | None = None, octave: OctaveSetting = AUTO,
+                 config: ScoreConfig = DEFAULT_SCORE_CONFIG):
         """reset_tracker False: a Take that goes on from the previous one's audio (after a jump or a loop wrap), so
-        the tracker keeps its state and its frame times. pass_tag, started_at, octave: see TakeEngine."""
+        the tracker keeps its state and its frame times. pass_tag, started_at, octave, config: see TakeEngine."""
         self._tracker = tracker
-        self._engine = TakeEngine(reference, song_clock=song_clock, pass_tag=pass_tag, started_at=started_at,
+        self._engine = TakeEngine(reference, config, song_clock=song_clock, pass_tag=pass_tag, started_at=started_at,
                                   octave=octave)
         self._sample_rate = sample_rate
         if reset_tracker:
@@ -159,8 +161,10 @@ class LiveRunner:
     and a Take that saw it both on and off is "mixed"."""
 
     def __init__(self, source: AudioInput, tracker: PitchTracker, reference: Reference, home: Path,
-                 backing: Playback | None = None, latency_s: float = 0.0, octave: OctaveSetting = AUTO):
+                 backing: Playback | None = None, latency_s: float = 0.0, octave: OctaveSetting = AUTO,
+                 config: ScoreConfig = DEFAULT_SCORE_CONFIG):
         self._source = source
+        self._config = config                     # every Take of the run is scored with it (Tolerance, Timing window)
         self._tracker = tracker
         self._reference = reference
         self._home = home
@@ -193,7 +197,7 @@ class LiveRunner:
         self._run_started = datetime.now()
         self._received = 0
         self._take = LiveTake(self._tracker, self._reference, self._source.sample_rate, started_at=self._run_started,
-                              octave=self._octave)
+                              octave=self._octave, config=self._config)
         if self._backing is None:
             def on_chunk(chunk: np.ndarray) -> None:      # PortAudio thread
                 self._received += len(chunk)
@@ -309,7 +313,7 @@ class LiveRunner:
             self._saved.append(saved)
             self._saved_news.put(saved)
         self._take = LiveTake(self._tracker, self._reference, self._source.sample_rate, song_clock=clock,
-                              reset_tracker=False, pass_tag=tag, octave=self._octave,
+                              reset_tracker=False, pass_tag=tag, octave=self._octave, config=self._config,
                               started_at=self._run_started + timedelta(seconds=max(0.0, at)))
 
     def drain_saved(self) -> list[TakeRecord]:
