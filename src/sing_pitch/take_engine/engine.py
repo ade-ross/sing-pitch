@@ -11,7 +11,9 @@ from ..pitch import PitchFrame
 from ..reference import Band, Reference
 from .clock import LinearClock, SongClock
 from .gate import VoicingGate, voiced_mask
-from .octave import AUTO, OctaveSetting, PhraseTracker, TakeOctaves, best_octave_shift, take_octaves
+from .octave import (AUTO, OctavePair, OctaveSetting, PhraseTracker, TakeOctaves, best_octave_shift, octave_pair,
+                     take_octaves)
+from .octave import scoring_target as _target
 from .note_scores import note_verdicts, scored_per_note
 from .summary import PassTag, TakeRecord, TakeSummary, summarise
 
@@ -38,14 +40,6 @@ def band_for(cents: float, config: ScoreConfig) -> Band:
     if a <= config.yellow_cents:
         return Band.YELLOW
     return Band.RED
-
-
-def _target(reference: Reference, song_t: float, midi: float, config: ScoreConfig):
-    """What a sung frame is scored against: a Melody within the Timing window (midi: the voice moved to the original
-    singer's octave, so the closest reference pitch is the one he means); the others have no timing."""
-    if reference.kind == "melody" and config.timing_window_s > 0:
-        return reference.target(song_t, midi, config.timing_window_s)
-    return reference.target(song_t, midi)
 
 
 def score_frame(
@@ -136,8 +130,8 @@ class TakeEngine:
         # that Phrase (stop() uses the whole Phrase's own)
         self._octave = octave
         self._phrases = PhraseTracker(config)
-        self._phrase_pairs: list[tuple[float, float]] = []    # scored (sung, Reference) pairs of the open Phrase
-        self._run_pairs: list[tuple[float, float]] = []       # of the voiced run that is not yet long enough to count
+        self._phrase_pairs: list[OctavePair] = []    # scored (sung, Reference) pairs of the open Phrase
+        self._run_pairs: list[OctavePair] = []       # of the voiced run that is not yet long enough to count
         self._phrase_locked = False
         self._live_octave = octave.k if octave.mode == "pinned" else 0
         self._started_at = started_at or datetime.now()
@@ -146,12 +140,10 @@ class TakeEngine:
         """The Phrases seen so far as frame index ranges (see octave.split_phrases)."""
         return [(a, b) for a, b in self._phrases.spans]
 
-    def _pair(self, frame: PitchFrame, song_t: float | None) -> tuple[float, float] | None:
+    def _pair(self, frame: PitchFrame, song_t: float | None) -> OctavePair | None:
         if song_t is None:
             return None
-        midi = hz_to_midi(frame.hz)
-        target = self._reference.target(song_t, midi)
-        return None if target.midi is None else (midi, target.midi)
+        return octave_pair(self._reference, song_t, hz_to_midi(frame.hz), self._config)
 
     def _live_shift(self, frame: PitchFrame, voiced: bool, song_t: float | None) -> int:
         """The Octave shift this frame is scored at. Auto, Melody: the open Phrase's best shift over its scored frames
