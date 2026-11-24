@@ -22,6 +22,8 @@ from ..playback.transport import LEAD_IN_S, Loop
 from ..playback.stretch import SpeedCache, Stretcher, time_stretch
 from ..playback.outputs import OutputKind, default_output_name, headphone_warning, output_kind
 from ..reference import Band, Key, Melody, NearestNote, Reference
+from ..reference.melody import NotesMelody
+from ..reference.notes import PER_PHRASE, format_length
 from ..replay import Replay
 from ..settings import DEFAULT_OUTPUT, Settings
 from ..take_engine import (AUTO, FrameScore, LinearClock, SampledClock, SongClock, TakeRecord, pinned, project_song_time,
@@ -47,6 +49,9 @@ BRUSH[None] = pg.mkBrush(UNSCORED_COLOUR)
 UNSCORED_SPAN_BRUSH = pg.mkBrush(138, 138, 138, 70)   # Unscored stretch of the Melody, greyed on the plot
 REFERENCE_PEN = pg.mkPen("#5dade2", width=4)
 GUIDE_PEN = pg.mkPen(93, 173, 226, 70, width=2)     # the Reference an octave above and below: fainter than the blue line
+NOTE_LABEL_COLOR = (235, 245, 255)                  # Notes mode: the note name over each bar
+NOTE_GAP_SAMPLES = 2                                # Notes mode: blank draw samples at the end of a bar, so bars stay apart
+NOTE_SLIDER_PHRASE = 41                             # the Minimum note length slider: 1..40 tenths of a second, 41 per Phrase
 
 
 def _default_output() -> tuple[str | None, OutputKind]:
@@ -69,7 +74,8 @@ def describe(record: TakeRecord) -> str:
     key = f"{record.key}   |   {s.out_of_key_count} out of key   |   " if record.reference_kind == "key" else ""
     if record.reference_kind == "melody":
         mode = f" ({s.octave_mode})" if s.octave_mode else ""
-        key = f"{record.song_id}   |   octave shift {s.octave_shift:+d}{mode}   |   "
+        notes = f"notes {format_length(record.min_note_s)}   |   " if record.note_mode == "on" else ""
+        key = f"{record.song_id}   |   {notes}octave shift {s.octave_shift:+d}{mode}   |   "
     return (
         f"{key}In tune {s.pct_in_tune:.0f}%   |   median {s.median_abs_cents:.0f} cents off   |   "
         f"tends {s.tendency}   |   {steadiness_text(s)}   |   range {s.lowest_note}-{s.highest_note}   |   "
@@ -84,6 +90,15 @@ def pass_text(record: TakeRecord) -> str:
         return f"Pass {record.pass_index} of {record.section_name}: nothing sung in the Section."
     return (f"Pass {record.pass_index} of {record.section_name}: In tune {s.pct_in_tune:.0f}%   |   "
             f"median {s.median_abs_cents:.0f} cents off   |   tends {s.tendency}   |   saved as {record.id}")
+
+
+def length_of_slider(value: int) -> float:
+    """The Minimum note length a slider position stands for: tenths of a second, the far end one note per Phrase."""
+    return PER_PHRASE if value >= NOTE_SLIDER_PHRASE else value / 10
+
+
+def slider_of_length(min_note_s: float) -> int:
+    return NOTE_SLIDER_PHRASE if not np.isfinite(min_note_s) else min(40, max(1, round(10 * min_note_s)))
 
 
 def _volume_slider(tip: str) -> QtWidgets.QSlider:
@@ -212,6 +227,20 @@ class MainWindow(QtWidgets.QWidget):
         self.octave_box.setToolTip("Octave shift: Auto picks the octave you sing in for each Phrase; a number pins it "
                                    "for the whole Take. Faint lines show the melody one octave above and below.")
         self.octave_box.currentIndexChanged.connect(self._remember_player_settings)
+        self.notes_box = QtWidgets.QCheckBox("Notes")
+        self.notes_box.setFocusPolicy(QtCore.Qt.NoFocus)
+        self.notes_box.setToolTip("Notes mode: show and score the melody as flat notes on exact semitones")
+        self.note_length_slider = QtWidgets.QSlider(QtCore.Qt.Horizontal)
+        self.note_length_slider.setRange(1, NOTE_SLIDER_PHRASE)
+        self.note_length_slider.setValue(slider_of_length(player_settings.DEFAULT_MIN_NOTE_S))
+        self.note_length_slider.setFixedWidth(120)
+        self.note_length_slider.setFocusPolicy(QtCore.Qt.NoFocus)
+        self.note_length_slider.setToolTip("Minimum note length: melody movements shorter than this merge into the "
+                                           "neighbouring note; far right = one note per Phrase")
+        self.note_length_label = QtWidgets.QLabel(format_length(player_settings.DEFAULT_MIN_NOTE_S))
+        self.note_length_label.setMinimumWidth(70)
+        self.notes_box.toggled.connect(self._notes_changed)                # bound methods: a lambda keeps self alive
+        self.note_length_slider.valueChanged.connect(self._notes_changed)
         self.speed_box.valueChanged.connect(self._speed_changed)
         self.speed_box.valueChanged.connect(self._remember_player_settings)
         for key, slot in (("+", self.speed_up), ("=", self.speed_up), ("-", self.speed_down)):
@@ -248,6 +277,7 @@ class MainWindow(QtWidgets.QWidget):
         plot.addItem(self._unscored)
         self._guide_curves = [plot.plot(pen=GUIDE_PEN, connect="finite") for _ in (12, -12)]   # Guide lines
         self._ref_curve = plot.plot(pen=REFERENCE_PEN, connect="finite")
+        self._note_labels: list[pg.TextItem] = []      # Notes mode: a pool of note-name labels, reused every frame
         self._now_line = pg.InfiniteLine(pos=0.0, angle=90, movable=False, pen=pg.mkPen(255, 255, 255, 110, width=1))
         self._now_line.setZValue(5)
         plot.addItem(self._now_line)
@@ -268,7 +298,7 @@ class MainWindow(QtWidgets.QWidget):
         mix = QtWidgets.QHBoxLayout()
         for w in (self.guide_box, self.guide_slider, QtWidgets.QLabel("Backing"), self.backing_slider,
                   self.pause_button, QtWidgets.QLabel("Speed"), self.speed_box, self.speed_label, QtWidgets.QLabel("Octave"),
-                  self.octave_box):
+                  self.octave_box, self.notes_box, self.note_length_slider, self.note_length_label):
             mix.addWidget(w)
         mix.addStretch(1)
         sections = QtWidgets.QHBoxLayout()
@@ -320,7 +350,7 @@ class MainWindow(QtWidgets.QWidget):
         self._restore_player_settings()
         self._preview_song()
         for w in (self.guide_box, self.guide_slider, self.backing_slider, self.speed_box, self.octave_box,
-                  self.section_box, self.section_name_edit, self.save_section_button, self.rename_section_button,
+                  self.notes_box, self.note_length_slider, self.section_box, self.section_name_edit, self.save_section_button, self.rename_section_button,
                   self.delete_section_button, self.loop_box):
             w.setEnabled(is_melody)
         self.update_output_warning()
@@ -333,7 +363,7 @@ class MainWindow(QtWidgets.QWidget):
         melody = None
         if self.reference_box.currentText() == "Melody" and self.song_box.currentData() is not None:
             try:
-                melody = Melody.from_song(Library(self._home).get(self.song_box.currentData()))
+                melody = self._in_notes_mode(Melody.from_song(Library(self._home).get(self.song_box.currentData())))
             except Exception:       # a song that cannot be read: Start says why
                 melody = None
         self.timeline.set_melody(melody)
@@ -505,7 +535,8 @@ class MainWindow(QtWidgets.QWidget):
         if store is not None:
             store.save(PlayerSettings(self.guide_box.isChecked(), self.guide_slider.value() / 100,
                                       self.backing_slider.value() / 100, self.speed_box.value(),
-                                      self.section_box.currentData(), self.octave_box.currentData()))
+                                      self.section_box.currentData(), self.octave_box.currentData(),
+                                      self.notes_box.isChecked(), self._note_length()))
 
     def _restore_player_settings(self, *_) -> None:
         """Put the chosen song's saved Guide vocal, volumes and Speed on the controls (the Section is picked by
@@ -524,6 +555,26 @@ class MainWindow(QtWidgets.QWidget):
         self.octave_box.setCurrentIndex(max(0, self.octave_box.findData(saved.octave)) if saved.octave is not None
                                         else 0)
         self.octave_box.blockSignals(False)
+        for widget in (self.notes_box, self.note_length_slider):
+            widget.blockSignals(True)
+        self.notes_box.setChecked(saved.notes)
+        self.note_length_slider.setValue(slider_of_length(saved.min_note_s))
+        for widget in (self.notes_box, self.note_length_slider):
+            widget.blockSignals(False)
+        self.note_length_label.setText(format_length(self._note_length()))
+
+    # --- Notes mode -------------------------------------------------------------------------------------------------
+    def _note_length(self) -> float:
+        return length_of_slider(self.note_length_slider.value())
+
+    def _in_notes_mode(self, melody: Melody) -> Melody:
+        """The Melody as the controls want it: its Notes-mode bars when Notes is ticked."""
+        return melody.notes(self._note_length()) if self.notes_box.isChecked() else melody
+
+    def _notes_changed(self, *_) -> None:
+        self.note_length_label.setText(format_length(self._note_length()))
+        self._remember_player_settings()
+        self._preview_song()
 
     def _octave_setting(self):
         """Auto, or the box's pinned shift; only a Melody has an original singer to be an octave away from."""
@@ -636,7 +687,7 @@ class MainWindow(QtWidgets.QWidget):
             song_id = self.song_box.currentData()
             if song_id is None:
                 raise ValueError("no song in the library yet: import one with `sing-pitch import <file or link>`")
-            return Melody.from_song(Library(self._home).get(song_id))
+            return self._in_notes_mode(Melody.from_song(Library(self._home).get(song_id)))
         return NearestNote()
 
     def _set_now(self, now: float) -> None:
@@ -712,6 +763,7 @@ class MainWindow(QtWidgets.QWidget):
         self._melody_latency = latency_s
         for curve in (self._ref_curve, *self._guide_curves):
             curve.setData([], [])
+        self._show_labels([])
         self._unscored.setOpts(x0=[], x1=[], y0=[], y1=[])
         self.timeline.set_melody(self._melody, getattr(self._backing, "duration_s", None))
         self.timeline.setVisible(self._melody is not None)
@@ -761,7 +813,7 @@ class MainWindow(QtWidgets.QWidget):
         self._set_now(0.0)
         self.button.setText("Stop")
         for w in (self.device_box, self.reference_box, self.key_box, self.drone_box, self.song_box,
-                  self.octave_box, self.calibrate_button):
+                  self.octave_box, self.notes_box, self.note_length_slider, self.calibrate_button):
             w.setEnabled(False)
         self.replay_button.setEnabled(False)
         self.summary_label.setText("Singing...")
@@ -913,8 +965,13 @@ class MainWindow(QtWidgets.QWidget):
         if self._melody is None:
             return
         x = np.arange(t_end - PAST_S, t_end + FUTURE_S + DRAW_STEP_S, DRAW_STEP_S)
-        _, midi, unscored = self._sample_reference(x, t_end)
-        shift = 12.0 * self._octaves_at(x)               # drawn where the Take is scored, not at the singer's octave
+        song, midi, unscored = self._sample_reference(x, t_end)
+        octaves = self._octaves_at(x)
+        shift = 12.0 * octaves                           # drawn where the Take is scored, not at the singer's octave
+        if isinstance(self._melody, NotesMelody):
+            midi = self._note_bars(x, song, midi, octaves, shift)
+        else:
+            self._show_labels([])
         self._ref_curve.setData(x, midi + shift)
         for curve, d in zip(self._guide_curves, (12, -12)):
             curve.setData(x, midi + shift + d)
@@ -922,6 +979,42 @@ class MainWindow(QtWidgets.QWidget):
         starts, ends = edges[::2], edges[1::2]
         self._unscored.setOpts(x0=x[starts], x1=x[ends - 1] + DRAW_STEP_S, y0=[0.0] * len(starts),
                                y1=[127.0] * len(starts))
+
+    def _note_bars(self, x: np.ndarray, song: np.ndarray, midi: np.ndarray, octaves: np.ndarray,
+                   shift: np.ndarray) -> np.ndarray:
+        """Notes mode: the sampled notes as separate bars (the line blanked just before each new note, or a new Octave
+        shift, so neighbouring bars never join into a staircase), each labelled with its note name at its start, the
+        left edge of the plot for a bar already under way."""
+        index = self._melody.note_index_at(song)
+        index[~np.isfinite(midi)] = -1
+        midi = midi.copy()
+        new = np.flatnonzero((index[1:] != index[:-1]) | (octaves[1:] != octaves[:-1])) + 1
+        for i in new:
+            if index[i - 1] >= 0:
+                midi[max(0, i - NOTE_GAP_SAMPLES):i] = np.nan
+        starts = np.concatenate([[0], new]) if len(index) else new
+        notes = self._melody.note_list
+        labels = [(x[i], notes[index[i]].midi + shift[i], note_name(int(round(notes[index[i]].midi + shift[i]))))
+                  for i in starts if index[i] >= 0]
+        self._show_labels(labels)
+        return midi
+
+    def _show_labels(self, labels: list[tuple[float, float, str]]) -> None:
+        """Put (x, MIDI, text) labels on the plot from the pool: items are created once and reused, the rest hidden."""
+        while len(self._note_labels) < len(labels):
+            item = pg.TextItem("", color=NOTE_LABEL_COLOR, anchor=(0, 1))
+            item.setZValue(4)
+            self._plot.addItem(item)
+            self._note_labels.append(item)
+        for item, (lx, ly, text) in zip(self._note_labels, labels):
+            if item.toPlainText() != text:
+                item.setText(text)
+            item.setPos(lx, ly)
+            if not item.isVisible():
+                item.setVisible(True)
+        for item in self._note_labels[len(labels):]:
+            if item.isVisible():
+                item.setVisible(False)
 
     def tick(self, drain_only: bool = False) -> None:
         if self._runner is not None:

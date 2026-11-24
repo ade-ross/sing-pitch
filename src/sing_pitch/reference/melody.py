@@ -1,6 +1,7 @@
 """The Melody Reference: the pitch line RMVPE extracted from a song's vocal stem, looked up at song time t."""
 from __future__ import annotations
 
+import hashlib
 from typing import ClassVar
 
 import numpy as np
@@ -9,6 +10,10 @@ from ..library.ports import ReferenceLine
 from ..music import A4_MIDI
 from ..config import A4_HZ
 from .base import Target
+from .notes import Note, note_line, segment_notes
+
+_NOTES_CACHE: dict[tuple, list[Note]] = {}     # (song, line digest, Minimum note length) -> its notes
+_NOTES_CACHE_MAX = 64
 
 MIN_CONFIDENCE = 0.3      # RMVPE activation below this = reference unreliable (04-rmvpe notes)
 FILL_GAP_S = 0.12         # a dip shorter than this between two reliable frames is a consonant, not a stretch
@@ -95,6 +100,16 @@ class Melody:
         """(song time, MIDI) of the line, NaN where unscored: what the live view draws."""
         return self._t, np.where(self.scored, self._midi, np.nan)
 
+    def _frames_at(self, song_t: np.ndarray) -> tuple[np.ndarray, np.ndarray]:
+        """(nearest frame, inside) for each song time: inside = a frame lies within the tolerance of it."""
+        with np.errstate(invalid="ignore"):
+            j = np.clip(np.searchsorted(self._t, song_t), 1, len(self._t) - 1) if len(self._t) > 1 else np.zeros(
+                song_t.shape, dtype=int)
+            if len(self._t) > 1:
+                j = np.where(song_t - self._t[j - 1] < self._t[j] - song_t, j - 1, j)
+            inside = np.isfinite(song_t) & (np.abs(self._t[j] - song_t) <= self._tolerance)
+        return j, inside
+
     def sample(self, song_t: np.ndarray) -> tuple[np.ndarray, np.ndarray]:
         """(MIDI, unscored) of the line at each song time, for drawing it on any clock. MIDI is NaN where the line is
         unscored or the time is outside it (or NaN); unscored is True only inside an Unscored stretch."""
@@ -103,16 +118,24 @@ class Melody:
         unscored = np.zeros(song_t.shape, dtype=bool)
         if not len(self._t):
             return midi, unscored
-        with np.errstate(invalid="ignore"):
-            j = np.clip(np.searchsorted(self._t, song_t), 1, len(self._t) - 1) if len(self._t) > 1 else np.zeros(
-                song_t.shape, dtype=int)
-            if len(self._t) > 1:
-                j = np.where(song_t - self._t[j - 1] < self._t[j] - song_t, j - 1, j)
-            inside = np.isfinite(song_t) & (np.abs(self._t[j] - song_t) <= self._tolerance)
+        j, inside = self._frames_at(song_t)
         ok = inside & self.scored[j] & np.isfinite(self._midi[j])
         midi[ok] = self._midi[j][ok]
         unscored[inside] = ~self.scored[j][inside]
         return midi, unscored
+
+    def notes(self, min_note_s: float) -> NotesMelody:
+        """This Melody in Notes mode at the given Minimum note length (notes.PER_PHRASE: one note per Phrase). The
+        segmentation is cached per song, line and length."""
+        digest = hashlib.sha1(np.ascontiguousarray(self._t).tobytes() + np.ascontiguousarray(self._midi).tobytes()
+                              + np.packbits(self.scored).tobytes()).hexdigest()
+        key = (self.song_id, digest, float(min_note_s))
+        notes = _NOTES_CACHE.get(key)
+        if notes is None:
+            if len(_NOTES_CACHE) >= _NOTES_CACHE_MAX:
+                _NOTES_CACHE.pop(next(iter(_NOTES_CACHE)))
+            notes = _NOTES_CACHE[key] = segment_notes(self._t, self._midi, self.scored, min_note_s)
+        return NotesMelody(self, float(min_note_s), notes)
 
     def target(self, t: float, sung_midi: float) -> Target:
         if not len(self._t):
@@ -123,3 +146,26 @@ class Melody:
         if abs(self._t[j] - t) > self._tolerance or not self.scored[j] or not np.isfinite(self._midi[j]):
             return Target(None)
         return Target(float(self._midi[j]))
+
+
+class NotesMelody(Melody):
+    """A Melody in Notes mode: its line is the notes' exact semitones (see notes.py), so the target, the drawing, the
+    replay and the re-score all use the bars. Unscored stretches are the Melody's own."""
+
+    def __init__(self, melody: Melody, min_note_s: float, notes: list[Note]):
+        super().__init__(melody.line, melody.song_id, melody.scored)
+        self.min_note_s = min_note_s
+        self.note_list = notes
+        self._midi, self._note_index = note_line(len(self._t), self.scored, notes)
+
+    def notes(self, min_note_s: float) -> NotesMelody:
+        return Melody(self.line, self.song_id, self.scored).notes(min_note_s)
+
+    def note_index_at(self, song_t: np.ndarray) -> np.ndarray:
+        """Which note sounds at each song time (its index in note_list), -1 where none does."""
+        song_t = np.asarray(song_t, dtype=np.float64)
+        index = np.full(song_t.shape, -1, dtype=np.int64)
+        if len(self._t):
+            j, inside = self._frames_at(song_t)
+            index[inside] = self._note_index[j][inside]
+        return index

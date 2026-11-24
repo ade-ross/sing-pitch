@@ -202,4 +202,6 @@ class TakeEngine:
             section_name=None if self.pass_tag is None else self.pass_tag.section_name,
             pass_index=None if self.pass_tag is None else self.pass_tag.pass_index,
             clock_times=None if self.pass_tag is None else tuple(self._clock_times),
+            note_mode="on" if getattr(self._reference, "min_note_s", None) is not None else "off",
+            min_note_s=getattr(self._reference, "min_note_s", None),
         )

@@ -1,9 +1,11 @@
 """How one song was last set up in the player, stored in its library folder as player.json: Guide vocal on/off, the
 two volumes (0-1), the Speed in percent and the Section that was chosen (a saved Section's name, None = the unnamed
-mark) and the Octave box (None = Auto, else the pinned shift). A song reopens with these."""
+mark), the Octave box (None = Auto, else the pinned shift) and Notes mode with its Minimum note length (math.inf = one
+note per Phrase, written "phrase"). A song reopens with these."""
 from __future__ import annotations
 
 import json
+import math
 import os
 from dataclasses import asdict, dataclass
 from pathlib import Path
@@ -11,6 +13,8 @@ from pathlib import Path
 PLAYER = "player.json"
 SPEED_RANGE = (50, 120)
 OCTAVE_CHOICES = (-2, -1, 0, 1)      # the pinned values of the Octave box; Auto is None
+MIN_NOTE_RANGE = (0.1, 4.0)          # the Minimum note length slider, in seconds; its far end is one note per Phrase
+DEFAULT_MIN_NOTE_S = 0.3
 
 
 @dataclass(frozen=True)
@@ -21,6 +25,16 @@ class PlayerSettings:
     speed_pct: int = 100
     section: str | None = None
     octave: int | None = None
+    notes: bool = False
+    min_note_s: float = DEFAULT_MIN_NOTE_S
+
+
+def _min_note(value) -> float:
+    if value == "phrase":
+        return math.inf
+    if isinstance(value, bool) or not isinstance(value, (int, float)):
+        return DEFAULT_MIN_NOTE_S
+    return float(value) if MIN_NOTE_RANGE[0] <= value <= MIN_NOTE_RANGE[1] else DEFAULT_MIN_NOTE_S
 
 
 def _gain(value, default: float) -> float:
@@ -46,6 +60,8 @@ def _from_dict(raw: dict) -> PlayerSettings:
         section=section if isinstance(section, str) else None,
         octave=octave if isinstance(octave, int) and not isinstance(octave, bool) and octave in OCTAVE_CHOICES
         else None,
+        notes=raw.get("notes") is True,
+        min_note_s=_min_note(raw.get("min_note_s", d.min_note_s)),
     )
 
 
@@ -65,5 +81,8 @@ class PlayerSettingsStore:
         if settings == self.load():
             return
         tmp = self._path.with_suffix(".tmp")
-        tmp.write_text(json.dumps(asdict(settings), indent=2) + "\n")
+        raw = asdict(settings)
+        if math.isinf(raw["min_note_s"]):
+            raw["min_note_s"] = "phrase"         # JSON has no infinity
+        tmp.write_text(json.dumps(raw, indent=2) + "\n")
         os.replace(tmp, self._path)

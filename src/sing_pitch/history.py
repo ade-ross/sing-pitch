@@ -6,7 +6,7 @@ from dataclasses import dataclass
 from datetime import datetime
 from pathlib import Path
 
-from .take_store import GUIDE_STATES, row_settings, summary_path
+from .take_store import GUIDE_STATES, row_notes, row_settings, summary_path
 
 WHOLE_SONG = ""      # the Section filter value for Takes that were not a Pass of a Section
 
@@ -21,6 +21,7 @@ class HistoryPoint:
     guide_vocal: str = "off"          # "off" | "on" | "mixed"; rows saved before the column read as off
     speed_pct: int = 100
     section: str | None = None
+    note_mode: str = "off"            # "on" = scored against the Notes-mode bars; rows saved before the column: off
 
 
 @dataclass(frozen=True)
@@ -60,14 +61,19 @@ class History:
     def sections(self) -> list[str]:
         return sorted({p.section for p in self._points if p.section})
 
+    @property
+    def note_modes(self) -> list[str]:
+        return [m for m in ("off", "on") if any(p.note_mode == m for p in self._points)]
+
     def series(self, reference: str | None = None, song: str | None = None, guide_vocal: str | None = None,
-               speed: int | None = None, section: str | None = None) -> Series:
+               speed: int | None = None, section: str | None = None, note_mode: str | None = None) -> Series:
         """The Takes matching every filter given (None = any). section: a Section name, or WHOLE_SONG for Takes that
         were not a Pass."""
         pts = [p for p in self._points
                if (reference is None or p.reference == reference) and (song is None or p.song == song)
                and (guide_vocal is None or p.guide_vocal == guide_vocal) and (speed is None or p.speed_pct == speed)
-               and (section is None or (p.section or WHOLE_SONG) == section)]
+               and (section is None or (p.section or WHOLE_SONG) == section)
+               and (note_mode is None or p.note_mode == note_mode)]
         return Series([p.started_at for p in pts], [p.pct_in_tune for p in pts], [p.median_abs_cents for p in pts])
 
 
@@ -89,6 +95,7 @@ def load_history(home: Path) -> History:
                     pct_in_tune=float(r["pct_in_tune"]),
                     median_abs_cents=float(r["median_abs_cents"]),
                     guide_vocal=guide, speed_pct=speed, section=(r.get("section_name") or None),
+                    note_mode=row_notes(r)[0],
                 ))
             except (KeyError, TypeError, ValueError):
                 continue

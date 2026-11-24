@@ -8,6 +8,7 @@ from __future__ import annotations
 
 import csv
 import dataclasses
+import math
 import os
 from datetime import datetime
 from pathlib import Path
@@ -26,12 +27,13 @@ COLUMNS = (
     "id", "started_at", "reference", "key", "song_id", "octave_shift", "pct_in_tune", "median_abs_cents",
     "tendency", "steadiness_cents", "lowest_note", "highest_note", "n_voiced_frames", "n_scored_frames",
     "duration_s", "out_of_key_count", "latency_offset_s", "app_version", "section_name", "pass_index",
-    "guide_vocal", "guide_gain", "speed_pct", "octave_mode",
+    "guide_vocal", "guide_gain", "speed_pct", "octave_mode", "note_mode", "min_note_s",
 )
 # Columns added after the first release go at the END; a table with an older header is rewritten with the new one
 # on the next save, its old rows left empty in the new columns (no Section = not a Pass; an empty guide_vocal /
 # speed_pct reads as guide off / Speed 100, see row_settings; an empty octave_mode = one Octave shift per Take, how
-# Takes were scored before Octave shift per Phrase, and they re-score that way, see row_octave).
+# Takes were scored before Octave shift per Phrase, and they re-score that way, see row_octave; an empty note_mode =
+# scored against the line, see row_notes).
 
 GUIDE_STATES = ("off", "on", "mixed")
 
@@ -65,6 +67,26 @@ def row_octave(row: dict) -> OctaveSetting:
     return LEGACY
 
 
+def row_notes(row: dict) -> tuple[str, float | None]:
+    """(note_mode, min_note_s) of a table row: ("on", length) for a Notes-mode Take (length math.inf when its cell is
+    "phrase": one note per Phrase), else ("off", None); rows saved before these columns read as off."""
+    if row.get("note_mode") != "on":
+        return "off", None
+    cell = row.get("min_note_s") or ""
+    if cell == "phrase":
+        return "on", math.inf
+    try:
+        return "on", float(cell)
+    except ValueError:
+        return "off", None
+
+
+def _length_cell(record: TakeRecord) -> str | float:
+    if record.note_mode != "on" or record.min_note_s is None:
+        return ""
+    return "phrase" if math.isinf(record.min_note_s) else round(record.min_note_s, 3)
+
+
 def summary_path(home: Path) -> Path:
     return Path(home) / "takes.csv"
 
@@ -87,7 +109,7 @@ def _row(record: TakeRecord) -> dict:
         "latency_offset_s": record.latency_offset_s, "app_version": __version__,
         "section_name": cell(record.section_name), "pass_index": cell(record.pass_index),
         "guide_vocal": record.guide_vocal, "guide_gain": record.guide_gain, "speed_pct": record.speed_pct,
-        "octave_mode": s.octave_mode,
+        "octave_mode": s.octave_mode, "note_mode": record.note_mode, "min_note_s": _length_cell(record),
     }
 
 
@@ -207,9 +229,11 @@ def _reference_for(row: dict, home: Path) -> Reference:
         from ..library import Library
 
         try:
-            return Melody.from_song(Library(home).get(row["song_id"]))
+            melody = Melody.from_song(Library(home).get(row["song_id"]))
         except KeyError as e:
             raise ValueError(f"song {row['song_id']!r} of this Take is no longer in the library") from e
+        mode, length = row_notes(row)
+        return melody.notes(length) if mode == "on" else melody     # a Notes Take is scored against its bars
     raise ValueError(f"re-scoring a {row['reference']} Take needs its Reference")
 
 
@@ -259,6 +283,7 @@ def rescore_take(
         section_name=row.get("section_name") or None,
         pass_index=int(row["pass_index"]) if row.get("pass_index") else None,
         guide_vocal=guide_vocal, guide_gain=guide_gain, speed_pct=speed_pct,
+        note_mode=row_notes(row)[0], min_note_s=row_notes(row)[1],
     )
     if write:
         _write_rows(summary_path(home), [_row(record) if r["id"] == take_id else r for r in rows])

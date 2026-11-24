@@ -148,3 +148,17 @@ Melody Takes get a practice transport:
 
 The Lead-in is about 2 s by default. It is the planner's choice: long enough to hear the beat at 50% Speed, and short
 enough not to waste time at 100%.
+
+## Notes mode (#19)
+
+The Notes box shows and scores the Melody as flat bars on exact semitones, each labelled with its note name, instead of
+the continuous line; the Guide lines become bars too, an octave either side, and the bars run through both halves of
+the centred plot. The bars come from one pure function of the reference line, its scored mask and the Minimum note
+length (`reference/notes.py`): the scored frames are split into reference Phrases (pauses of 0.5 s or more), rounded
+to semitones, and any run shorter than the Minimum note length is merged into its nearer-pitched neighbour until none
+is left; each note takes the semitone held longest over its span (a slide E-F-F#-G held on G is a G, never the mean).
+The slider runs 0.1-4 s; its far end gives one note per Phrase. Unscored stretches stay unscored. In Notes mode the
+target is the note's semitone (the Octave shift applies as before), so live scoring, replay and re-score use the same
+bars and reproduce the numbers; the segmentation is cached per song and length. Each Take records `note_mode` (off/on)
+and `min_note_s` (seconds, or `phrase`) at the end of takes.csv; old rows read as off. History filters by Notes mode,
+and the toggle and length are remembered per song in player.json. Both are locked during a Take.
