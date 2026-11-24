@@ -196,9 +196,11 @@ class Transport:
         self._want_playing = True           # requested (any thread)
         self._playing = True                # in effect (render thread only)
         self._n = 0                         # song frame of the next frame to render
-        self._seeks: deque[float] = deque()  # requested song times (any thread); the last one wins
+        self._seeks: deque[tuple[float, bool]] = deque()  # (song time, the loop goes on) asked for (any thread);
+                                                            # the last one wins
         self._loop_requests: deque[Loop | None] = deque()   # set_loop calls (any thread); the last one wins
         self._loop: Loop | None = None      # in effect (render thread only)
+        self._loop_next: Loop | None = None  # the same Section with a new Lead-in / Count-in, from the next wrap
         self._pass = 0                      # index of the Pass playing (render thread only)
         self._block0 = 0                    # output frame of the block being rendered (render thread only)
         self._wrap_out_s = 0.0              # output time of the Pass boundary being applied (render thread only)
@@ -221,17 +223,38 @@ class Transport:
     def set_gains(self, backing: float, vocal: float) -> None:
         self._gains = (float(backing), float(vocal))
 
-    def seek(self, song_s: float) -> None:
+    def seek(self, song_s: float) -> bool:
         """Go on from this song time (original seconds, clamped to the song), from the start of the next block,
-        playing or paused, at whatever Speed is playing."""
-        self._seeks.append(float(song_s))
+        playing or paused, at whatever Speed is playing. Returns whether the loop goes on: song_s lies inside the
+        loop it will play (the fitted one, see set_loop; a loop asked for and not yet applied counts); the next block
+        does exactly that (the next Pass starts at song_s), else the seek ends the loop. The caller shows this
+        answer."""
+        song_s = float(song_s)
+        loop = self._loop_after_requests()
+        keep = loop is not None and loop.start_s <= song_s < loop.end_s
+        self._seeks.append((song_s, keep))
+        return keep
 
     def set_loop(self, loop: Loop | None) -> None:
         """Loop this Section from the next block (None = stop looping, the song runs on). Turning it on goes straight
         to start - Lead-in (or the Count-in) as Pass 1; at the Section end the song wraps back there and the next Pass
-        starts. A seek outside the Section ends the loop; one inside it starts the next Pass there. A Section shorter than MIN_LOOP_S or past the song end is first fitted into the song
+        starts. A seek outside the Section ends the loop; one inside it starts the next Pass there (Pass 1, when the
+        seek comes in the same block as the set_loop). The same Section (start, end, name) with only another Lead-in or
+        Count-in does not restart: the Pass playing goes on and the next one starts with the new Lead-in or Count-in. A Section shorter than MIN_LOOP_S or past the song end is first fitted into the song
         (loop shows the fitted one), so every Pass renders some song."""
         self._loop_requests.append(None if loop is None else self._fit_loop(loop))
+
+    def _loop_after_requests(self) -> Loop | None:
+        """The loop the next block plays: the last one asked for, else the one in effect."""
+        try:
+            return self._loop_requests[-1]
+        except IndexError:
+            return self._loop
+
+    @staticmethod
+    def _same_section(a: Loop | None, b: Loop | None) -> bool:
+        """Both loop the same Section: only what plays between Passes may differ."""
+        return a is not None and b is not None and (a.start_s, a.end_s, a.name) == (b.start_s, b.end_s, b.name)
 
     def _fit_loop(self, loop: Loop) -> Loop | None:
         """The loop clamped to the song and at least MIN_LOOP_S long (the whole song if it is shorter); None for a
@@ -273,7 +296,7 @@ class Transport:
         song; None when none is waiting. A second arrow key pressed before that block starts from here, not from the
         stale position_s."""
         try:
-            target = self._seeks[-1]
+            target = self._seeks[-1][0]
         except IndexError:
             return None
         return min(max(0.0, target), self._song_frames / self._sr)
@@ -316,12 +339,19 @@ class Transport:
                 fade_from = (self._audio, self._vocal, self._speed)
             events += self._apply_speed()
         if self._seeks:   # after a Speed swap, so a crossfade in this block fades both Speeds at the new position
-            target = None
+            target, keep = None, False
             while self._seeks:
-                target = self._seeks.popleft()
-            loop = self._loop
-            if loop is not None and not self._loop_requests and loop.start_s <= target < loop.end_s:
+                target, keep = self._seeks.popleft()
+            asked = self._loop_after_requests() if self._loop_requests else None
+            if keep and asked is not None and asked.start_s <= target < asked.end_s \
+                    and not self._same_section(asked, self._loop):
+                self._loop_requests.clear()      # a loop asked for, and a seek inside it: its Pass 1 starts there
+                events += self._end_loop(0)
+                self._loop, self._pass = asked, 0
+                events += self._jump_in_loop(target)
+            elif keep and self._loop is not None and self._loop.start_s <= target < self._loop.end_s:
                 events += self._jump_in_loop(target)     # inside the looping Section: the next Pass starts there
+                                                         # (a loop asked for after the seek applies below)
             else:
                 self._loop_requests.clear()      # a seek ends the loop (and wins over a loop asked in the same block)
                 events += self._end_loop(0)
@@ -331,10 +361,13 @@ class Transport:
             loop = None
             while self._loop_requests:
                 loop = self._loop_requests.popleft()
-            events += self._end_loop(0)
-            if loop is not None:
-                self._loop, self._pass = loop, 0
-                events += self._wrap(0)
+            if self._same_section(loop, self._loop):
+                self._loop_next = loop           # only Between Passes changed: from the next wrap, the Passes go on
+            else:
+                events += self._end_loop(0)
+                if loop is not None:
+                    self._loop, self._pass = loop, 0
+                    events += self._wrap(0)
         end = self._gains
         if end != self._applied:
             events += (TransportEvent("gains_changed", self.log.rendered_s, self.position_s, gains=end),)
@@ -356,13 +389,15 @@ class Transport:
             n = self._n
             g0, g1 = (tuple(a + (b - a) * x / frames for a, b in zip(start, end)) for x in (pos, pos + count))
             loop = self._loop
-            if loop is not None and loop.count_in is not None and n < loop.start_s * self._sr - 1e-6:
+            counting = loop is not None and loop.count_in is not None and n < loop.start_s * self._sr - 1e-6
+            if counting:
                 count = min(count, math.ceil((loop.start_s * self._sr - n) / speed - 1e-9))
                 audio = self._count_in(loop, n, speed, count)
             else:
                 audio = self._mix(self._audio, self._vocal, n, speed, count, g0, g1)
             if fade_from is not None and pos == 0:   # a Speed change: crossfade (only up to a wrap in this block)
-                old = self._mix(*fade_from[:2], n, fade_from[2], count, g0, g1)
+                # the song is silent in a Count-in at either Speed: fade the clicks in from silence
+                old = np.zeros_like(audio) if counting else self._mix(*fade_from[:2], n, fade_from[2], count, g0, g1)
                 weight = (np.arange(1, count + 1, dtype=np.float32) / frames)[:, None]
                 audio = old * (1.0 - weight) + audio * weight
             parts.append(audio)
@@ -389,7 +424,7 @@ class Transport:
         if self._loop is None:
             return ()
         out_s, song_s = (self._block0 + pos) / self._sr, self.position_s
-        index, loop, self._loop, self._pass = self._pass, self._loop, None, 0
+        index, loop, self._loop, self._pass, self._loop_next = self._pass, self._loop, None, 0, None
         return (TransportEvent("pass_ended", out_s, song_s, index, loop),
                 TransportEvent("loop_ended", out_s, song_s, loop=loop))
 
@@ -397,10 +432,10 @@ class Transport:
         """A seek inside the looping Section: the Pass playing ends here and the next one starts at song_s (no Lead-in
         or Count-in: he chose where to go on), so each Take stays one unbroken stretch and the loop goes on."""
         out_s, loop = self.log.rendered_s, self._loop
-        ended = TransportEvent("pass_ended", out_s, self.position_s, self._pass, loop)
+        ended = (TransportEvent("pass_ended", out_s, self.position_s, self._pass, loop),) if self._pass else ()
         self._pass += 1
         self._n = round(song_s * self._sr)
-        return (ended, TransportEvent("pass_started", out_s, self.position_s, self._pass, loop))
+        return ended + (TransportEvent("pass_started", out_s, self.position_s, self._pass, loop),)
 
     def _wrap(self, pos: int) -> tuple[TransportEvent, ...]:
         """A Pass boundary at frame `pos` of the block being rendered: the next Pass starts at start - Lead-in.
@@ -410,6 +445,8 @@ class Transport:
         if self._pass:
             events = (TransportEvent("pass_ended", out_s, self.position_s, self._pass, self._loop),)
         self._pass += 1
+        if self._loop_next is not None:
+            self._loop, self._loop_next = self._loop_next, None
         self._n = round(self._loop.pass_start_s * self._sr)
         if self._speed_requests:
             events += self._apply_speed()
@@ -432,4 +469,10 @@ class Transport:
         """`frames` frames of the array pair from song frame n (index n / speed in the stretched arrays), the gains
         ramping from start to end."""
         i = round(n / speed)
+        if i < 0:       # before the song start: silence, never a slice wrapped round to the song end
+            out = np.zeros((frames, 2), np.float32)
+            skip = min(-i, frames)
+            if skip < frames:
+                out[skip:] = Transport._mix(backing, vocal, 0.0, speed, frames - skip, start, end)
+            return out
         return mix_block(backing[i : i + frames], None if vocal is None else vocal[i : i + frames], start, end, frames)

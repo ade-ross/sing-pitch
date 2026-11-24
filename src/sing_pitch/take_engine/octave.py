@@ -38,30 +38,56 @@ def pinned(k: int) -> OctaveSetting:
     return OctaveSetting("pinned", k)
 
 
-def best_octave_shift(pairs: Sequence[tuple[float, float]], config: ScoreConfig = DEFAULT_SCORE_CONFIG) -> int:
+OctavePair = tuple[float, tuple[float, ...]]     # (sung MIDI, Reference MIDI scored at each of config.octave_shifts)
+
+
+def scoring_target(reference: Reference, song_t: float, midi: float, config: ScoreConfig):
+    """What a sung frame is scored against: a Melody within the Timing window (midi: the voice moved to the original
+    singer's octave, so the closest reference pitch is the one he means); the others have no timing."""
+    if reference.kind == "melody" and config.timing_window_s > 0:
+        return reference.target(song_t, midi, config.timing_window_s)
+    return reference.target(song_t, midi)
+
+
+def octave_pair(reference: Reference, song_t: float, midi: float, config: ScoreConfig) -> OctavePair | None:
+    """The frame's Reference at every candidate shift k, each picked as scoring picks it (the Timing window's target
+    for the voice moved by -12 k); None where the Reference scores nothing (that does not depend on k)."""
+    if not (reference.kind == "melody" and config.timing_window_s > 0):
+        target = reference.target(song_t, midi)
+        return None if target.midi is None else (midi, (target.midi,) * len(config.octave_shifts))
+    refs = []
+    for k in config.octave_shifts:
+        target = scoring_target(reference, song_t, midi - 12 * k, config)
+        if target.midi is None:
+            return None
+        refs.append(target.midi)
+    return midi, tuple(refs)
+
+
+def best_octave_shift(pairs: Sequence[OctavePair], config: ScoreConfig = DEFAULT_SCORE_CONFIG) -> int:
     """The whole octave k whose shifted Reference (target + 12 k) gives the smallest median absolute error over
-    (sung MIDI, Reference MIDI) pairs. Ties go to the smaller shift. No pairs: 0."""
+    the pairs (see octave_pair). Ties go to the smaller shift. No pairs: 0."""
     if not pairs:
         return 0
     best, best_err = 0, None
-    for k in config.octave_shifts:
-        err = statistics.median(abs(100.0 * (sung - ref - 12 * k)) for sung, ref in pairs)
+    for i, k in enumerate(config.octave_shifts):
+        err = statistics.median(abs(100.0 * (sung - refs[i] - 12 * k)) for sung, refs in pairs)
         if best_err is None or err < best_err - 1e-9:
             best, best_err = k, err
     return best
 
 
 def octave_pairs(
-    frames: Sequence[PitchFrame], voiced: Sequence[bool], reference: Reference, song_times: Sequence[float | None]
-) -> list[tuple[float, float]]:
-    """(sung MIDI, Reference MIDI) for every voiced frame the Reference scores."""
+    frames: Sequence[PitchFrame], voiced: Sequence[bool], reference: Reference, song_times: Sequence[float | None],
+    config: ScoreConfig = DEFAULT_SCORE_CONFIG,
+) -> list[OctavePair]:
+    """An octave_pair for every voiced frame the Reference scores."""
     pairs = []
     for f, v, song_t in zip(frames, voiced, song_times):
         if v and song_t is not None:
-            midi = hz_to_midi(f.hz)
-            target = reference.target(song_t, midi)
-            if target.midi is not None:
-                pairs.append((midi, target.midi))
+            pair = octave_pair(reference, song_t, hz_to_midi(f.hz), config)
+            if pair is not None:
+                pairs.append(pair)
     return pairs
 
 
@@ -140,12 +166,12 @@ def take_octaves(
     if octave.mode == "pinned":
         return TakeOctaves([octave.k] * n, octave.k, "pinned")
     if octave.mode == "legacy":
-        k = best_octave_shift(octave_pairs(frames, voiced, reference, song_times), config)
+        k = best_octave_shift(octave_pairs(frames, voiced, reference, song_times, config), config)
         return TakeOctaves([k] * n, k, "")
     spans = split_phrases(frames, voiced, config)
     shifts: list[tuple[int, int] | None] = []          # per Phrase: (k, pairs) or None when nothing in it is scored
     for a, b in spans:
-        pairs = octave_pairs(frames[a:b], voiced[a:b], reference, song_times[a:b])
+        pairs = octave_pairs(frames[a:b], voiced[a:b], reference, song_times[a:b], config)
         shifts.append((best_octave_shift(pairs, config), len(pairs)) if pairs else None)
     known = [s[0] for s in shifts if s]
     per_frame, k_now, at = [], known[0] if known else 0, 0

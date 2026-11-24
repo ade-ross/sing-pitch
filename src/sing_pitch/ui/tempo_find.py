@@ -35,9 +35,14 @@ class TempoFinder(QtCore.QObject):
         detector, song_dir = self._detector, Path(song_dir)
 
         def work() -> None:
-            tempo = song_tempo(song_dir, detector)
-            with self._lock:
-                self._busy.discard(song_id)
+            tempo = None
+            try:
+                tempo = song_tempo(song_dir, detector)
+            except Exception:                       # whatever went wrong: unknown, and the song is free again
+                tempo = None
+            finally:
+                with self._lock:
+                    self._busy.discard(song_id)
             try:
                 self.done.emit(song_id, tempo)      # queued to the UI thread: the receiver lives there
             except RuntimeError:                    # the window was closed meanwhile; tempo.json is written anyway

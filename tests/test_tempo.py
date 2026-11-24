@@ -74,3 +74,35 @@ def test_the_real_beat_tracker_finds_the_tempo_of_a_click_track(tmp_path):
     tempo = detect_tempo(write_wav(tmp_path / "backing.wav", audio, sr))
     assert abs(tempo.bpm - bpm) < 2.0
     assert len(tempo.beats_s) > 20 and abs(np.median(np.diff(tempo.beats_s)) - 0.6) < 0.02
+
+
+def test_a_tempo_of_zero_bpm_is_unknown_and_never_stored(tmp_path):
+    """Review 5 #6: a beat tracker that finds no beat says 0 BPM; that is no tempo."""
+    assert song_tempo(tmp_path, FakeDetector(Tempo(0.0))) is None
+    assert not (tmp_path / TEMPO).exists()
+
+
+def test_the_beat_tracker_finding_no_beat_raises_tempo_unavailable(tmp_path, monkeypatch):
+    import sys
+    import types
+
+    from sing_pitch.library.tempo import detect_tempo
+
+    fake = types.ModuleType("librosa")
+    fake.load = lambda path, sr, mono: (np.zeros(sr), sr)
+    fake.beat = types.SimpleNamespace(beat_track=lambda y, sr, units: (np.array([0.0]), np.array([])))
+    monkeypatch.setitem(sys.modules, "librosa", fake)
+    with pytest.raises(TempoUnavailable):
+        detect_tempo(tmp_path / "backing.wav")
+
+
+def test_a_tempo_that_cannot_be_saved_still_frees_the_song_and_reports(tmp_path, qtbot):
+    """Review 5 #6: an error writing tempo.json used to leave the song 'busy' for good (no Count-in ever again)."""
+    from sing_pitch.ui.tempo_find import TempoFinder
+
+    finder = TempoFinder(FakeDetector())
+    missing = tmp_path / "gone"                     # no such folder: tempo.json cannot be written
+    with qtbot.waitSignal(finder.done, timeout=5000) as got:
+        finder.find("s1", missing)
+    assert got.args[0] == "s1"
+    assert not finder.busy("s1")

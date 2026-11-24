@@ -99,3 +99,35 @@ def test_without_a_count_in_the_lead_in_plays_the_song_as_before():
     tr.set_loop(Loop(*SECTION, lead_in_s=2.0))
     b = tr.render(256)
     assert np.isclose(b.audio[0, 0], 1000.0 + 1.0 * SR)
+
+
+@pytest.mark.parametrize("section", [SECTION, (0.5, 2.0)])     # the second Count-in starts before the song start
+def test_a_speed_change_asked_with_the_loop_crossfades_against_silence_in_the_count_in(section):
+    """Review 5 #2: a Speed change pending when the first Pass starts used to crossfade the old Speed's song into the
+    Count-in, and a Count-in before the song start (negative song frame) wrapped the slice to the song end."""
+    tr = Transport(ramp_song(10.0), sample_rate=SR)
+    tr.render(256)                                  # something rendered: a Speed change now crossfades
+    tr.set_speed(0.7, ramp_song(10.0, 0.7))
+    tr.set_loop(Loop(*section, count_in=TEMPO))
+    audio = np.concatenate([tr.render(256).audio for _ in range(round(1.5 * SR / 256))])
+    assert np.abs(audio).max() < 1.0                # only clicks: the song (>= 1000) is never heard
+
+
+
+def test_changing_only_the_between_passes_keeps_the_pass_and_applies_at_the_next_wrap():
+    """Review 5 #5: the tempo found (or the BPM, beats or Between changed) while looping used to restart at Pass 1.
+    The same Section with another Lead-in or Count-in goes on; the next Pass starts with the new one."""
+    tr = Transport(ramp_song(10.0), sample_rate=SR)
+    tr.set_loop(Loop(*SECTION, "Verse"))                           # Lead-in: Passes start at 1.0
+    events = []
+    for _ in range(round(5.5 * SR / 256)):                         # into Pass 2
+        events += tr.render(256).events
+    assert tr.pass_index == 2
+    tr.set_loop(Loop(*SECTION, "Verse", count_in=TEMPO))
+    b = tr.render(256)
+    assert [e.kind for e in b.events] == [] and tr.pass_index == 2
+    started = []
+    for _ in range(round(4.0 * SR / 256)):
+        started += [e for e in tr.render(256).events if e.kind == "pass_started"]
+    assert started[0].pass_index == 3 and started[0].loop.count_in == TEMPO
+    assert np.isclose(started[0].song_t, SECTION[0] - TEMPO.bar_s)

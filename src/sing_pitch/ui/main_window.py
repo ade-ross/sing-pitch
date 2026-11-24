@@ -65,6 +65,7 @@ REFERENCE_PEN = pg.mkPen("#5dade2", width=4)
 VERDICT_PEN = {b: pg.mkPen(c, width=4) for b, c in BAND_COLOUR.items()}   # Notes mode: a bar whose note has its verdict
 GUIDE_PEN = pg.mkPen(93, 173, 226, 150, width=2)    # the Reference an octave above and below: clear, but fainter and thinner than the blue line
 NOTE_LABEL_COLOR = (235, 245, 255)                  # Notes mode: the note name over each bar
+VERDICT_ERAS = 4                                    # Notes mode: the Takes (Passes) before whose verdicts are still drawn
 NOTE_GAP_SAMPLES = 2                                # Notes mode: blank draw samples at the end of a bar, so bars stay apart
 NOTE_LABEL_WIDTH = 270                              # room for "C#4  out of key" at 32 px bold
 NOTE_SLIDER_PHRASE = 41                             # the Minimum note length slider: 1..40 tenths of a second, 41 per Phrase
@@ -184,6 +185,8 @@ class MainWindow(QtWidgets.QWidget):
         self._runner: LiveRunner | None = None
         self._replay: Replay | None = None
         self._visited: dict | None = None            # the controls as they were before a replay put a Take's on them
+        self._replay_locked: list[tuple[QtWidgets.QWidget, bool]] = []    # controls a replay greyed, and their state
+        self._speed_deferred = False                 # a Speed preparation that came due during a replay
         self._replay_started = 0.0
         self._replay_take_id: str | None = None
         self._t: deque[float] = deque()           # voice time of each drawn frame (the plot shows view time, see _fold)
@@ -198,6 +201,10 @@ class MainWindow(QtWidgets.QWidget):
         self._ahead = np.empty(0)                    # MIDI of the Reference coming in the right half, as drawn
         self._note_tally: NoteTally | None = None   # Notes mode per note: the running Take's (or replay's) notes
         self._verdicts: dict[int, Band] = {}        # ...and the verdict of each note that has ended
+        self._verdicts_since = -math.inf            # voice time the running Take (this Pass) began: verdicts apply after
+        self._verdict_eras: list[tuple[float, dict[int, Band]]] = []   # (voice start, verdicts) of the Takes before
+        self._pending_cuts: list[float] = []        # Take boundaries (voice time) whose later scores are not in yet
+        self._tally_args: tuple[Reference, ScoreConfig] | None = None
 
         self.device_box = eliding_combo()
         self.output_box = eliding_combo()
@@ -499,6 +506,8 @@ class MainWindow(QtWidgets.QWidget):
         self.song_box.currentIndexChanged.connect(self._remember_choice)
 
     def _remember_choice(self, *_) -> None:
+        if self._replay is not None:                 # a replay shows its Take's settings: nothing reacts
+            return
         self._settings.last_reference = self.reference_box.currentText()
         if self.song_box.currentData() is not None:             # "no songs" is not a choice
             self._settings.last_song = self.song_box.currentData()
@@ -594,6 +603,8 @@ class MainWindow(QtWidgets.QWidget):
             self.song_box.addItem("no songs: sing-pitch import <file or link>", None)
 
     def _reference_changed(self) -> None:
+        if self._replay is not None:                 # a replay shows its Take's settings: nothing reacts
+            return
         is_key = self.reference_box.currentText() == "Key"
         is_melody = self.reference_box.currentText() == "Melody"
         self.key_box.setEnabled(is_key)
@@ -629,10 +640,8 @@ class MainWindow(QtWidgets.QWidget):
         looping Section it starts the next Pass there and the loop goes on; anywhere else it ends the loop."""
         if self._backing is None:
             return
-        loop = getattr(self._backing, "loop", None)
-        inside = loop is not None and loop.start_s <= song_s < loop.end_s     # inside: the next Pass starts there
-        self._backing.seek(song_s)
-        if not inside:
+        inside = bool(self._backing.seek(song_s))    # the Transport's decision, on its fitted loop: inside, the next
+        if not inside:                                 # Pass starts there
             self._set_loop_box(False)
         self.timeline.set_playhead(song_s)
         self._show_loop()
@@ -817,6 +826,8 @@ class MainWindow(QtWidgets.QWidget):
         return CountIn(bpm, self.beats_box.value())
 
     def _between_changed(self, *_) -> None:
+        if self._replay is not None:                 # a replay shows its Take's settings: nothing reacts
+            return
         if 0 < self.bpm_box.value() < player_settings.BPM_RANGE[0]:      # a slip while typing: the slowest tempo
             self.bpm_box.setValue(player_settings.BPM_RANGE[0])
             return
@@ -941,6 +952,8 @@ class MainWindow(QtWidgets.QWidget):
 
     def _remember_player_settings(self, *_) -> None:
         """Keep the controls as the chosen song's settings; the song reopens like this."""
+        if self._replay is not None:                 # a replay shows its Take's settings: nothing reacts
+            return
         store = self._player_store()
         if store is not None:
             store.save(PlayerSettings(self.guide_box.isChecked(), self.guide_slider.value() / 100,
@@ -953,6 +966,8 @@ class MainWindow(QtWidgets.QWidget):
     def _restore_player_settings(self, *_) -> None:
         """Put the chosen song's saved Guide vocal, volumes and Speed on the controls (the Section is picked by
         reload_sections). Not while a Take runs."""
+        if self._replay is not None:                 # a replay shows its Take's settings: nothing reacts
+            return
         store = self._player_store()
         if store is None or self._runner is not None:
             return
@@ -1057,6 +1072,8 @@ class MainWindow(QtWidgets.QWidget):
         apply at once; a Speed cached on disk loads in the background; a new one is stretched in the background
         after a short pause (so a run of +/- presses prepares only the Speed he stops on) while the player keeps its
         old Speed. The message says what is going on."""
+        if self._replay is not None:                 # a replay shows its Take's Speed: nothing is stretched
+            return
         song_id, percent = self._speed_song(), self.speed_box.value()
         self._speed_timer.stop()
         self._speed_job = None
@@ -1074,6 +1091,9 @@ class MainWindow(QtWidgets.QWidget):
             self._speed_timer.start()
 
     def _prepare_speed(self) -> None:
+        if self._replay is not None:                 # due during a replay: the box shows the Take's Speed; after it
+            self._speed_deferred = True
+            return
         song_id, percent = self._speed_song(), self.speed_box.value()
         if song_id is not None and percent != 100:
             self._speed_job = (self._preparer.start(song_id, percent), song_id, percent)
@@ -1251,6 +1271,9 @@ class MainWindow(QtWidgets.QWidget):
         if self._replay is not None:
             self._end_replay()
         self._visited = self._show_settings(saved)
+        self._replay_locked = [(w, w.isEnabled()) for w in self._replay_controls()]
+        for w, _ in self._replay_locked:          # what the replay shows cannot be changed meanwhile
+            w.setEnabled(False)
         self._replay, self._replay_clock, self._replay_take_id = replay, replay_clock, take_id
         self._replay_started = time.monotonic()
         self._show_melody(reference, latency, octave_k)
@@ -1281,6 +1304,13 @@ class MainWindow(QtWidgets.QWidget):
                 "key": reference if reference.kind == "key" else None,
                 "octave": octave.k if octave.mode == "pinned" else None, "notes": notes == "on",
                 "length": player_settings.DEFAULT_MIN_NOTE_S if length is None else length, "speed": row_settings(row)[2]}
+
+    def _replay_controls(self) -> tuple[QtWidgets.QWidget, ...]:
+        """The controls a replay puts its Take's settings on, and those that would act on them (Speed presets, the
+        Count-in's tempo): greyed while it runs."""
+        return (self.reference_box, self.song_box, self.key_box, self.octave_box, self.speed_box,
+                self.speed_70_button, self.speed_85_button, self.speed_100_button, self.between_box, self.bpm_box,
+                self.beats_box)
 
     def _controls_now(self) -> dict:
         return {"reference": self.reference_box.currentText(), "song": self.song_box.currentData(),
@@ -1327,6 +1357,12 @@ class MainWindow(QtWidgets.QWidget):
         if self._visited is not None:
             self._show_settings(self._visited)                    # the controls as they were before the replay
             self._visited = None
+        for w, enabled in self._replay_locked:
+            w.setEnabled(enabled)
+        self._replay_locked = []
+        if self._speed_deferred:                                  # the Speed he had chosen, prepared now
+            self._speed_deferred = False
+            self._speed_changed()
         self.replay_button.setText("Replay last Take")
         self.button.setEnabled(True)
         for w in (self.notes_box, self.note_length_slider):
@@ -1459,7 +1495,7 @@ class MainWindow(QtWidgets.QWidget):
     def ingest(self, scores: list[FrameScore]) -> None:
         fold = self._fold()
         if self._note_tally is not None:
-            self._note_tally.add(scores)
+            self._tally(scores)
         scores = [s for s in scores if not fold.paused(s.t)]     # sung while the song was paused: not drawn
         for s in scores:
             self._t.append(s.t)
@@ -1524,8 +1560,32 @@ class MainWindow(QtWidgets.QWidget):
 
     def _start_note_tally(self, reference: Reference, config: ScoreConfig) -> None:
         """Notes mode scored per note: tally the Take's (or replay's) frames by note, for each note's verdict."""
-        self._verdicts = {}
+        self._verdicts, self._verdicts_since, self._verdict_eras, self._pending_cuts = {}, -math.inf, [], []
+        self._tally_args = (reference, config)
         self._note_tally = NoteTally(reference, config) if scored_per_note(reference, config) else None
+
+    def _tally(self, scores: list[FrameScore]) -> None:
+        """Add scores to the note tally; at each Take boundary (a loop wrap, a jump) the Take before gets its last
+        verdicts and the next one starts afresh, so a Pass is judged on its own singing only."""
+        i = 0
+        while self._pending_cuts:
+            at = self._pending_cuts[0]
+            j = next((k for k in range(i, len(scores)) if scores[k].t >= at), None)
+            if j is None:
+                break
+            self._note_tally.add(scores[i:j])
+            i = j
+            self._pending_cuts.pop(0)
+            self._new_note_era(at)
+        self._note_tally.add(scores[i:])
+
+    def _new_note_era(self, at: float) -> None:
+        """A Take boundary at voice time `at`: every note of the Take before is judged now (one that ends at the
+        Section end too, whose Timing window the song never plays), and kept for drawing that Take's bars."""
+        self._verdicts.update((v.note, v.band) for v in self._note_tally.close_until(math.inf))
+        self._verdict_eras = [*self._verdict_eras, (self._verdicts_since, self._verdicts)][-VERDICT_ERAS:]
+        self._verdicts, self._verdicts_since = {}, at
+        self._note_tally = NoteTally(*self._tally_args)
 
     def _close_notes(self, now: float, fold: PauseFold) -> None:
         """Give each note the song has passed (its end plus the Timing window) its verdict colour."""
@@ -1619,20 +1679,27 @@ class MainWindow(QtWidgets.QWidget):
         verdict = {b: np.full(len(x), np.nan) for b in VERDICT_PEN}
         if isinstance(self._melody, NotesMelody):
             midi = self._note_bars(x, song, midi, octaves, shift)
-            index = self._melody.note_index_at(song) if self._verdicts else ()
-            for k, band in self._verdicts.items():         # a note that has its verdict: its bar in the verdict colour
-                on = index == k
-                verdict[band][on] = midi[on]
-                midi[on] = np.nan
+            guide = midi.copy()                            # the Guide lines follow every bar, judged or not
+            eras = [*self._verdict_eras, (self._verdicts_since, self._verdicts)]
+            if any(v for _, v in eras):                    # a note that has its verdict: its bar in the verdict colour,
+                index = self._melody.note_index_at(song)   # each Take's (Pass's) verdicts over that Take's bars only
+                edges = [fold.to_view(start) for start, _ in eras] + [math.inf]
+                for (_, verdicts), lo, hi in zip(eras, edges, edges[1:]):
+                    span = (x >= lo) & (x < hi)
+                    for k, band in verdicts.items():
+                        on = span & (index == k)
+                        verdict[band][on] = midi[on]
+                        midi[on] = np.nan
         else:
             self._show_labels([])
+            guide = midi
         for band, curve in self._verdict_curves.items():
             curve.setData(x, verdict[band] + shift)
         self._ref_curve.setData(x, midi + shift)
         coming = (x > t_end) & ~unscored
         self._ahead = (midi + shift)[coming]
         for curve, d in zip(self._guide_curves, (12, -12)):
-            curve.setData(x, midi + shift + d)
+            curve.setData(x, guide + shift + d)
         edges = np.flatnonzero(np.diff(np.concatenate([[0], unscored.astype(np.int8), [0]])))
         starts, ends = edges[::2], edges[1::2]
         self._unscored.setOpts(x0=x[starts], x1=x[ends - 1] + DRAW_STEP_S, y0=[0.0] * len(starts),
@@ -1682,7 +1749,11 @@ class MainWindow(QtWidgets.QWidget):
     def tick(self, drain_only: bool = False) -> None:
         if self._runner is not None:
             try:
-                self.ingest(self._runner.drain())
+                scores = self._runner.drain()
+                cuts = self._runner.drain_cuts()        # after drain(): every drained score's boundary is here
+                if self._note_tally is not None:
+                    self._pending_cuts += cuts
+                self.ingest(scores)
             except Exception:           # the worker thread died: stop() ends the Take and reports why
                 self._stop()
                 return

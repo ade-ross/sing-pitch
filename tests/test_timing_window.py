@@ -60,3 +60,32 @@ def test_unscored_stretches_never_count_and_the_window_scores_no_extra_frame():
     engine = TakeEngine(Melody(line, "fast"))
     scores = engine.push(frames)
     assert all(s.band is None for s in scores if 1.02 <= s.t < 1.98)
+
+
+@pytest.mark.parametrize("window_s", [0.001, 0.004])
+def test_a_timing_window_smaller_than_the_frame_spacing_still_finds_the_nearest_frame(window_s):
+    """Review 5 #7: a window narrower than the gap to the nearest frame used to raise All-NaN (nanargmin)."""
+    melody = Melody(reference_line([(0, 0.5), (-300, 0.5)]), "two")
+    target = melody.target(0.205, 69.0, window_s=window_s)          # halfway between frames 0.20 and 0.21
+    assert target.midi == pytest.approx(69.0, abs=0.01)
+
+
+
+# fast notes a major sixth apart, sung an octave low and 100 ms late (the window's edge): judged without the window,
+# half the frames are on the other note and Auto Octave went to -2 (0 % in tune)
+SIXTHS = [(-900, 0.1), (0, 0.1)] * 10
+
+
+def test_auto_octave_picks_the_shift_with_the_window_targets_scoring_uses():
+    """Review 5 #8: Auto Octave paired each frame with the Reference at its own song time, scoring with the Timing
+    window's target: the two disagreed for a late singer."""
+    frames = voice_following(SIXTHS, 0.1, cents_off=-1200)
+    s = score_take(frames, Melody(reference_line(SIXTHS), "sixths"))
+    assert s.octave_shift == -1
+    assert s.pct_in_tune >= 95.0
+
+
+def test_the_live_octave_uses_the_same_window_targets():
+    frames = voice_following(SIXTHS, 0.1, cents_off=-1200)
+    live = TakeEngine(Melody(reference_line(SIXTHS), "sixths")).push(frames)
+    assert [s.octave for s in live if s.cents is not None][-50:] == [-1] * 50

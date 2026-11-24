@@ -206,3 +206,27 @@ def test_a_loop_set_before_start_plays_from_the_lead_in_and_a_loop_set_while_pla
     assert [e.kind for e in events] == ["pass_started", "pass_ended", "loop_ended"] and player.loop is None
     player.start()                                     # off stays off for the next start
     assert streams[1].pull(1024)[0, 0] == 0.0
+
+
+def test_the_player_keeps_or_drops_its_loop_as_the_transport_decides():
+    """Review 5 #4: a Section past the song end is looped up to the song end; a seek beyond that ends the loop in
+    the Transport, and the player must not keep asking for it (it would come back at the next start)."""
+    from sing_pitch.playback.transport import Loop
+    song = np.zeros((48000, 2), np.float32)                       # 1 s
+    player, streams = player_with(song)
+    player.start()
+    player.set_loop(Loop(0.5, 2.0, lead_in_s=0.1))                # fitted: 0.5 .. 1.0
+    streams[0].pull(1024)
+    assert player.seek(0.9) is True and player.loop is not None
+    streams[0].pull(1024)
+    assert player.transport.loop is not None
+    short, streams = player_with(np.zeros((480000, 2), np.float32))
+    short.start()
+    short.set_loop(Loop(5.0, 5.05, lead_in_s=0.1))                # widened: 5.0 .. 5.2
+    streams[0].pull(1024)
+    assert short.seek(5.15) is True and short.loop is not None    # the Transport keeps looping: so does the player
+    streams[0].pull(1024)
+    assert short.transport.loop is not None
+    assert short.seek(6.0) is False and short.loop is None
+    streams[0].pull(1024)
+    assert short.transport.loop is None

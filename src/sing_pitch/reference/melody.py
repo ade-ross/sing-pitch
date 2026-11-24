@@ -156,8 +156,8 @@ class Melody:
             return Target(None)
         line_midi = float(self._line_midi[j])          # the line at t itself, whatever the window picks (Steadiness)
         if window_s > 0:
-            lo = int(np.searchsorted(self._t, t - window_s - 1e-9))
-            hi = int(np.searchsorted(self._t, t + window_s + 1e-9, side="right"))
+            lo = min(j, int(np.searchsorted(self._t, t - window_s - 1e-9)))     # always holds the nearest frame j,
+            hi = max(j + 1, int(np.searchsorted(self._t, t + window_s + 1e-9, side="right")))   # however small
             near = self._midi[lo:hi]
             ok = self.scored[lo:hi] & np.isfinite(near)
             j = lo + int(np.nanargmin(np.where(ok, np.abs(near - sung_midi), np.nan)))    # ok holds j itself
