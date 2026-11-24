@@ -29,14 +29,15 @@ COLUMNS = (
     "tendency", "steadiness_cents", "lowest_note", "highest_note", "n_voiced_frames", "n_scored_frames",
     "duration_s", "out_of_key_count", "latency_offset_s", "app_version", "section_name", "pass_index",
     "guide_vocal", "guide_gain", "speed_pct", "octave_mode", "note_mode", "min_note_s", "tolerance_cents",
-    "timing_window_s", "note_scoring",
+    "timing_window_s", "note_scoring", "timing_shift_ms",
 )
 # Columns added after the first release go at the END; a table with an older header is rewritten with the new one
 # on the next save, its old rows left empty in the new columns (no Section = not a Pass; an empty guide_vocal /
 # speed_pct reads as guide off / Speed 100, see row_settings; an empty octave_mode = one Octave shift per Take, how
 # Takes were scored before Octave shift per Phrase, and they re-score that way, see row_octave; an empty note_mode =
 # scored against the line, see row_notes; an empty tolerance_cents / timing_window_s / note_scoring = scored as before
-# #41: ±25 cents, no Timing window, Notes mode frame by frame, see row_config).
+# #41: ±25 cents, no Timing window, Notes mode frame by frame, see row_config; an empty timing_shift_ms = scored as #41
+# did, the closest reference within the Timing window per frame, not one timing shift per Phrase).
 
 GUIDE_STATES = ("off", "on", "mixed")
 
@@ -71,9 +72,10 @@ def row_octave(row: dict) -> OctaveSetting:
 
 
 def row_config(row: dict) -> ScoreConfig:
-    """How a saved Take was scored: its Tolerance (yellow reaching twice it), Timing window and whether Notes mode
-    scored per note. Rows saved before these columns read as ±25 cents, no Timing window, Notes frame by frame: the
-    rules they were scored with, so they re-score to their saved numbers."""
+    """How a saved Take was scored: its Tolerance (yellow reaching twice it), Timing window, whether Notes mode
+    scored per note and whether each Phrase got one timing shift (a timing_shift_ms cell, QA #44). Rows saved before
+    these columns read as ±25 cents, no Timing window, Notes frame by frame, per-frame window: the rules they were
+    scored with, so they re-score to their saved numbers."""
     def number(name: str, default: float) -> float:
         try:
             return float(row.get(name) or default)
@@ -82,7 +84,8 @@ def row_config(row: dict) -> ScoreConfig:
 
     return ScoreConfig.with_tolerance(number("tolerance_cents", DEFAULT_TOLERANCE_CENTS),
                                       timing_window_s=number("timing_window_s", 0.0),
-                                      notes_per_note=row.get("note_scoring") == "note")
+                                      notes_per_note=row.get("note_scoring") == "note",
+                                      timing_per_phrase=(row.get("timing_shift_ms") or "") != "")
 
 
 def row_notes(row: dict) -> tuple[str, float | None]:
@@ -131,6 +134,8 @@ def _row(record: TakeRecord) -> dict:
         "octave_mode": s.octave_mode, "note_mode": record.note_mode, "min_note_s": _length_cell(record),
         "tolerance_cents": record.config.green_cents, "timing_window_s": record.config.timing_window_s,
         "note_scoring": "note" if record.config.notes_per_note else "frame",
+        # per Phrase: always a number (0 when nothing was shifted), so the cell also says how it was scored
+        "timing_shift_ms": "" if not record.config.timing_per_phrase else round(s.timing_shift_ms or 0.0, 1),
     }
 
 

@@ -22,7 +22,8 @@ def test_a_singer_on_pitch_but_up_to_100_ms_early_or_late_still_scores_in_tune(o
     strict = score_take(frames, melody, STRICT, song_times).pct_in_tune
     windowed = score_take(frames, melody, song_times=song_times).pct_in_tune
     assert strict < 90.0                    # the old rule: timing scored as pitch
-    assert windowed >= (98.0 if abs(off_s) < 0.1 else 94.0)    # at the window's edge the 10 ms grid loses a little
+    # one shift per Phrase on a 10 ms grid (QA #44): a lag between two steps is up to 5 ms off at every note change
+    assert windowed >= (97.0 if abs(off_s) < 0.1 else 94.0)
 
 
 def test_the_window_is_100_ms_by_default():
@@ -82,7 +83,7 @@ def test_auto_octave_picks_the_shift_with_the_window_targets_scoring_uses():
     frames = voice_following(SIXTHS, 0.1, cents_off=-1200)
     s = score_take(frames, Melody(reference_line(SIXTHS), "sixths"))
     assert s.octave_shift == -1
-    assert s.pct_in_tune >= 95.0
+    assert s.pct_in_tune >= 90.0           # 0.1 s notes: the frames at each note change are the ones a grid step loses
 
 
 def test_the_live_octave_uses_the_same_window_targets():

@@ -18,6 +18,7 @@ _NOTES_CACHE_MAX = 64
 MIN_CONFIDENCE = 0.3      # RMVPE activation below this = reference unreliable (04-rmvpe notes)
 FILL_GAP_S = 0.12         # a dip shorter than this between two reliable frames is a consonant, not a stretch
 MIN_SCORED_S = 0.12       # a reliable run shorter than this is a blip: too short to judge a voice against
+INTERP_MAX_STEP = 1.0     # semitones: two neighbouring frames closer than this are read between (a glide, vibrato)
 
 
 def _runs(flags: np.ndarray) -> list[tuple[int, int, bool]]:
@@ -74,6 +75,7 @@ class Melody:
     the latency). Frames where the reference is unreliable, or outside the song, give an unscored Target."""
 
     kind: ClassVar[str] = "melody"
+    _interpolate: ClassVar[bool] = True     # a timing shift reads the line between frames; a NotesMelody's bars: not
 
     def __init__(self, line: ReferenceLine, song_id: str, scored: np.ndarray | None = None):
         self.line = line
@@ -84,6 +86,11 @@ class Melody:
         self.scored = scored_mask(line) if scored is None else np.asarray(scored, dtype=bool)
         hop = float(np.median(np.diff(self._t))) if len(self._t) > 1 else 0.01
         self._tolerance = 1.5 * hop
+        # the scored run each frame is in, [start, end): a timing shift never moves a frame across an Unscored stretch
+        self._run_lo = np.zeros(len(self._t), dtype=np.int64)
+        self._run_hi = np.zeros(len(self._t), dtype=np.int64)
+        for a, b, _ in _runs(self.scored) if len(self._t) else ():
+            self._run_lo[a:b], self._run_hi[a:b] = a, b
 
     @classmethod
     def from_song(cls, song) -> Melody:
@@ -143,10 +150,52 @@ class Melody:
             notes = _NOTES_CACHE[key] = segment_notes(self._t, self._midi, self.scored, min_note_s)
         return NotesMelody(self, float(min_note_s), notes)
 
-    def target(self, t: float, sung_midi: float, window_s: float = 0.0) -> Target:
-        """The line at song time t. window_s > 0 (the Timing window): of the scored frames within window_s of t, the one
-        whose pitch is closest to sung_midi. Whether t is scored at all does not depend on the window: a time in an
-        Unscored stretch, or outside the line, stays unscored."""
+    def _shifted(self, j: np.ndarray, song_t: np.ndarray, lag_s) -> np.ndarray:
+        """The frame a voice lag_s late (negative: early) answers at song time song_t, whose own nearest frame j is
+        scored: the frame nearest song_t - lag_s, held at the edge of j's scored run so the shift never reaches into an
+        Unscored stretch or past the line."""
+        shifted, _ = self._frames_at(np.asarray(song_t, dtype=np.float64) - lag_s)
+        return np.clip(shifted, self._run_lo[j], self._run_hi[j] - 1)
+
+    def _midi_at_lag(self, j: np.ndarray, song_t: np.ndarray, lag_s) -> tuple[np.ndarray, np.ndarray]:
+        """(MIDI, nearest frame) of the scoring line at song_t - lag_s, inside j's scored run (see _shifted). The line
+        is read between its frames (linear) where they are within INTERP_MAX_STEP of each other, so a shift is not
+        rounded to the 10 ms frame grid; across a bigger jump (a note change) and on a NotesMelody's bars it is read at
+        the nearest frame."""
+        jj = self._shifted(j, song_t, lag_s)
+        if not self._interpolate:
+            return self._midi[jj], jj
+        lo, hi = self._run_lo[j], self._run_hi[j] - 1
+        x = np.clip(np.asarray(song_t, dtype=np.float64) - lag_s, self._t[lo], self._t[hi])
+        right = np.clip(np.searchsorted(self._t, x), lo, hi)
+        left = np.clip(right - 1, lo, hi)
+        span = self._t[right] - self._t[left]
+        with np.errstate(invalid="ignore", divide="ignore"):
+            w = np.where(span > 0, (x - self._t[left]) / span, 0.0)
+        step = self._midi[right] - self._midi[left]
+        glide = np.abs(step) <= INTERP_MAX_STEP           # a jump between two frames is a note change: nearest frame
+        return np.where(glide, self._midi[left] + w * step, self._midi[jj]), jj
+
+    def shifted_midi(self, song_t, lags_s) -> np.ndarray:
+        """(len(song_t), len(lags_s)) MIDI of the scoring line (Notes mode: the bars) for a voice lag_s late at each
+        song time; NaN where the time itself is not scored (that does not depend on the lag). What a Phrase's timing
+        shift is chosen from (take_engine/octave.py); target(t, ..., lag_s=) scores at the same frame."""
+        song_t = np.atleast_1d(np.asarray(song_t, dtype=np.float64))
+        lags = np.asarray(lags_s, dtype=np.float64)
+        out = np.full((len(song_t), len(lags)), np.nan)
+        if not len(self._t) or not len(song_t):
+            return out
+        j, inside = self._frames_at(song_t)
+        ok = inside & self.scored[j] & np.isfinite(self._midi[j])
+        if ok.any():
+            out[ok] = self._midi_at_lag(j[ok, None], song_t[ok, None], lags[None, :])[0]
+        return out
+
+    def target(self, t: float, sung_midi: float, window_s: float = 0.0, lag_s: float | None = None) -> Target:
+        """The line at song time t. lag_s (the Phrase's timing shift, + = the voice is late): the line at t - lag_s,
+        strictly (see shifted_midi). Else window_s > 0 (the Timing window as #41 scored it): of the scored frames within
+        window_s of t, the one whose pitch is closest to sung_midi. Whether t is scored at all does not depend on the
+        shift or the window: a time in an Unscored stretch, or outside the line, stays unscored."""
         if not len(self._t):
             return Target(None)
         j = int(np.searchsorted(self._t, t))
@@ -155,6 +204,11 @@ class Melody:
         if abs(self._t[j] - t) > self._tolerance or not self.scored[j] or not np.isfinite(self._midi[j]):
             return Target(None)
         line_midi = float(self._line_midi[j])          # the line at t itself, whatever the window picks (Steadiness)
+        if lag_s is not None:
+            midi, jj = self._midi_at_lag(np.array([j]), np.array([t]), lag_s)
+            if not np.isfinite(midi[0]):
+                return Target(None)
+            return self._target_at(int(jj[0]), line_midi, float(midi[0]))
         if window_s > 0:
             lo = min(j, int(np.searchsorted(self._t, t - window_s - 1e-9)))     # always holds the nearest frame j,
             hi = max(j + 1, int(np.searchsorted(self._t, t + window_s + 1e-9, side="right")))   # however small
@@ -163,13 +217,15 @@ class Melody:
             j = lo + int(np.nanargmin(np.where(ok, np.abs(near - sung_midi), np.nan)))    # ok holds j itself
         return self._target_at(j, line_midi)
 
-    def _target_at(self, j: int, line_midi: float) -> Target:
-        return Target(float(self._midi[j]), line_midi=line_midi)
+    def _target_at(self, j: int, line_midi: float, midi: float | None = None) -> Target:
+        return Target(float(self._midi[j]) if midi is None else midi, line_midi=line_midi)
 
 
 class NotesMelody(Melody):
     """A Melody in Notes mode: its line is the notes' exact semitones (see notes.py), so the target, the drawing, the
     replay and the re-score all use the bars. Unscored stretches are the Melody's own."""
+
+    _interpolate: ClassVar[bool] = False
 
     def __init__(self, melody: Melody, min_note_s: float, notes: list[Note]):
         super().__init__(melody.line, melody.song_id, melody.scored)
@@ -180,7 +236,7 @@ class NotesMelody(Melody):
     def notes(self, min_note_s: float) -> NotesMelody:
         return Melody(self.line, self.song_id, self.scored).notes(min_note_s)
 
-    def _target_at(self, j: int, line_midi: float) -> Target:
+    def _target_at(self, j: int, line_midi: float, midi: float | None = None) -> Target:
         return Target(float(self._midi[j]), line_midi=line_midi, note=int(self._note_index[j]))
 
     def note_spans_s(self) -> tuple[np.ndarray, np.ndarray]:

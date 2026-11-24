@@ -64,14 +64,20 @@ def test_a_row_saved_before_tolerance_reads_as_25_cents_and_no_timing_window():
 
 
 def test_a_new_row_gives_back_its_config():
-    config = row_config({"tolerance_cents": "35.0", "timing_window_s": "0.1", "note_scoring": "note"})
+    config = row_config({"tolerance_cents": "35.0", "timing_window_s": "0.1", "note_scoring": "note",
+                         "timing_shift_ms": "40.0"})
     assert config == ScoreConfig.with_tolerance(35)
+
+
+def test_a_row_saved_by_41_reads_as_the_per_frame_timing_window():
+    config = row_config({"tolerance_cents": "35.0", "timing_window_s": "0.1", "note_scoring": "note"})
+    assert config == ScoreConfig.with_tolerance(35, timing_per_phrase=False)
 
 
 def test_the_new_columns_go_at_the_end_of_the_table():
     from sing_pitch.take_store import COLUMNS
 
-    assert COLUMNS[-3:] == ("tolerance_cents", "timing_window_s", "note_scoring")
+    assert COLUMNS[-4:] == ("tolerance_cents", "timing_window_s", "note_scoring", "timing_shift_ms")
 
 
 # --- History --------------------------------------------------------------------------------------------------------

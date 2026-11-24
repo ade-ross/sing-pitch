@@ -33,6 +33,7 @@ class TakeSummary:
     octave_mode: str = ""                    # ticket #17: "auto" | "pinned"; "" = one shift per Take (old Takes, Nearest note, Key)
     out_of_key_count: int = 0                # Key Takes: out-of-key notes sung (a held note counts once)
     octave_phrases: tuple[tuple[int, int], ...] = ()   # Auto Takes: (shift, Phrases) per shift used; not saved in takes.csv
+    timing_shift_ms: float | None = None     # QA #44, Melody: median timing shift of the scored frames (+ = sung late)
 
 
 @dataclass(frozen=True)
