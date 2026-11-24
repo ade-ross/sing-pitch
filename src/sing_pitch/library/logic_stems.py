@@ -61,8 +61,18 @@ def stems_key(files: list[Path]) -> str:
     return "stems:" + h.hexdigest()
 
 
+def _info(path: Path):
+    try:
+        return sf.info(str(path))
+    except (sf.LibsndfileError, RuntimeError) as e:
+        raise StemsError(f"cannot read {path.name}: {getattr(e, 'error_string', None) or e}") from e
+
+
 def _read(path: Path, sr: int, channels: int) -> np.ndarray:
-    x, file_sr = sf.read(str(path), dtype="float32", always_2d=True)
+    try:
+        x, file_sr = sf.read(str(path), dtype="float32", always_2d=True)
+    except (sf.LibsndfileError, RuntimeError) as e:
+        raise StemsError(f"cannot read {path.name}: {getattr(e, 'error_string', None) or e}") from e
     if file_sr != sr:
         x = soxr.resample(x, file_sr, sr)
     if x.shape[1] == 1 and channels == 2:
@@ -74,7 +84,7 @@ def _read(path: Path, sr: int, channels: int) -> np.ndarray:
 
 def write_stems(lead: Path, others: list[Path], vocals_out: Path, backing_out: Path) -> None:
     """Write vocals.wav (the lead as it is) and backing.wav (a ready-made backing file, else every other stem summed)."""
-    info = sf.info(str(lead))
+    info = _info(lead)
     sr = info.samplerate
     vocals = _read(lead, sr, min(info.channels, 2))
     ready = [p for p in others if _is_ready_backing(p)]

@@ -55,3 +55,44 @@ def test_downloading_without_the_import_extra_raises_the_friendly_error(tmp_path
     monkeypatch.setattr(adapters.shutil, "which", lambda _name: "/usr/bin/ffmpeg")
     with pytest.raises(SongImportError, match="uv sync --extra import"):
         adapters.YtDlpDownloader().download("https://youtu.be/abc12345678", tmp_path)
+
+
+def corrupt_stems(tmp_path, which):
+    import numpy as np
+    import soundfile as sf
+
+    folder = tmp_path / "corrupt"
+    folder.mkdir()
+    good = np.zeros((4800, 1), np.float32)
+    for name in ("Vocals.wav", "Bass.wav"):
+        if name == which:
+            (folder / name).write_bytes(b"not a wav at all")
+        else:
+            sf.write(str(folder / name), good, 48000)
+    return folder
+
+
+def test_a_corrupt_vocal_stem_is_one_error_line_and_exit_1_without_a_traceback(tmp_path, capsys):
+    folder = corrupt_stems(tmp_path, "Vocals.wav")
+    assert import_main([str(folder)], make_importer=fakes(tmp_path / "home")) == 1
+    err = capsys.readouterr().err.strip().splitlines()
+    assert len(err) == 1 and err[0].startswith("error: ") and "Vocals.wav" in err[0]
+    assert Library(tmp_path / "home").list_songs() == []
+
+
+def test_a_corrupt_other_stem_is_reported_the_same_way(tmp_path, capsys):
+    folder = corrupt_stems(tmp_path, "Bass.wav")
+    assert import_main([str(folder)], make_importer=fakes(tmp_path / "home")) == 1
+    err = capsys.readouterr().err.strip().splitlines()
+    assert len(err) == 1 and err[0].startswith("error: ") and "Bass.wav" in err[0]
+
+
+def test_a_truncated_stem_is_reported_the_same_way(tmp_path, capsys):
+    import soundfile as sf
+
+    folder = corrupt_stems(tmp_path, "none")
+    whole = (folder / "Vocals.wav").read_bytes()
+    (folder / "Vocals.wav").write_bytes(whole[:30])             # the header is cut off
+    assert import_main([str(folder)], make_importer=fakes(tmp_path / "home")) == 1
+    err = capsys.readouterr().err.strip().splitlines()
+    assert len(err) == 1 and err[0].startswith("error: ")
