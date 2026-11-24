@@ -13,6 +13,8 @@ from dataclasses import dataclass
 from pathlib import Path
 from typing import Callable
 
+from .library import BACKING
+
 TEMPO = "tempo.json"
 DETECT_SR = 22050        # the beat tracker's own rate: tempo needs no more
 
@@ -24,14 +26,15 @@ class Tempo:
 
 
 class TempoUnavailable(Exception):
-    """No beat tracker is installed (the `import` extra brings one)."""
+    """No tempo can be found: no beat tracker is installed (the `import` extra brings one), or it found no beat."""
 
 
 TempoDetector = Callable[[Path], Tempo]
 
 
 def detect_tempo(backing: Path) -> Tempo:
-    """Beat-track the Backing (mono, 22.05 kHz). Raises TempoUnavailable without librosa."""
+    """Beat-track the Backing (mono, 22.05 kHz). Raises TempoUnavailable without librosa or when it finds no beat
+    (0 BPM)."""
     try:
         import librosa
     except ImportError as exc:
@@ -39,6 +42,8 @@ def detect_tempo(backing: Path) -> Tempo:
     y, sr = librosa.load(str(backing), sr=DETECT_SR, mono=True)
     bpm, beats = librosa.beat.beat_track(y=y, sr=sr, units="time")
     bpm = float(bpm[0] if hasattr(bpm, "__len__") else bpm)
+    if not math.isfinite(bpm) or bpm <= 0:
+        raise TempoUnavailable(f"no beat found ({bpm} BPM)")
     return Tempo(round(bpm, 2), tuple(round(float(b), 4) for b in beats))
 
 
@@ -64,12 +69,18 @@ def save_tempo(song_dir: Path, tempo: Tempo) -> None:
 
 def song_tempo(song_dir: Path, detector: TempoDetector = detect_tempo) -> Tempo | None:
     """The song's tempo: stored, else detected from its Backing now and stored. None = unknown (no beat tracker, or
-    it failed): the Count-in then needs the BPM typed in."""
+    it failed or found no beat): the Count-in then needs the BPM typed in. A tempo that cannot be stored is still
+    returned."""
     if (tempo := load_tempo(song_dir)) is not None:
         return tempo
     try:
-        tempo = detector(Path(song_dir) / "backing.wav")
+        tempo = detector(Path(song_dir) / BACKING)
     except Exception:
         return None
-    save_tempo(song_dir, tempo)
+    if not math.isfinite(tempo.bpm) or tempo.bpm <= 0:
+        return None
+    try:
+        save_tempo(song_dir, tempo)
+    except OSError:         # not stored: it is found again next time, but known now
+        pass
     return tempo
