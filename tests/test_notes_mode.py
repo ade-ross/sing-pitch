@@ -37,6 +37,11 @@ def test_a_short_minimum_keeps_a_two_note_line_as_two_notes():
     assert [(n.midi, n.start, n.end) for n in notes] == [(E4, 0, 50), (G4, 50, 100)]
 
 
+def test_a_blip_inside_a_held_note_leaves_one_note_not_two_of_the_same_pitch():
+    line = reference_line([(-500, 0.5), (-400, 0.05), (-500, 0.5), (-200, 0.5)])
+    assert [(n.midi, n.start, n.end) for n in notes_of(line, 0.2)] == [(E4, 0, 105), (G4, 105, 155)]
+
+
 def test_a_long_minimum_merges_them_into_one():
     notes = notes_of(reference_line([(-500, 0.5), (-200, 0.7)]), 2.0)
     assert [n.midi for n in notes] == [G4]

@@ -4,7 +4,7 @@ segment_notes is a pure function of (frame times, reference MIDI, scored mask, M
 are split into reference Phrases (scored runs separated by a pause of PHRASE_GAP_S or more); inside a Phrase each scored
 frame is rounded to its semitone, runs of the same semitone are the first notes, and then the shortest note under the
 Minimum note length is merged into a neighbour (the one nearer in pitch; ties: the longer, then the earlier) until none
-is left that short, or the Phrase is one note. A note's semitone is the one held longest over its frames (time-weighted
+is left that short, or the Phrase is one note; two neighbours left on the same semitone become one note. A note's semitone is the one held longest over its frames (time-weighted
 mode, ties to the one sung first), never the mean: a slide E-F-F#-G held on G is a G. Notes never cross a Phrase, and an
 Unscored stretch inside a note stays unscored (only scored frames take the note's semitone). PER_PHRASE (the far end of
 the slider) gives one note per Phrase."""
@@ -73,6 +73,10 @@ def _phrase_notes(semis: np.ndarray, min_frames: float) -> list[tuple[int, int, 
         lo, hi = min(i, j), max(i, j)
         segs[lo] = [segs[lo][0], segs[hi][1], _merge(segs[lo][2], segs[hi][2])]
         del segs[hi]
+        for k in (lo + 1, lo):      # a blip merged away: the held note on either side of it is one note again
+            if 0 < k < len(segs) and _mode(segs[k - 1][2]) == _mode(segs[k][2]):
+                segs[k - 1] = [segs[k - 1][0], segs[k][1], _merge(segs[k - 1][2], segs[k][2])]
+                del segs[k]
     return [(a, b, _mode(h)) for a, b, h in segs]
 
 
