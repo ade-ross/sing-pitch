@@ -104,15 +104,17 @@ def test_a_failed_stretch_says_so_and_goes_back_to_the_speed_that_plays(qtbot, t
     assert "out of memory" in win.speed_label.text() and win.speed_box.value() == 100
 
 
-def test_the_reference_line_is_drawn_stretched_with_the_speed(qtbot, tmp_path):
+def test_the_reference_line_is_drawn_through_the_song_clock_so_it_stretches_with_the_speed(qtbot, tmp_path):
     backings = []
     win, song = melody_window(qtbot, tmp_path, CountingStretcher(), backings)
     win.speed_box.setValue(50)
     qtbot.waitUntil(lambda: (song.dir / "speed" / "50" / "backing.wav").exists() and win.speed_label.text() == "",
                     timeout=5000)
-    win.toggle()
     win._melody_latency = 0.0
+    win.toggle()
+    backings[-1].song_log.append(0, 0.0, 0.5)                 # the player at 50 %: half a song second per output second
     win._draw_melody(10.0)
-    x, _ = win._ref_curve.getData()
-    assert abs(x[-1] - 2.0 * 2.0) < 0.05 + 0.02 * 2 and x[0] >= 0.0         # a 2 s melody lasts 4 s of output at 50 %
+    x, midi = win._ref_curve.getData()
+    drawn = x[np.isfinite(midi)]
+    assert abs(drawn[-1] - 2.0 * 2.0) < 0.05 + 0.02 * 2 and drawn[0] >= 0.0   # a 2 s melody lasts 4 s of output at 50 %
     win.toggle()

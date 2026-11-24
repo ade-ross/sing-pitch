@@ -4,16 +4,17 @@ is a thin shell that asks it for one block per callback.
 Two clocks meet here. The OUTPUT clock counts frames handed to the sound card (output_s = frames / rate); it runs
 on as long as the stream runs, paused or not. SONG time is the position in the song in original-tempo seconds. Each
 block reports the song time of every frame it rendered, and the SongTimeLog keeps the whole mapping so the Take
-engine can ask "which song time was playing at output time x?" after any pause (later: seek, loop, Speed).
+engine can ask "which song time was playing at output time x?" after any pause, seek or Speed change (later: loop).
 
 Speed: the Transport plays arrays that were stretched beforehand (playback/stretch.py). Song time stays in original
 seconds: at Speed s each output frame advances the song by s frames, and the log records rate = s.
 
-Control calls (play, pause, set_gains, set_speed) may come from any thread: each is one attribute assignment, read by
+Control calls (play, pause, set_gains, seek, set_speed) may come from any thread: each is one attribute assignment, read by
 render() at the start of the next block."""
 from __future__ import annotations
 
 import bisect
+from collections import deque
 from dataclasses import dataclass
 
 import numpy as np
@@ -25,7 +26,8 @@ from .mix import Gains, mix_block
 @dataclass(frozen=True)
 class TransportEvent:
     """Something that changed the song-time mapping, at the first output frame it applies to.
-    Kinds now: "paused", "resumed", "speed_changed". Later tickets add "jumped", "pass_started", "pass_ended"."""
+    Kinds now: "paused", "resumed", "speed_changed", "jumped" (a seek: song_t is where the song goes on). Later
+    tickets add "pass_started", "pass_ended"."""
 
     kind: str
     output_s: float
@@ -104,6 +106,7 @@ class Transport:
         self._want_playing = True           # requested (any thread)
         self._playing = True                # in effect (render thread only)
         self._n = 0                         # song frame of the next frame to render
+        self._seeks: deque[float] = deque()  # requested song times (any thread); the last one wins
         self.log = SongTimeLog(sample_rate)
 
     @staticmethod
@@ -121,6 +124,11 @@ class Transport:
 
     def set_gains(self, backing: float, vocal: float) -> None:
         self._gains = (float(backing), float(vocal))
+
+    def seek(self, song_s: float) -> None:
+        """Go on from this song time (original seconds, clamped to the song), from the start of the next block,
+        playing or paused, at whatever Speed is playing."""
+        self._seeks.append(float(song_s))
 
     def set_speed(self, speed: float, backing: np.ndarray, vocal: np.ndarray | None = None) -> None:
         """Play from the next block at `speed` (1.0 = original), with the Backing and Guide vocal already stretched
@@ -167,6 +175,12 @@ class Transport:
                 if self._playing:
                     fade_from = (self._audio, self._vocal, self._speed)
             self._speed, self._audio, self._vocal = swap
+        if self._seeks:   # after a Speed swap, so a crossfade in this block fades both Speeds at the new position
+            target = None
+            while self._seeks:
+                target = self._seeks.popleft()
+            self._n = min(max(0, round(target * self._sr)), self._song_frames)
+            events += (TransportEvent("jumped", self.log.rendered_s, self.position_s),)
         end = self._gains
         if not self._playing:
             self.log.append(frames, None)

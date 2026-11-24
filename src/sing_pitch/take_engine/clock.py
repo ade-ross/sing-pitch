@@ -4,6 +4,8 @@ from __future__ import annotations
 
 from typing import Protocol, Sequence
 
+import numpy as np
+
 from ..pitch import PitchFrame
 
 
@@ -42,6 +44,29 @@ class LogClock:
 
     def __call__(self, t: float) -> float | None:
         return self._log.song_time(t - self.offset_s)
+
+
+class SampledClock:
+    """A saved Take's own clock: the song time of each of its frames (None = paused), read between and just beyond
+    them. Draws the Reference on a replay of a Take that was jumped into or paused."""
+
+    def __init__(self, t: Sequence[float], song_times: Sequence[float | None]):
+        self._t = np.asarray(t, dtype=np.float64)
+        self._song = np.array([np.nan if s is None else s for s in song_times], dtype=np.float64)
+        valid = np.flatnonzero(np.isfinite(self._song))
+        self.offset_s = float(self._t[valid[0]] - self._song[valid[0]]) if len(valid) else 0.0
+
+    def __call__(self, t: float) -> float | None:
+        if not len(self._t):
+            return None
+        if t <= self._t[0]:
+            edge, at = self._song[0], self._t[0]
+        elif t >= self._t[-1]:
+            edge, at = self._song[-1], self._t[-1]
+        else:
+            value = float(np.interp(t, self._t, self._song))
+            return None if np.isnan(value) else value
+        return None if np.isnan(edge) else float(edge + (t - at))
 
 
 def linear_song_times(frames: Sequence[PitchFrame], offset_s: float = 0.0) -> list[float]:

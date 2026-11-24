@@ -1,7 +1,7 @@
 """Melody sync through the song-time log: a voice that exactly follows what it heard, delayed by the calibrated
 latency, is ~100 % in tune however the song was played (linear, or with a pause mid-Take). The Transport core is
 rendered by hand, block by block, as the output stream would; the voice is built from the play/pause SCHEDULE,
-not from the log, so the log is checked against an independent source."""
+not from the log, so the log is checked against an independent source. Also seeks, Speed changes, and both."""
 import numpy as np
 from frames import HOP, hz_at
 from melody_helpers import reference_line
@@ -39,10 +39,14 @@ def voice(song_time_heard, seconds):
     return out
 
 
-def render(transport, seconds, pause_at=None, pause_for=0.0):
-    """Drive the Transport like the output callback for `seconds` of output, pausing at output time pause_at."""
-    t, paused_until = 0.0, None
+def render(transport, seconds, pause_at=None, pause_for=0.0, seek_at=None, seek_to=0.0):
+    """Drive the Transport like the output callback for `seconds` of output, pausing at output time pause_at and
+    seeking to song time seek_to at output time seek_at."""
+    t, paused_until, sought = 0.0, None, False
     while t < seconds:
+        if seek_at is not None and t >= seek_at and not sought:
+            transport.seek(seek_to)
+            sought = True
         if pause_at is not None and t >= pause_at and paused_until is None:
             transport.pause()
             paused_until = t + pause_for
@@ -109,6 +113,30 @@ def test_a_take_with_a_pause_saves_its_song_times_and_rescores_to_the_same_numbe
     assert again.song_times == saved.song_times
 
 
+def test_a_seek_mid_take_still_scores_about_100_in_tune_and_splits_into_two_takes_that_both_do():
+    tr = Transport(silent_song(), sample_rate=SR)
+    render(tr, 6.0, seek_at=2.0, seek_to=0.6)
+    # the schedule, independently of the log: the seek took effect at the first block boundary at or after 2.0 s
+    p0 = np.ceil(2.0 * SR / BLOCK) * BLOCK / SR
+
+    def heard(out_s):
+        return out_s if out_s < p0 else 0.6 + (out_s - p0)
+
+    frames = voice(heard, 5.0)
+    clock = LogClock(tr.log, LATENCY, OUT_AT_INPUT_ZERO)
+    whole = take(clock, frames).summary
+    assert whole.n_scored > 250 and whole.pct_in_tune >= 98.0 and whole.median_abs_cents < 1.0
+
+    cut = p0 + LATENCY - OUT_AT_INPUT_ZERO         # input time of the first voice frame that answers the jump
+    before, after = take(clock, [f for f in frames if f.t < cut]), take(clock, [f for f in frames if f.t >= cut])
+    for part in (before, after):
+        assert part.summary.n_scored > 80 and part.summary.pct_in_tune >= 98.0
+
+    # the old way, one constant offset for the whole Take, is lost after the jump
+    old = take(LinearClock(LATENCY - OUT_AT_INPUT_ZERO), frames)
+    assert old.summary.pct_in_tune < 70.0
+
+
 # --- Speed: the voice follows the reference at the chosen Speed, and across a change of Speed ------------------------
 
 def silent_stretched(speed):
@@ -158,3 +186,72 @@ def test_a_speed_change_mid_take_still_scores_about_100_in_tune():
     s = take(LogClock(tr.log, LATENCY, OUT_AT_INPUT_ZERO), frames).summary
     assert s.n_scored > 250 and s.pct_in_tune >= 98.0 and s.median_abs_cents < 1.0
     assert take(LinearClock(LATENCY - OUT_AT_INPUT_ZERO), frames).summary.pct_in_tune < 70.0
+
+
+# --- Seek and Speed together ----------------------------------------------------------------------------------------
+
+def drive(transport, seconds, actions):
+    """Drive the Transport for `seconds` of output; actions = [(output_s, call)] made before the first block at or
+    after output_s. Returns the output time each action took effect at, in order."""
+    pending, t, took = sorted(actions, key=lambda a: a[0]), 0.0, []
+    while t < seconds:
+        while pending and t >= pending[0][0]:
+            pending.pop(0)[1]()
+            took.append(t)
+        transport.render(BLOCK)
+        t += BLOCK / SR
+    return took
+
+
+def split_takes(clock, frames, out_cut):
+    cut = out_cut + LATENCY - OUT_AT_INPUT_ZERO         # input time of the first voice frame that answers the jump
+    return take(clock, [f for f in frames if f.t < cut]), take(clock, [f for f in frames if f.t >= cut])
+
+
+def test_a_seek_at_70_percent_and_a_speed_change_after_a_seek_keep_each_take_about_100_in_tune():
+    # a seek while at 70 %: the song goes on at 70 % from the new place
+    tr = Transport(silent_song(), sample_rate=SR)
+    tr.set_speed(0.7, silent_stretched(0.7))
+    (p0,) = drive(tr, 8.0, [(2.0, lambda: tr.seek(0.6))])
+
+    def heard(out_s):
+        return 0.7 * out_s if out_s < p0 else 0.6 + 0.7 * (out_s - p0)
+
+    frames = voice(heard, 7.0)
+    for part in split_takes(LogClock(tr.log, LATENCY, OUT_AT_INPUT_ZERO), frames, p0):
+        assert part.summary.n_scored > 80 and part.summary.pct_in_tune >= 98.0 and part.summary.median_abs_cents < 1.0
+
+    # a seek at 100 %, then 70 % inside the second Take
+    tr = Transport(silent_song(), sample_rate=SR)
+    p0, p1 = drive(tr, 8.0, [(1.5, lambda: tr.seek(0.3)), (3.0, lambda: tr.set_speed(0.7, silent_stretched(0.7)))])
+
+    def heard2(out_s):
+        if out_s < p0:
+            return out_s
+        if out_s < p1:
+            return 0.3 + (out_s - p0)
+        return 0.3 + (p1 - p0) + 0.7 * (out_s - p1)
+
+    frames = voice(heard2, 7.0)
+    for part in split_takes(LogClock(tr.log, LATENCY, OUT_AT_INPUT_ZERO), frames, p0):
+        assert part.summary.n_scored > 80 and part.summary.pct_in_tune >= 98.0 and part.summary.median_abs_cents < 1.0
+
+
+def test_a_seek_in_the_crossfade_block_of_a_speed_change_does_not_glitch_song_time():
+    tr = Transport(silent_song(), sample_rate=SR)
+    tr.render(BLOCK)
+    tr.set_speed(0.7, silent_stretched(0.7))
+    tr.seek(2.0)
+    fade = tr.render(BLOCK)                              # crossfades the Speeds AND starts at the new place
+    assert [e.kind for e in fade.events] == ["speed_changed", "jumped"]
+    assert np.allclose(fade.song_t, 2.0 + 0.7 * np.arange(BLOCK) / SR)
+    nxt = tr.render(BLOCK)
+    assert np.allclose(nxt.song_t, 2.0 + 0.7 * (BLOCK + np.arange(BLOCK)) / SR)      # no step, no repeat
+    out_fade = BLOCK / SR
+    assert np.isclose(tr.log.song_time(out_fade + 0.01), 2.0 + 0.7 * 0.01)
+    # a seek in the block right after the change (the old Speed may still be ringing out) is just as clean
+    tr.set_speed(1.0, silent_song())
+    tr.render(BLOCK)
+    tr.seek(1.0)
+    after = tr.render(BLOCK)
+    assert [e.kind for e in after.events] == ["jumped"] and np.allclose(after.song_t, 1.0 + np.arange(BLOCK) / SR)

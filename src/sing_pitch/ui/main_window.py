@@ -23,8 +23,9 @@ from ..playback.outputs import OutputKind, default_output_name, headphone_warnin
 from ..reference import Band, Key, Melody, NearestNote, Reference
 from ..replay import Replay
 from ..settings import DEFAULT_OUTPUT, Settings
-from ..take_engine import FrameScore, TakeRecord, replay_scores
+from ..take_engine import FrameScore, LinearClock, SampledClock, SongClock, TakeRecord, replay_scores
 from ..take_store import last_take_id, load_frames, saved_latency, saved_reference, saved_song_times
+from .timeline import Timeline
 from .speed_prep import SpeedPreparer
 
 WINDOW_S = 10.0       # seconds of line on screen
@@ -32,6 +33,8 @@ TICK_MS = 33          # ~30 Hz redraw
 SPEED_MIN, SPEED_MAX, SPEED_STEP = 50, 120, 5     # Speed in percent of the original
 SPEED_DEBOUNCE_MS = 400   # +/- pressed several times: stretch only the Speed he stops on
 END_GRACE_S = 1.0     # Melody: keep listening this long after the Backing ends
+JUMP_S = 5.0          # the arrow keys jump this far
+DRAW_STEP_S = 0.01    # the reference line is drawn at this resolution on the voice clock
 HALF_RANGE = 8        # semitones shown above and below the centre
 BAND_COLOUR = {Band.GREEN: "#2ecc71", Band.YELLOW: "#f1c40f", Band.RED: "#e74c3c"}
 UNSCORED_COLOUR = "#8a8a8a"   # sung where the Reference has nothing reliable: shown, never scored
@@ -114,6 +117,8 @@ class MainWindow(QtWidgets.QWidget):
         self._settings = Settings.load(self._home)
         self._melody: Melody | None = None           # drawn beside the live line during Melody Takes and replays
         self._melody_latency = 0.0
+        self._replay_clock: SongClock | None = None  # the replayed Take's own song times, for drawing the reference
+        self._paused = False
         self._runner: LiveRunner | None = None
         self._replay: Replay | None = None
         self._replay_started = 0.0
@@ -138,6 +143,17 @@ class MainWindow(QtWidgets.QWidget):
         self.backing_slider = _volume_slider("Backing volume")
         for w in (self.guide_box, self.guide_slider, self.backing_slider):
             (w.toggled if w is self.guide_box else w.valueChanged).connect(self._apply_gains)
+        self.pause_button = QtWidgets.QPushButton("Pause")
+        self.pause_button.setToolTip("Space. Left/Right arrows jump 5 s; click the timeline to jump anywhere.")
+        self.pause_button.setEnabled(False)
+        self.pause_button.clicked.connect(self.toggle_pause)
+        self.timeline = Timeline()
+        self.timeline.seek_requested.connect(self.seek)
+        for key, action in ((QtCore.Qt.Key_Space, self.toggle_pause), (QtCore.Qt.Key_Left, self.jump_back),
+                            (QtCore.Qt.Key_Right, self.jump_forward)):    # bound methods: a lambda keeps self alive
+            shortcut = QtGui.QShortcut(QtGui.QKeySequence(key), self)
+            shortcut.setContext(QtCore.Qt.WindowShortcut)
+            shortcut.activated.connect(action)
         self.speed_box = QtWidgets.QSpinBox()
         self.speed_box.setRange(SPEED_MIN, SPEED_MAX)
         self.speed_box.setSingleStep(SPEED_STEP)
@@ -158,6 +174,7 @@ class MainWindow(QtWidgets.QWidget):
         self.headphones_button = QtWidgets.QPushButton("These are headphones")
         self.headphones_button.clicked.connect(self.confirm_headphones)
         self.reference_box.currentTextChanged.connect(self._reference_changed)
+        self.song_box.currentIndexChanged.connect(self._preview_song)
         self._reference_changed()
         self.button = QtWidgets.QPushButton("Start")
         self.button.clicked.connect(self.toggle)
@@ -195,7 +212,7 @@ class MainWindow(QtWidgets.QWidget):
         top.addWidget(self.note_label)
         mix = QtWidgets.QHBoxLayout()
         for w in (self.guide_box, self.guide_slider, QtWidgets.QLabel("Backing"), self.backing_slider,
-                  QtWidgets.QLabel("Speed"), self.speed_box, self.speed_label):
+                  self.pause_button, QtWidgets.QLabel("Speed"), self.speed_box, self.speed_label):
             mix.addWidget(w)
         mix.addStretch(1)
         warn = QtWidgets.QHBoxLayout()
@@ -206,6 +223,7 @@ class MainWindow(QtWidgets.QWidget):
         layout.addLayout(mix)
         layout.addLayout(warn)
         layout.addWidget(self.plot_widget, 1)
+        layout.addWidget(self.timeline)
         layout.addWidget(self.summary_label)
 
         self._timer = QtCore.QTimer(self)
@@ -237,10 +255,50 @@ class MainWindow(QtWidgets.QWidget):
         self.key_box.setEnabled(is_key)
         self.drone_box.setEnabled(is_key)
         self.song_box.setEnabled(is_melody)
+        self._preview_song()
         for w in (self.guide_box, self.guide_slider, self.backing_slider, self.speed_box):
             w.setEnabled(is_melody)
         self.update_output_warning()
         self._speed_changed()
+
+    def _preview_song(self, *_) -> None:
+        """Idle with Melody chosen: the Timeline shows the chosen song's reference melody. Not while a Take runs."""
+        if self._runner is not None or self._replay is not None:
+            return
+        melody = None
+        if self.reference_box.currentText() == "Melody" and self.song_box.currentData() is not None:
+            try:
+                melody = Melody.from_song(Library(self._home).get(self.song_box.currentData()))
+            except Exception:       # a song that cannot be read: Start says why
+                melody = None
+        self.timeline.set_melody(melody)
+        self.timeline.setVisible(melody is not None)
+
+    def seek(self, song_s: float) -> None:
+        """Jump the running Melody Take's song to song_s (a click on the Timeline). A jump closes the Take."""
+        if self._backing is None:
+            return
+        self._backing.seek(song_s)
+        self.timeline.set_playhead(song_s)
+
+    def jump_back(self) -> None:
+        self.jump_by(-JUMP_S)
+
+    def jump_forward(self) -> None:
+        self.jump_by(JUMP_S)
+
+    def jump_by(self, seconds: float) -> None:
+        if self._backing is not None:
+            self.seek(max(0.0, self._backing.position_s() + seconds))
+
+    def toggle_pause(self) -> None:
+        """Space: pause or resume the song of the running Melody Take. The Take goes on; singing while paused is
+        shown but not scored."""
+        if self._backing is None:
+            return
+        self._paused = not self._paused
+        (self._backing.pause if self._paused else self._backing.play)()
+        self.pause_button.setText("Play" if self._paused else "Pause")
 
     def _apply_gains(self, *_) -> None:
         """Slider and checkbox changes reach the player at once, also mid-Take; it ramps them within a block."""
@@ -371,11 +429,13 @@ class MainWindow(QtWidgets.QWidget):
             reference = saved_reference(self._home, take_id)       # a Melody Take whose song was removed raises here
             latency = saved_latency(self._home, take_id)
             song_times = saved_song_times(self._home, take_id)
-            replay = Replay(replay_scores(load_frames(self._home, take_id), reference, song_times=song_times))
+            frames = load_frames(self._home, take_id)
+            replay = Replay(replay_scores(frames, reference, song_times=song_times))
+            replay_clock = SampledClock([f.t for f in frames], song_times)
         except Exception as exc:
             self.summary_label.setText(f"Cannot replay Take {take_id}: {exc}")
             return
-        self._replay = replay
+        self._replay, self._replay_clock = replay, replay_clock
         self._replay_started = time.monotonic()
         self._show_melody(reference, latency)
         self._t.clear(), self._midi.clear(), self._band.clear(), self._out.clear()
@@ -386,7 +446,7 @@ class MainWindow(QtWidgets.QWidget):
 
     def _end_replay(self) -> None:
         self._timer.stop()
-        self._replay = None
+        self._replay = self._replay_clock = None
         self.replay_button.setText("Replay last Take")
         self.button.setEnabled(True)
 
@@ -413,6 +473,8 @@ class MainWindow(QtWidgets.QWidget):
         self._melody_latency = latency_s
         self._ref_curve.setData([], [])
         self._unscored.setOpts(x0=[], x1=[], y0=[], y1=[])
+        self.timeline.set_melody(self._melody, getattr(self._backing, "duration_s", None))
+        self.timeline.setVisible(self._melody is not None)
         if self._melody is not None:
             _, midi = self._melody.midi_line()
             if np.isfinite(midi).any():
@@ -448,8 +510,10 @@ class MainWindow(QtWidgets.QWidget):
             self._runner = None
             self.summary_label.setText(f"Could not open the input or the output: {exc}")
             return
-        self._backing = backing
+        self._backing, self._paused = backing, False
         self._show_melody(reference, latency)
+        self.pause_button.setText("Pause")
+        self.pause_button.setEnabled(backing is not None)
         self._t.clear(), self._midi.clear(), self._band.clear(), self._out.clear()
         self.button.setText("Stop")
         for w in (self.device_box, self.reference_box, self.key_box, self.drone_box, self.song_box,
@@ -481,6 +545,7 @@ class MainWindow(QtWidgets.QWidget):
             record, error = None, exc
         self._backing = None
         self._runner = None
+        self.pause_button.setEnabled(False)
         self.button.setText("Start")
         self.device_box.setEnabled(True)
         self.reference_box.setEnabled(True)
@@ -544,22 +609,27 @@ class MainWindow(QtWidgets.QWidget):
             f"Latency for {output or DEFAULT_OUTPUT}: {1000 * result.latency_s:.0f} ms "
             f"({result.matched}/8 answers, spread {1000 * result.spread_s:.0f} ms). Saved as the default.")
 
+    def _draw_clock(self) -> SongClock:
+        """Voice time -> song time for drawing: the running Take's clock (it knows every jump and pause), the replayed
+        Take's own song times, else song time + latency."""
+        if self._runner is not None and self._runner.song_clock is not None:
+            return self._runner.song_clock
+        return self._replay_clock or LinearClock(self._melody_latency)
+
     def _draw_melody(self, t_end: float) -> None:
-        """The reference line on the voice clock (song time + latency), over the visible window."""
+        """The reference line on the voice clock over the visible window: each x asks the clock which song time the
+        singer was (or will be) answering there, so jumps and pauses show as they happened."""
         if self._melody is None:
             return
-        latency = self._melody_latency
-        if self._runner is not None and self._runner.latency_s is not None:
-            latency = self._runner.latency_s
-        stretch = 1.0 / getattr(self._backing, "speed", 1.0)       # at 50 % the melody lasts twice as long on screen
-        t, midi = self._melody.midi_line()
-        x = t * stretch + latency
-        keep = (x >= t_end - WINDOW_S) & (x <= t_end + 1.0)
-        self._ref_curve.setData(x[keep], midi[keep])
-        spans = [(a * stretch + latency, b * stretch + latency) for a, b in self._melody.unscored_spans()
-                 if b * stretch + latency >= t_end - WINDOW_S and a * stretch + latency <= t_end + 1.0]
-        self._unscored.setOpts(x0=[a for a, _ in spans], x1=[b for _, b in spans],
-                               y0=[0.0] * len(spans), y1=[127.0] * len(spans))
+        clock = self._draw_clock()
+        x = np.arange(t_end - WINDOW_S, t_end + 1.0, DRAW_STEP_S)
+        song = np.array([np.nan if (t := clock(v)) is None else t for v in x])
+        midi, unscored = self._melody.sample(song)
+        self._ref_curve.setData(x, midi)
+        edges = np.flatnonzero(np.diff(np.concatenate([[0], unscored.astype(np.int8), [0]])))
+        starts, ends = edges[::2], edges[1::2]
+        self._unscored.setOpts(x0=x[starts], x1=x[ends - 1] + DRAW_STEP_S, y0=[0.0] * len(starts),
+                               y1=[127.0] * len(starts))
 
     def tick(self, drain_only: bool = False) -> None:
         if self._runner is not None:
@@ -568,6 +638,8 @@ class MainWindow(QtWidgets.QWidget):
             except Exception:           # the worker thread died: stop() ends the Take and reports why
                 self._stop()
                 return
+            for record in self._runner.drain_saved():
+                self.summary_label.setText(f"Jumped. Take saved: {describe(record)}")
             b = self._backing
             if b is not None and not drain_only and getattr(b, "finished", False) \
                     and b.position_s() > b.duration_s + END_GRACE_S:
@@ -575,6 +647,8 @@ class MainWindow(QtWidgets.QWidget):
                 return
         elif self._replay is not None:
             self.ingest(self._replay.advance(time.monotonic() - self._replay_started))
+        if self._backing is not None and not drain_only:
+            self.timeline.set_playhead(self._backing.position_s())
         if not self._t:
             return
         t, midi = np.fromiter(self._t, float), np.fromiter(self._midi, float)
