@@ -16,7 +16,7 @@ from pathlib import Path
 import numpy as np
 
 from .. import __version__
-from ..config import DEFAULT_SCORE_CONFIG, ScoreConfig
+from ..config import DEFAULT_TOLERANCE_CENTS, ScoreConfig
 from ..library.player_settings import DEFAULT_MIN_NOTE_S
 from ..pitch import PitchFrame
 from ..reference import Key, Melody, NearestNote, Reference
@@ -28,13 +28,15 @@ COLUMNS = (
     "id", "started_at", "reference", "key", "song_id", "octave_shift", "pct_in_tune", "median_abs_cents",
     "tendency", "steadiness_cents", "lowest_note", "highest_note", "n_voiced_frames", "n_scored_frames",
     "duration_s", "out_of_key_count", "latency_offset_s", "app_version", "section_name", "pass_index",
-    "guide_vocal", "guide_gain", "speed_pct", "octave_mode", "note_mode", "min_note_s",
+    "guide_vocal", "guide_gain", "speed_pct", "octave_mode", "note_mode", "min_note_s", "tolerance_cents",
+    "timing_window_s", "note_scoring",
 )
 # Columns added after the first release go at the END; a table with an older header is rewritten with the new one
 # on the next save, its old rows left empty in the new columns (no Section = not a Pass; an empty guide_vocal /
 # speed_pct reads as guide off / Speed 100, see row_settings; an empty octave_mode = one Octave shift per Take, how
 # Takes were scored before Octave shift per Phrase, and they re-score that way, see row_octave; an empty note_mode =
-# scored against the line, see row_notes).
+# scored against the line, see row_notes; an empty tolerance_cents / timing_window_s / note_scoring = scored as before
+# #41: ±25 cents, no Timing window, Notes mode frame by frame, see row_config).
 
 GUIDE_STATES = ("off", "on", "mixed")
 
@@ -66,6 +68,21 @@ def row_octave(row: dict) -> OctaveSetting:
         except (KeyError, TypeError, ValueError):     # a pinned row that lost its shift: do not invent a pinned 0
             return LEGACY
     return LEGACY
+
+
+def row_config(row: dict) -> ScoreConfig:
+    """How a saved Take was scored: its Tolerance (yellow reaching twice it), Timing window and whether Notes mode
+    scored per note. Rows saved before these columns read as ±25 cents, no Timing window, Notes frame by frame: the
+    rules they were scored with, so they re-score to their saved numbers."""
+    def number(name: str, default: float) -> float:
+        try:
+            return float(row.get(name) or default)
+        except ValueError:
+            return default
+
+    return ScoreConfig.with_tolerance(number("tolerance_cents", DEFAULT_TOLERANCE_CENTS),
+                                      timing_window_s=number("timing_window_s", 0.0),
+                                      notes_per_note=row.get("note_scoring") == "note")
 
 
 def row_notes(row: dict) -> tuple[str, float | None]:
@@ -112,6 +129,8 @@ def _row(record: TakeRecord) -> dict:
         "section_name": cell(record.section_name), "pass_index": cell(record.pass_index),
         "guide_vocal": record.guide_vocal, "guide_gain": record.guide_gain, "speed_pct": record.speed_pct,
         "octave_mode": s.octave_mode, "note_mode": record.note_mode, "min_note_s": _length_cell(record),
+        "tolerance_cents": record.config.green_cents, "timing_window_s": record.config.timing_window_s,
+        "note_scoring": "note" if record.config.notes_per_note else "frame",
     }
 
 
@@ -248,6 +267,11 @@ def saved_octave(home: Path, take_id: str) -> OctaveSetting:
     return row_octave(next(r for r in _rows(home) if r["id"] == take_id))
 
 
+def saved_config(home: Path, take_id: str) -> ScoreConfig:
+    """How the saved Take was scored (Tolerance, Timing window): what a replay or re-score must use."""
+    return row_config(next(r for r in _rows(home) if r["id"] == take_id))
+
+
 def saved_latency(home: Path, take_id: str) -> float:
     """The song clock's offset at the Take start (0 for Nearest note and Key): where the reference line is drawn."""
     row = next(r for r in _rows(home) if r["id"] == take_id)
@@ -257,15 +281,17 @@ def saved_latency(home: Path, take_id: str) -> float:
 def rescore_take(
     home: Path,
     take_id: str,
-    config: ScoreConfig = DEFAULT_SCORE_CONFIG,
+    config: ScoreConfig | None = None,
     reference: Reference | None = None,
     write: bool = False,
 ) -> TakeRecord:
     """Score a saved Take again from its raw pitch line (Bands or gate may have changed since).
+    config: None = the scoring the Take was saved with (row_config: its Tolerance and Timing window).
     write=True also replaces the Take's row in the summary table. Nearest note rebuilds itself from the row;
     Key and Melody Takes rebuild theirs from the row (Melody via the song id in the library)."""
     rows = _rows(home)
     row = next(r for r in rows if r["id"] == take_id)
+    config = row_config(row) if config is None else config
     given = reference is not None
     if reference is None:
         reference = _reference_for(row, home)
@@ -290,7 +316,7 @@ def rescore_take(
         section_name=row.get("section_name") or None,
         pass_index=int(row["pass_index"]) if row.get("pass_index") else None,
         guide_vocal=guide_vocal, guide_gain=guide_gain, speed_pct=speed_pct,
-        note_mode=note_mode, min_note_s=min_note_s,
+        note_mode=note_mode, min_note_s=min_note_s, config=config,
     )
     if write:
         _write_rows(summary_path(home), [_row(record) if r["id"] == take_id else r for r in rows])

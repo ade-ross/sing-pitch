@@ -26,5 +26,6 @@ class Reference(Protocol):
     kind: Literal["nearest", "key", "melody"]
 
     def target(self, t: float, sung_midi: float) -> Target:
-        """t = time on the Take clock (already latency-corrected by the engine)."""
+        """t = time on the Take clock (already latency-corrected by the engine). A Melody also takes window_s, the
+        Timing window (see Melody.target)."""
         ...

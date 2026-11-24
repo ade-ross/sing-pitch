@@ -7,7 +7,7 @@ from typing import Literal, Sequence
 
 import numpy as np
 
-from ..config import ScoreConfig
+from ..config import DEFAULT_SCORE_CONFIG, ScoreConfig
 from ..music import note_name
 from ..pitch import PitchFrame
 from ..reference import Band, Reference
@@ -68,6 +68,11 @@ class TakeRecord:
                                         # the Lead-in was masked out, for drawing the Reference (None = song_times)
     note_mode: str = "off"              # "on" = scored against the Notes-mode bars (#19)
     min_note_s: float | None = None     # Notes mode: the Minimum note length (math.inf = one note per Phrase)
+    config: ScoreConfig = DEFAULT_SCORE_CONFIG   # how it was scored: Tolerance, Timing window, Notes per note (#41)
+
+    @property
+    def tolerance_cents(self) -> float:
+        return self.config.green_cents
 
 
 def count_out_of_key(scores: Sequence) -> int:

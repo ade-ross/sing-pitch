@@ -38,6 +38,14 @@ def band_for(cents: float, config: ScoreConfig) -> Band:
     return Band.RED
 
 
+def _target(reference: Reference, song_t: float, midi: float, config: ScoreConfig):
+    """What a sung frame is scored against: a Melody within the Timing window (midi: the voice moved to the original
+    singer's octave, so the closest reference pitch is the one he means); the others have no timing."""
+    if reference.kind == "melody" and config.timing_window_s > 0:
+        return reference.target(song_t, midi, config.timing_window_s)
+    return reference.target(song_t, midi)
+
+
 def score_frame(
     frame: PitchFrame, voiced: bool, reference: Reference, config: ScoreConfig, song_t: float | None,
     octave_shift: int = 0,
@@ -50,7 +58,7 @@ def score_frame(
     midi = hz_to_midi(frame.hz)
     if song_t is None:
         return FrameScore(frame.t, midi, None, None, None, octave=octave_shift)
-    target = reference.target(song_t, midi)
+    target = _target(reference, song_t, midi - 12 * octave_shift, config)
     if target.midi is None:       # sung, but the Reference has nothing reliable here: shown, never scored
         return FrameScore(frame.t, midi, None, None, None, target.in_key, octave_shift)
     target_midi = target.midi + 12 * octave_shift
@@ -206,4 +214,5 @@ class TakeEngine:
             clock_times=None if self.pass_tag is None else tuple(self._clock_times),
             note_mode="on" if getattr(self._reference, "min_note_s", None) is not None else "off",
             min_note_s=getattr(self._reference, "min_note_s", None),
+            config=self._config,
         )

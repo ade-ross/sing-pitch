@@ -40,7 +40,7 @@ class FixedNote:
     def __init__(self, midi: float):
         self._midi = midi
 
-    def target(self, t, sung_midi):
+    def target(self, t, sung_midi, window_s=0.0):
         return Target(midi=self._midi)
 
 
