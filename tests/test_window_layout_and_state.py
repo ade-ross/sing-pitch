@@ -340,7 +340,8 @@ CONTROLS = (QtWidgets.QAbstractButton, QtWidgets.QComboBox, QtWidgets.QAbstractS
 
 def controls_of(root):
     """Every control widget under root (scroll bars of the plots are not controls)."""
-    found = [w for w in root.findChildren(QtWidgets.QWidget) if isinstance(w, CONTROLS)]
+    found = [w for w in root.findChildren(QtWidgets.QWidget) if isinstance(w, CONTROLS)
+             and not isinstance(w.parent(), QtWidgets.QAbstractItemView)]      # not a table's own corner button
     return [w for w in found if not isinstance(w, QtWidgets.QScrollBar)]
 
 
@@ -361,4 +362,4 @@ def test_every_control_of_the_history_window_has_a_tooltip(qtbot, tmp_path):
     view = HistoryView(tmp_path)
     qtbot.addWidget(view)
     controls = controls_of(view)
-    assert len(controls) == 7 and [w for w in controls if not w.toolTip().strip()] == []
+    assert len(controls) == 8 and [w for w in controls if not w.toolTip().strip()] == []

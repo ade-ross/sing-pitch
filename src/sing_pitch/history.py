@@ -2,7 +2,7 @@
 from __future__ import annotations
 
 import csv
-from dataclasses import dataclass
+from dataclasses import dataclass, field
 from datetime import datetime
 from pathlib import Path
 
@@ -22,6 +22,7 @@ class HistoryPoint:
     speed_pct: int = 100
     section: str | None = None
     note_mode: str = "off"            # "on" = scored against the Notes-mode bars; rows saved before the column: off
+    take_id: str = ""                 # the Take's id in the summary table (what a replay asks for)
 
 
 @dataclass(frozen=True)
@@ -31,6 +32,7 @@ class Series:
     started_at: list[datetime]
     pct_in_tune: list[float]
     median_abs_cents: list[float]
+    points: list[HistoryPoint] = field(default_factory=list)      # the same Takes in full, oldest first
 
 
 class History:
@@ -74,7 +76,7 @@ class History:
                and (guide_vocal is None or p.guide_vocal == guide_vocal) and (speed is None or p.speed_pct == speed)
                and (section is None or (p.section or WHOLE_SONG) == section)
                and (note_mode is None or p.note_mode == note_mode)]
-        return Series([p.started_at for p in pts], [p.pct_in_tune for p in pts], [p.median_abs_cents for p in pts])
+        return Series([p.started_at for p in pts], [p.pct_in_tune for p in pts], [p.median_abs_cents for p in pts], pts)
 
 
 def load_history(home: Path) -> History:
@@ -95,7 +97,7 @@ def load_history(home: Path) -> History:
                     pct_in_tune=float(r["pct_in_tune"]),
                     median_abs_cents=float(r["median_abs_cents"]),
                     guide_vocal=guide, speed_pct=speed, section=(r.get("section_name") or None),
-                    note_mode=row_notes(r)[0],
+                    note_mode=row_notes(r)[0], take_id=r.get("id") or "",
                 ))
             except (KeyError, TypeError, ValueError):
                 continue

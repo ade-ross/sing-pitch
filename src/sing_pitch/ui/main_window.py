@@ -29,8 +29,8 @@ from ..replay import Replay
 from ..settings import DEFAULT_OUTPUT, Settings
 from ..take_engine import (AUTO, FrameScore, LinearClock, PauseFold, SampledClock, SongClock, TakeRecord, pinned,
                            project_song_time, replay_scores)
-from ..take_store import (last_take_id, load_frames, rescore_take, saved_clock_times, saved_latency, saved_octave,
-                          saved_reference, saved_song_times)
+from ..take_store import (last_take_id, load_frames, rescore_take, row_notes, row_settings, saved_clock_times,
+                          saved_latency, saved_octave, saved_reference, saved_row, saved_song_times)
 from .eliding import eliding_combo
 from .gui_gc import collect_on_the_ui_thread_only
 from .song_axis import SongTimeAxis
@@ -42,6 +42,8 @@ PAST_S = 4.0          # the plot is centred on now: this much of the voice and t
 FUTURE_S = 4.0        # ...and this much of the Reference ahead of it
 TICK_MS = 33          # ~30 Hz redraw
 SPEED_MIN, SPEED_MAX, SPEED_STEP = 50, 120, 5     # Speed in percent of the original
+REFERENCE_TEXT = {"nearest": "Nearest note", "key": "Key", "melody": "Melody"}    # reference.kind -> the box's text
+SPEED_PRESETS = (70, 85, 100)    # the buttons beside the Speed box
 SPEED_DEBOUNCE_MS = 400   # +/- pressed several times: stretch only the Speed he stops on
 END_GRACE_S = 1.0     # Melody: keep listening this long after the Backing ends
 JUMP_S = 5.0          # the arrow keys jump this far
@@ -171,6 +173,7 @@ class MainWindow(QtWidgets.QWidget):
         self._paused = False
         self._runner: LiveRunner | None = None
         self._replay: Replay | None = None
+        self._visited: dict | None = None            # the controls as they were before a replay put a Take's on them
         self._replay_started = 0.0
         self._replay_take_id: str | None = None
         self._t: deque[float] = deque()           # voice time of each drawn frame (the plot shows view time, see _fold)
@@ -271,6 +274,8 @@ class MainWindow(QtWidgets.QWidget):
         self.speed_box.setFocusPolicy(QtCore.Qt.NoFocus)         # so + and - stay shortcuts of the window
         self.speed_box.setToolTip("Speed, pitch unchanged (+ and - change it by 5 %)")
         self.speed_label = QtWidgets.QLabel("")
+        self.speed_70_button, self.speed_85_button, self.speed_100_button = (
+            self._preset_button(percent) for percent in SPEED_PRESETS)
         self.octave_box = QtWidgets.QComboBox()
         for k in (None, *player_settings.OCTAVE_CHOICES):      # Auto, then the pinned shifts
             self.octave_box.addItem("Auto" if k is None else f"{k:+d}" if k else "0", k)
@@ -295,6 +300,10 @@ class MainWindow(QtWidgets.QWidget):
         self.note_length_slider.sliderReleased.connect(self._notes_changed)
         self.speed_box.valueChanged.connect(self._speed_changed)
         self.speed_box.valueChanged.connect(self._remember_player_settings)
+        self.speed_box.valueChanged.connect(self._sync_speed_presets)
+        self.speed_70_button.clicked.connect(self._preset_70)           # bound methods: a lambda keeps self alive
+        self.speed_85_button.clicked.connect(self._preset_85)
+        self.speed_100_button.clicked.connect(self._preset_100)
         for key, slot in (("+", self.speed_up), ("=", self.speed_up), ("-", self.speed_down)):
             QtGui.QShortcut(QtGui.QKeySequence(key), self, activated=slot)    # bound method: a lambda keeps self alive
         self.calibrate_button = QtWidgets.QPushButton("Calibrate latency")
@@ -357,7 +366,8 @@ class MainWindow(QtWidgets.QWidget):
         top.setStretchFactor(self.song_box, 1)
         mix = QtWidgets.QHBoxLayout()
         for w in (self.guide_box, self.guide_slider, QtWidgets.QLabel("Backing"), self.backing_slider,
-                  self.pause_button, QtWidgets.QLabel("Speed"), self.speed_box, self.speed_label, QtWidgets.QLabel("Octave"),
+                  self.pause_button, QtWidgets.QLabel("Speed"), self.speed_box, self.speed_70_button, self.speed_85_button,
+                  self.speed_100_button, self.speed_label, QtWidgets.QLabel("Octave"),
                   self.octave_box, self.notes_box, self.note_length_slider, self.note_length_label):
             mix.addWidget(w)
         mix.addStretch(1)
@@ -521,8 +531,8 @@ class MainWindow(QtWidgets.QWidget):
         self.song_box.setEnabled(is_melody)
         self._restore_player_settings()
         self._preview_song()
-        for w in (self.guide_box, self.guide_slider, self.backing_slider, self.speed_box, self.octave_box,
-                  self.notes_box, self.note_length_slider, self.section_box, self.section_name_edit,
+        for w in (self.guide_box, self.guide_slider, self.backing_slider, self.speed_box, self.speed_70_button,
+                  self.speed_85_button, self.speed_100_button, self.octave_box, self.notes_box, self.note_length_slider, self.section_box, self.section_name_edit,
                   self.clear_button):
             w.setEnabled(is_melody)
         self._sync_section_controls()
@@ -832,6 +842,7 @@ class MainWindow(QtWidgets.QWidget):
         for widget in (self.notes_box, self.note_length_slider):
             widget.blockSignals(False)
         self.note_length_label.setText(format_length(self._note_length()))
+        self._sync_speed_presets()
 
     # --- Notes mode -------------------------------------------------------------------------------------------------
     def _note_length(self) -> float:
@@ -858,6 +869,33 @@ class MainWindow(QtWidgets.QWidget):
         return AUTO if k is None or self.reference_box.currentText() != "Melody" else pinned(k)
 
     # --- Speed -------------------------------------------------------------------------------------------------
+    def _preset_button(self, percent: int) -> QtWidgets.QPushButton:
+        button = QtWidgets.QPushButton(f"{percent} %")
+        button.setCheckable(True)
+        button.setChecked(percent == 100)
+        button.setFocusPolicy(QtCore.Qt.NoFocus)                 # so + and - stay shortcuts of the window
+        button.setToolTip(f"Set the Speed to {percent} %: the same as typing it in the box")
+        button.setFixedWidth(44)
+        return button
+
+    def _preset_70(self) -> None:
+        self._press_preset(70)
+
+    def _preset_85(self) -> None:
+        self._press_preset(85)
+
+    def _preset_100(self) -> None:
+        self._press_preset(100)
+
+    def _press_preset(self, percent: int) -> None:
+        self.speed_box.setValue(percent)
+        self._sync_speed_presets()                                # a press on the Speed already set must stay pressed
+
+    def _sync_speed_presets(self, *_) -> None:
+        """The preset of the Speed now set is shown pressed; none when the box holds some other Speed."""
+        for button, percent in zip((self.speed_70_button, self.speed_85_button, self.speed_100_button), SPEED_PRESETS):
+            button.setChecked(self.speed_box.value() == percent)
+
     def speed_up(self) -> None:
         self._step_speed(1)
 
@@ -914,6 +952,7 @@ class MainWindow(QtWidgets.QWidget):
             self.speed_box.blockSignals(True)
             self.speed_box.setValue(self._speed_playing)
             self.speed_box.blockSignals(False)
+            self._sync_speed_presets()
             self._remember_player_settings()          # the failed Speed is not kept as the song's Speed
             return
         self._speed_ready = (song_id, percent, stems)
@@ -1032,7 +1071,7 @@ class MainWindow(QtWidgets.QWidget):
         self._apply_y()
 
     def toggle_replay(self) -> None:
-        """Play the most recent saved Take's pitch line back through the live view."""
+        """Play the most recent saved Take's pitch line back through the live view (press again to stop)."""
         if self._replay is not None:
             self._end_replay()
             return
@@ -1040,19 +1079,34 @@ class MainWindow(QtWidgets.QWidget):
         if take_id is None:
             self.summary_label.setText("No saved Take to replay yet.")
             return
+        self.replay_take(take_id)
+
+    def replay_take(self, take_id: str) -> None:
+        """Play any saved Take back through the live view, with the settings it was sung with on the controls
+        (Reference, song, Octave, Notes, Speed). A replay in progress is replaced. The controls go back to what they
+        were when it ends, and nothing is remembered or stretched on the way."""
+        if self._runner is not None or self._calibration is not None:
+            self._say_replay_failed("Stop the Take before replaying another." if self._runner is not None
+                                    else "Wait for the calibration to finish before replaying.")
+            return
         try:
             reference = saved_reference(self._home, take_id)       # a Melody Take whose song was removed raises here
             latency = saved_latency(self._home, take_id)
             song_times = saved_song_times(self._home, take_id)
             frames = load_frames(self._home, take_id)
-            scores = replay_scores(frames, reference, song_times=song_times, octave=saved_octave(self._home, take_id))
+            octave = saved_octave(self._home, take_id)
+            scores = replay_scores(frames, reference, song_times=song_times, octave=octave)
             replay = Replay(scores)
             octave_k = next((s.octave for s in scores if s.band is not None), 0)      # where the Take was scored
             replay_clock = SampledClock([f.t for f in frames], saved_clock_times(self._home, take_id),   # + Lead-in
                                         getattr(reference, "end_s", None))
+            saved = self._saved_settings(take_id, reference, octave)
         except Exception as exc:
-            self.summary_label.setText(f"Cannot replay Take {take_id}: {exc}")
+            self._say_replay_failed(f"Cannot replay Take {take_id}: {exc}")
             return
+        if self._replay is not None:
+            self._end_replay()
+        self._visited = self._show_settings(saved)
         self._replay, self._replay_clock, self._replay_take_id = replay, replay_clock, take_id
         self._replay_started = time.monotonic()
         self._show_melody(reference, latency, octave_k)
@@ -1065,6 +1119,51 @@ class MainWindow(QtWidgets.QWidget):
             w.setEnabled(False)
         self.summary_label.setText(f"Replaying Take {take_id}...")
         self._timer.start(TICK_MS)
+        if self.history_window is not None:
+            self.history_window.show_status("")
+        self.raise_()
+
+    def _say_replay_failed(self, text: str) -> None:
+        self.summary_label.setText(text)
+        if self.history_window is not None:
+            self.history_window.show_status(text)
+
+    def _saved_settings(self, take_id: str, reference: Reference, octave) -> dict:
+        """What a saved Take's table row says the controls were: Reference, song, Key, Octave, Notes, Speed."""
+        row = saved_row(self._home, take_id)
+        notes, length = row_notes(row)
+        return {"reference": REFERENCE_TEXT.get(reference.kind, "Nearest note"), "song": row["song_id"] or None,
+                "key": reference if reference.kind == "key" else None,
+                "octave": octave.k if octave.mode == "pinned" else None, "notes": notes == "on",
+                "length": player_settings.DEFAULT_MIN_NOTE_S if length is None else length, "speed": row_settings(row)[2]}
+
+    def _controls_now(self) -> dict:
+        return {"reference": self.reference_box.currentText(), "song": self.song_box.currentData(),
+                "key": self.key_box.currentData(), "octave": self.octave_box.currentData(),
+                "notes": self.notes_box.isChecked(), "length": self._note_length(), "speed": self.speed_box.value()}
+
+    def _show_settings(self, settings: dict) -> dict:
+        """Put these settings on the controls without anything reacting to them (nothing remembered, nothing
+        stretched, no preview). Returns the settings that were there, to put back."""
+        before = self._controls_now()
+        boxes = (self.reference_box, self.song_box, self.key_box, self.octave_box, self.notes_box,
+                 self.note_length_slider, self.speed_box)
+        for box in boxes:
+            box.blockSignals(True)
+        self.reference_box.setCurrentText(settings["reference"])
+        if settings["song"] is not None and self.song_box.findData(settings["song"]) >= 0:
+            self.song_box.setCurrentIndex(self.song_box.findData(settings["song"]))
+        if settings["key"] is not None and self.key_box.findData(settings["key"]) >= 0:
+            self.key_box.setCurrentIndex(self.key_box.findData(settings["key"]))
+        self.octave_box.setCurrentIndex(max(0, self.octave_box.findData(settings["octave"])))
+        self.notes_box.setChecked(settings["notes"])
+        self.note_length_slider.setValue(slider_of_length(settings["length"]))
+        self.speed_box.setValue(settings["speed"])
+        for box in boxes:
+            box.blockSignals(False)
+        self.note_length_label.setText(format_length(self._note_length()))
+        self._sync_speed_presets()
+        return before
 
     def _take_numbers(self, take_id: str | None) -> str | None:
         """The numbers of a saved Take as Stop showed them (None when they cannot be worked out)."""
@@ -1080,6 +1179,9 @@ class MainWindow(QtWidgets.QWidget):
         self._timer.stop()
         numbers = self._take_numbers(self._replay_take_id)
         self._replay = self._replay_clock = self._replay_take_id = None
+        if self._visited is not None:
+            self._show_settings(self._visited)                    # the controls as they were before the replay
+            self._visited = None
         self.replay_button.setText("Replay last Take")
         self.button.setEnabled(True)
         for w in (self.notes_box, self.note_length_slider):
@@ -1093,6 +1195,7 @@ class MainWindow(QtWidgets.QWidget):
 
         if self.history_window is None:
             self.history_window = HistoryView(self._home)
+            self.history_window.replay_requested.connect(self.replay_take)       # a bound method: no lambda
         else:
             self.history_window.reload()
         self.history_window.show()
