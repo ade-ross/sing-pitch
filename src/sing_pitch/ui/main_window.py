@@ -52,6 +52,8 @@ END_GRACE_S = 1.0     # Melody: keep listening this long after the Backing ends
 JUMP_S = 5.0          # the arrow keys jump this far
 DRAW_STEP_S = 0.01    # the reference line is drawn at this resolution on the voice clock
 HALF_RANGE = 12      # semitones shown above and below the centre (4 s of a song spans up to ~20)
+NOTE_LABEL_MIN_PX = 14   # note names on the left axis at least this far apart: on a short plot only every 2nd (3rd...)
+SLIDER_MIN_W = 80
 Y_VOICE_S = 2.0       # the voice's median over this many seconds decides where the vertical range sits
 Y_LOOK_S = 6.0        # a move of the vertical range also looks this many seconds beyond the right half
 Y_EASE = 0.3          # share of the way to the new centre covered per redraw (about 0.3 s for a move)
@@ -198,7 +200,7 @@ class MainWindow(QtWidgets.QWidget):
         self._oct_known = False                   # a scored frame has set it (until then the line sits at 0)
         self._y = YWindow(60, HALF_RANGE)            # where the vertical range is heading; _y_drawn is what shows
         self._y_drawn = 60.0
-        self._y_ticks_from: int | None = None
+        self._y_ticks_from: tuple[int, int] | None = None
         self._ahead = np.empty(0)                    # MIDI of the Reference coming in the right half, as drawn
         self._note_tally: NoteTally | None = None   # Notes mode per note: the running Take's (or replay's) notes
         self._verdicts: dict[int, Band] = {}        # ...and the verdict of each note that has ended
@@ -412,6 +414,7 @@ class MainWindow(QtWidgets.QWidget):
         self._dots = pg.ScatterPlotItem(size=6, pen=None)
         plot.addItem(self._dots)
         self._plot = plot
+        plot.getViewBox().sigResized.connect(self._apply_y)     # a taller or shorter plot re-spaces the note names
         self._set_y(60)
         self._set_now(0.0)
 
@@ -426,11 +429,12 @@ class MainWindow(QtWidgets.QWidget):
                   self.button, self.replay_button, self.history_button):
             top.addWidget(w)
         top.setStretchFactor(self.song_box, 1)
+        for slider in (self.guide_slider, self.backing_slider, self.note_length_slider, self.tolerance_slider):
+            slider.setMinimumWidth(SLIDER_MIN_W)        # usable with the mouse at the minimum window width (QA #46)
         mix = QtWidgets.QHBoxLayout()
         for w in (self.guide_box, self.guide_slider, QtWidgets.QLabel("Backing"), self.backing_slider,
                   self.pause_button, QtWidgets.QLabel("Speed"), self.speed_box, self.speed_70_button, self.speed_85_button,
-                  self.speed_100_button, self.speed_label, QtWidgets.QLabel("Octave"),
-                  self.octave_box, self.notes_box, self.note_length_slider, self.note_length_label):
+                  self.speed_100_button, self.speed_label):
             mix.addWidget(w)
         mix.addStretch(1)
         sections = QtWidgets.QHBoxLayout()
@@ -441,8 +445,9 @@ class MainWindow(QtWidgets.QWidget):
         sections.addWidget(self.overwrite_button)
         sections.addWidget(self.cancel_overwrite_button)
         sections.addStretch(1)
-        warn = QtWidgets.QHBoxLayout()
-        for w in (QtWidgets.QLabel("Tolerance"), self.tolerance_slider, self.tolerance_label):
+        warn = QtWidgets.QHBoxLayout()                  # how it is scored: Octave, Notes, Tolerance (QA #46: off the mix row)
+        for w in (QtWidgets.QLabel("Octave"), self.octave_box, self.notes_box, self.note_length_slider,
+                  self.note_length_label, QtWidgets.QLabel("Tolerance"), self.tolerance_slider, self.tolerance_label):
             warn.addWidget(w)
         warn.addWidget(self.output_label, 1)
         warn.addWidget(self.headphones_button)
@@ -1208,9 +1213,13 @@ class MainWindow(QtWidgets.QWidget):
         lo, hi = self._y_drawn - HALF_RANGE, self._y_drawn + HALF_RANGE
         self._plot.setYRange(lo, hi, padding=0)
         first = math.floor(lo)
-        if first != self._y_ticks_from:                    # the labels are the same until the view passes a semitone
-            self._y_ticks_from = first
-            ticks = [(m, f"{NOTE_NAMES[m % 12]}{m // 12 - 1}") for m in range(first - 1, first + 2 * HALF_RANGE + 3)]
+        px = self._plot.getViewBox().height() / (2 * HALF_RANGE)          # pixels per semitone
+        step = max(1, math.ceil(NOTE_LABEL_MIN_PX / px)) if px > 0 else 1
+        if (first, step) != self._y_ticks_from:     # the labels are the same until the view passes a semitone
+            self._y_ticks_from = (first, step)
+            names = range(first - 1, first + 2 * HALF_RANGE + 3)
+            # every semitone keeps its grid line; on a short plot only every step-th has its name (C always among them)
+            ticks = [(m, f"{NOTE_NAMES[m % 12]}{m // 12 - 1}" if m % step == 0 else "") for m in names]
             self._plot.getAxis("left").setTicks([ticks])
 
     def _follow_y(self) -> None:
