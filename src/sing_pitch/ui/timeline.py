@@ -132,8 +132,17 @@ class Timeline(pg.GraphicsLayoutWidget):
             self.section_marked.emit(*self.section)
 
     def _region_edited(self, *_) -> None:
-        if self.region.isVisible():
-            self.section_changed.emit(*self.section)
+        """An edge or the body was moved: an edge dropped closer than MIN_SECTION_S to the other is pushed back to
+        MIN_SECTION_S (inside the song) before the edit is reported."""
+        if not self.region.isVisible():
+            return
+        start, end = self.section
+        if end - start < MIN_SECTION_S:
+            width = min(MIN_SECTION_S, self._duration)
+            end = min(max(end, start + width), self._duration)
+            start = max(0.0, min(start, end - width))
+            self.set_section(start, end)
+        self.section_changed.emit(*self.section)
 
     def song_time_at(self, view_pos) -> float:
         """Song time (s, clamped to the song) of a position in the view box's own coordinates (a mouse event's pos)."""

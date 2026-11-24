@@ -142,6 +142,7 @@ class TakeEngine:
         self.song_clock: SongClock = song_clock or LinearClock()
         self.pass_tag = pass_tag
         self._song_times: list[float | None] = []
+        self._clock_times: list[float | None] = []     # the clock's song times before the Pass mask (for drawing)
         self._reference = reference
         self._config = config
         self._gate = VoicingGate(config)
@@ -160,6 +161,7 @@ class TakeEngine:
         summary uses the whole Take's own shift, so the first seconds on screen can differ from it."""
         self._frames.extend(frames)
         song_times = [self.song_clock(f.t) for f in frames]
+        self._clock_times.extend(song_times)
         if self.pass_tag is not None:
             song_times = [st if self.pass_tag.scores(st) else None for st in song_times]
         self._song_times.extend(song_times)
@@ -185,4 +187,5 @@ class TakeEngine:
             song_times=tuple(self._song_times),
             section_name=None if self.pass_tag is None else self.pass_tag.section_name,
             pass_index=None if self.pass_tag is None else self.pass_tag.pass_index,
+            clock_times=None if self.pass_tag is None else tuple(self._clock_times),
         )

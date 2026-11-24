@@ -14,6 +14,7 @@ render() at the start of the next block."""
 from __future__ import annotations
 
 import bisect
+import dataclasses
 import math
 from collections import deque
 from dataclasses import dataclass
@@ -25,6 +26,7 @@ from .mix import Gains, mix_block
 
 
 LEAD_IN_S = 2.0      # song played before a looped Section's start on every Pass (never scored)
+MIN_LOOP_S = 0.2     # a shorter (or empty) Section is widened to this, so every Pass renders some song
 
 
 @dataclass(frozen=True)
@@ -47,7 +49,7 @@ class TransportEvent:
     """Something that changed the song-time mapping, at the first output frame it applies to.
     Kinds: "paused", "resumed", "speed_changed", "jumped" (a seek: song_t is where the song goes on), and for a loop
     "pass_started" (pass_index 1, 2, ...; song_t = start - Lead-in), "pass_ended" (the Pass that just ended) and
-    "loop_ended" (looping switched off, or ended by a seek). "speed_changed" carries the new `speed` and, when it
+    "loop_ended" (looping switched off, or ended by a seek); all three carry their `loop`. "speed_changed" carries the new `speed` and, when it
     applied at a Pass boundary, the `loop` (outside a loop, loop is None). "gains_changed" carries the target `gains`
     (Backing, Guide vocal): the first block the new gains apply to."""
 
@@ -125,7 +127,9 @@ class Transport:
         self._vocal = self._fit(vocal, backing)
         self._song_frames = len(backing)     # the song's own length, whatever the Speed
         self._speed = 1.0                    # song frames per output frame (render thread only)
-        self._pending_speed: tuple[float, np.ndarray, np.ndarray | None] | None = None   # (any thread)
+        self._speed_asked = (1.0, backing, vocal)   # (speed, backing, vocal) as last asked for (control threads)
+        self._speed_requests: deque[tuple[float, np.ndarray, np.ndarray | None]] = deque()   # set_speed calls
+                                                                    # (any thread); the last one wins
         self._sr = sample_rate
         self._gains: Gains = gains          # target (any thread)
         self._applied: Gains = gains        # what the last block ended on (render thread only)
@@ -164,14 +168,33 @@ class Transport:
     def set_loop(self, loop: Loop | None) -> None:
         """Loop this Section from the next block (None = stop looping, the song runs on). Turning it on goes straight
         to start - Lead-in as Pass 1; at the Section end the song wraps back there and the next Pass starts. A seek
-        ends the loop."""
-        self._loop_requests.append(loop)
+        ends the loop. A Section shorter than MIN_LOOP_S or past the song end is first fitted into the song
+        (loop shows the fitted one), so every Pass renders some song."""
+        self._loop_requests.append(None if loop is None else self._fit_loop(loop))
+
+    def _fit_loop(self, loop: Loop) -> Loop | None:
+        """The loop clamped to the song and at least MIN_LOOP_S long (the whole song if it is shorter); None for a
+        song with no frames."""
+        song_s = self._song_frames / self._sr
+        if self._song_frames <= 0:
+            return None
+        width = min(MIN_LOOP_S, song_s)
+        end = min(max(loop.end_s, loop.start_s + width), song_s)
+        start = min(max(0.0, loop.start_s), end - width)
+        if (start, end) == (loop.start_s, loop.end_s):
+            return loop
+        return dataclasses.replace(loop, start_s=start, end_s=end)
 
     def set_speed(self, speed: float, backing: np.ndarray, vocal: np.ndarray | None = None) -> None:
         """Play from the next block at `speed` (1.0 = original), with the Backing and Guide vocal already stretched
         to it. The song position is kept. The first block after the change crossfades from the old Speed's audio
-        and a "speed_changed" event is reported; before the first block it just sets the starting Speed."""
-        self._pending_speed = (float(speed), backing, self._fit(vocal, backing))
+        and a "speed_changed" event is reported; before the first block it just sets the starting Speed. Asking again
+        for the Speed last asked for, with the same arrays, changes nothing (no event)."""
+        asked = self._speed_asked
+        if float(speed) == asked[0] and backing is asked[1] and vocal is asked[2]:
+            return
+        self._speed_asked = (float(speed), backing, vocal)
+        self._speed_requests.append((float(speed), backing, self._fit(vocal, backing)))
 
     # --- state -----------------------------------------------------------------------------------------------
     @property
@@ -211,7 +234,7 @@ class Transport:
             kind = "resumed" if self._playing else "paused"
             events = (TransportEvent(kind, self.log.rendered_s, self.position_s),)
         fade_from = None
-        if self._pending_speed is not None and self._loop is None:    # in a loop it waits for the next Pass (_wrap)
+        if self._speed_requests and self._loop is None:    # in a loop it waits for the next Pass (_wrap)
             if self.log.rendered_s > 0 and self._playing:
                 fade_from = (self._audio, self._vocal, self._speed)
             events += self._apply_speed()
@@ -266,8 +289,10 @@ class Transport:
 
     def _apply_speed(self) -> tuple[TransportEvent, ...]:
         """Swap in the Speed asked for by set_speed (before the first block it is only the starting Speed)."""
-        speed, audio, vocal = self._pending_speed
-        self._pending_speed = None
+        request = None
+        while self._speed_requests:       # popleft is atomic: a request appended meanwhile is kept for the next block
+            request = self._speed_requests.popleft()
+        speed, audio, vocal = request
         self._speed, self._audio, self._vocal = speed, audio, vocal
         if self.log.rendered_s <= 0:
             return ()
@@ -278,8 +303,9 @@ class Transport:
         if self._loop is None:
             return ()
         out_s, song_s = (self._block0 + pos) / self._sr, self.position_s
-        index, self._loop, self._pass = self._pass, None, 0
-        return (TransportEvent("pass_ended", out_s, song_s, index), TransportEvent("loop_ended", out_s, song_s))
+        index, loop, self._loop, self._pass = self._pass, self._loop, None, 0
+        return (TransportEvent("pass_ended", out_s, song_s, index, loop),
+                TransportEvent("loop_ended", out_s, song_s, loop=loop))
 
     def _wrap(self, pos: int) -> tuple[TransportEvent, ...]:
         """A Pass boundary at frame `pos` of the block being rendered: the next Pass starts at start - Lead-in.
@@ -290,7 +316,7 @@ class Transport:
             events = (TransportEvent("pass_ended", out_s, self.position_s, self._pass, self._loop),)
         self._pass += 1
         self._n = round(self._loop.pass_start_s * self._sr)
-        if self._pending_speed is not None:
+        if self._speed_requests:
             events += self._apply_speed()
         return events + (TransportEvent("pass_started", out_s, self.position_s, self._pass, self._loop),)
 

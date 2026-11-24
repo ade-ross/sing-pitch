@@ -92,7 +92,8 @@ Melody Takes get a practice transport:
   still measured by the existing calibration.
 - **Pass and Take boundaries:** the Transport emits events (pass started, pass ended, jumped, speed changed). The
   live runner turns them into Take boundaries. A jump outside a loop closes the Take and opens a new one. Loop
-  wrap-around closes one Pass Take and opens the next. A Take with under ~3 s of scored singing is discarded. Lead-in
+  wrap-around closes one Pass Take and opens the next. A Take with under ~3 s of scored singing is discarded; a Pass
+  Take is kept when it scored at least half of its Section's singable time (so Sections under 3 s still save). Lead-in
   frames are marked as not scored.
 - **Speed:** pitch-preserving time-stretch with Rubber Band (best quality available; the implementer verifies an
   install that works on Apple Silicon). The Backing and the vocal stem are each pre-rendered whole at the chosen
@@ -126,7 +127,7 @@ Melody Takes get a practice transport:
   the same voice must fail.
 - **Pass tests:**
   - Three loop wraps give three Takes, each tagged with Section and pass index, with Lead-in frames unscored.
-  - A Take under 3 s is discarded.
+  - A Take under 3 s is discarded; a Pass Take under half its Section is discarded.
   - Re-scoring a Pass Take reproduces its numbers.
 - **Speed tests:** a stretched stem keeps its pitch (a 220 Hz tone stays within a few cents after stretching), and
   its length is the original divided by the Speed fraction. A cached Speed is not recomputed.

@@ -25,7 +25,8 @@ from ..reference import Band, Key, Melody, NearestNote, Reference
 from ..replay import Replay
 from ..settings import DEFAULT_OUTPUT, Settings
 from ..take_engine import FrameScore, LinearClock, SampledClock, SongClock, TakeRecord, replay_scores
-from ..take_store import last_take_id, load_frames, saved_latency, saved_reference, saved_song_times
+from ..take_store import (last_take_id, load_frames, saved_clock_times, saved_latency, saved_reference,
+                          saved_song_times)
 from .timeline import Timeline
 from .speed_prep import SpeedPreparer
 
@@ -551,13 +552,18 @@ class MainWindow(QtWidgets.QWidget):
             self.speed_box.blockSignals(True)
             self.speed_box.setValue(self._speed_playing)
             self.speed_box.blockSignals(False)
+            self._remember_player_settings()          # the failed Speed is not kept as the song's Speed
             return
         self._speed_ready = (song_id, percent, stems)
         self._set_player_speed(percent, stems)
 
     def _set_player_speed(self, percent: int, stems) -> None:
-        self._speed_playing = percent
+        """Hand the player this Speed. The Speed it already plays is not handed again: a speed_changed would split
+        the running Take for nothing (during a Take, one song and percent always mean the same stems)."""
         self.speed_label.setText("")
+        if self._backing is not None and percent == self._speed_playing:
+            return
+        self._speed_playing = percent
         if self._backing is not None:
             self._backing.set_speed(percent / 100, *(stems or ()))
 
@@ -627,7 +633,7 @@ class MainWindow(QtWidgets.QWidget):
             song_times = saved_song_times(self._home, take_id)
             frames = load_frames(self._home, take_id)
             replay = Replay(replay_scores(frames, reference, song_times=song_times))
-            replay_clock = SampledClock([f.t for f in frames], song_times)
+            replay_clock = SampledClock([f.t for f in frames], saved_clock_times(self._home, take_id))   # + Lead-in
         except Exception as exc:
             self.summary_label.setText(f"Cannot replay Take {take_id}: {exc}")
             return

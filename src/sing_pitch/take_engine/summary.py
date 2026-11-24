@@ -59,6 +59,8 @@ class TakeRecord:
     guide_vocal: str = "off"            # "on" | "off" | "mixed" (switched during the Take)
     guide_gain: float = 0.0             # the Guide vocal volume (0-1) while it was on; 0 when off
     speed_pct: int = 100                # Speed the Take was sung at (a Speed change starts a new Take)
+    clock_times: tuple[float | None, ...] | None = None   # a Pass Take: the clock's song time of each frame before
+                                        # the Lead-in was masked out, for drawing the Reference (None = song_times)
 
 
 def count_out_of_key(scores: Sequence) -> int:

@@ -118,3 +118,43 @@ def test_the_reference_line_is_drawn_through_the_song_clock_so_it_stretches_with
     drawn = x[np.isfinite(midi)]
     assert abs(drawn[-1] - 2.0 * 2.0) < 0.05 + 0.02 * 2 and drawn[0] >= 0.0   # a 2 s melody lasts 4 s of output at 50 %
     win.toggle()
+
+
+def test_going_back_to_the_speed_that_plays_does_not_hand_it_to_the_player_again(qtbot, tmp_path):
+    """A re-applied Speed would be a speed_changed event, which splits the running Take for nothing."""
+    backings = []
+    win, song = melody_window(qtbot, tmp_path, GatedStretcher(), backings)
+    win.toggle()                                        # Take at 100 %
+    win.speed_box.setValue(105)                         # not cached: preparing...
+    win.speed_box.setValue(100)                         # ...and back before it is ready
+    qtbot.wait(50)
+    assert backings[0].speeds == [] and win.speed_label.text() == ""
+    win.toggle()
+
+
+def test_going_back_to_a_stretched_speed_that_plays_does_not_hand_it_to_the_player_again(qtbot, tmp_path):
+    stretcher = CountingStretcher()
+    backings = []
+    win, song = melody_window(qtbot, tmp_path, stretcher, backings)
+    win.speed_box.setValue(70)
+    qtbot.waitUntil(lambda: (song.dir / "speed" / "70" / "backing.wav").exists() and win.speed_label.text() == "",
+                    timeout=5000)
+    win.toggle()                                        # Take at 70 %: the stems go in at start
+    assert len(backings[0].speeds) == 1
+    win.speed_box.setValue(75)
+    win.speed_box.setValue(70)
+    qtbot.wait(50)
+    assert len(backings[0].speeds) == 1 and win.speed_label.text() == ""
+    win.toggle()
+
+
+def test_a_failed_stretch_leaves_the_speed_that_plays_in_the_songs_saved_settings(qtbot, tmp_path):
+    from sing_pitch.library import Library
+
+    def broken(audio, sample_rate, speed):
+        raise RuntimeError("out of memory")
+
+    win, song = melody_window(qtbot, tmp_path, broken)
+    win.speed_box.setValue(60)
+    qtbot.waitUntil(lambda: "failed" in win.speed_label.text(), timeout=5000)
+    assert Library(tmp_path).player_settings(song.id).load().speed_pct == 100

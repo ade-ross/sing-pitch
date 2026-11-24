@@ -131,3 +131,46 @@ def test_a_gain_change_is_reported_at_the_next_block_with_the_new_gains():
     assert [(e.kind, e.gains) for e in b.events] == [("gains_changed", (0.5, 0.8))]
     assert np.isclose(b.events[0].output_s, 0.1)
     assert tr.render(100).events == ()
+
+
+def render_with_timeout(tr, frames, seconds=3.0):
+    """render() in a daemon thread: a spinning render fails the test instead of hanging the suite."""
+    import threading
+
+    out = []
+    worker = threading.Thread(target=lambda: out.append(tr.render(frames)), daemon=True)
+    worker.start()
+    worker.join(seconds)
+    assert out, "render() did not return: the loop spins"
+    return out[0]
+
+
+def test_an_empty_section_is_widened_and_render_returns():
+    tr = Transport(ramp_song(10000), sample_rate=SR)
+    tr.set_loop(Loop(0.0, 0.0, lead_in_s=2.0))
+    b = render_with_timeout(tr, 1000)
+    assert len(b.audio) == 1000 and tr.loop is not None and tr.loop.end_s > tr.loop.pass_start_s
+
+
+def test_a_section_after_the_song_end_is_moved_inside_the_song_and_render_returns():
+    tr = Transport(ramp_song(10000), sample_rate=SR)          # 10 s
+    tr.set_loop(Loop(20.0, 25.0, lead_in_s=2.0))              # Pass start 18 s, past the song
+    b = render_with_timeout(tr, 1000)
+    assert len(b.audio) == 1000
+    assert 0.0 <= tr.loop.start_s < tr.loop.end_s <= 10.0
+
+
+def test_a_section_whose_lead_in_starts_at_the_song_end_renders():
+    tr = Transport(ramp_song(10000), sample_rate=SR)
+    tr.set_loop(Loop(12.0, 12.0, lead_in_s=2.0))              # start - Lead-in == song length
+    assert len(render_with_timeout(tr, 1000).audio) == 1000
+
+
+def test_a_seek_reports_which_loop_its_pass_ended():
+    tr = Transport(ramp_song(10000), sample_rate=SR)
+    section = Loop(3.0, 4.0, "Chorus", lead_in_s=2.0)
+    tr.set_loop(section)
+    tr.render(500)
+    tr.seek(6.0)
+    ended = next(e for e in tr.render(100).events if e.kind == "pass_ended")
+    assert ended.loop == section and ended.pass_index == 1

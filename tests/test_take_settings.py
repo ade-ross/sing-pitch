@@ -78,6 +78,21 @@ def test_saving_next_to_old_rows_upgrades_the_header_once_and_leaves_old_rows_em
     assert open(summary_path(home)).read().count("guide_vocal") == 1
 
 
+def test_a_header_upgrade_that_fails_halfway_leaves_the_old_table_whole(tmp_path, monkeypatch):
+    home = old_home(tmp_path)
+    before = open(summary_path(home)).read()
+
+    def crash(self, rows):
+        raise OSError("disk full")
+    monkeypatch.setattr(csv.DictWriter, "writerows", crash)
+    try:
+        save_take(home, make_take(datetime(2026, 11, 24, 9, 0, 0)))
+    except OSError:
+        pass
+    assert open(summary_path(home)).read() == before
+    assert [p.name for p in home.iterdir() if p.name.startswith("takes.csv") and p.name != "takes.csv"] == []
+
+
 # --- through the live runner ------------------------------------------------------------------------------------------
 
 class SettingsBacking(Backing):
@@ -154,3 +169,15 @@ def test_a_speed_change_outside_a_loop_closes_the_take_so_no_take_is_half_at_one
     library_song(tmp_path, reference_line(NOTES))
     rows = sing(tmp_path, 11.5, [(4.5, lambda tr: stretched(tr, 0.7))], loop=False)
     assert [(g, spd) for _, g, _, spd in rows] == [("off", "100"), ("off", "70")]
+
+
+def test_a_take_opened_at_a_cut_starts_when_its_first_voice_was_sung_not_when_the_worker_got_there(tmp_path):
+    """The run takes well under a second of real time, but its Passes start 6 s of voice apart: started_at (and so
+    the id) comes from the run start plus the cut's voice time."""
+    library_song(tmp_path, reference_line(NOTES))
+    sing(tmp_path, 6.0 * 3 + 0.5, [])
+    rows = list(csv.DictReader(open(summary_path(tmp_path))))
+    starts = [datetime.fromisoformat(r["started_at"]) for r in rows]
+    gaps = [(b - a).total_seconds() for a, b in zip(starts, starts[1:])]
+    assert len(rows) == 3 and all(abs(g - 6.0) <= 1.0 for g in gaps), gaps
+    assert len({r["id"] for r in rows}) == 3 and not any("-" in r["id"][9:] for r in rows)    # no collision suffix
