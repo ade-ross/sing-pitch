@@ -116,3 +116,28 @@ def test_a_section_set_from_outside_is_shown_with_edges_that_can_be_moved(qtbot,
     assert got.args == [1.0, 3.0]
     timeline.set_section(None)
     assert timeline.section is None and not timeline.region.isVisible()
+
+
+def test_an_edge_dragged_onto_the_other_keeps_the_section_at_least_the_minimum_long(qtbot, timeline):
+    from sing_pitch.ui.timeline import MIN_SECTION_S
+
+    timeline.set_melody(Melody(reference_line(NOTES), "x"), duration_s=4.0)
+    timeline.set_section(1.0, 2.0)
+    with qtbot.waitSignal(timeline.section_changed, timeout=1000) as got:
+        timeline.region.lines[1].setValue(1.0)             # right handle dropped on the left one
+        timeline.region.lines[1].sigPositionChangeFinished.emit(timeline.region.lines[1])
+    start, end = got.args
+    assert end - start >= MIN_SECTION_S - 1e-9 and 0.0 <= start and end <= 4.0
+    assert timeline.section == (start, end)
+
+
+def test_a_minimum_section_at_the_song_end_stays_inside_the_song(qtbot, timeline):
+    from sing_pitch.ui.timeline import MIN_SECTION_S
+
+    timeline.set_melody(Melody(reference_line(NOTES), "x"), duration_s=4.0)
+    timeline.set_section(3.0, 4.0)
+    with qtbot.waitSignal(timeline.section_changed, timeout=1000) as got:
+        timeline.region.lines[0].setValue(4.0)
+        timeline.region.lines[0].sigPositionChangeFinished.emit(timeline.region.lines[0])
+    start, end = got.args
+    assert end - start >= MIN_SECTION_S - 1e-9 and end <= 4.0
