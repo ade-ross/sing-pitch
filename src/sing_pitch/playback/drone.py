@@ -64,10 +64,12 @@ def _open_output(**kwargs):
 
 
 class DronePlayer:
-    """Plays the Drone of a Key to the default output device until stop()."""
+    """Plays the Drone of a Key to the chosen output device (None = the system default) until stop()."""
 
-    def __init__(self, stream_factory: Callable[..., object] = _open_output, sample_rate: int = SAMPLE_RATE):
+    def __init__(self, stream_factory: Callable[..., object] = _open_output, sample_rate: int = SAMPLE_RATE,
+                 device: int | None = None):
         self._factory = stream_factory
+        self._device = device
         self._sr = sample_rate
         self._stream = None
         self._drone: Drone | None = None
@@ -83,7 +85,10 @@ class DronePlayer:
         def callback(outdata, frames, time_info, status):
             outdata[:] = drone.render(frames)[:, None]
 
-        stream = self._factory(channels=2, samplerate=self._sr, blocksize=1024, dtype="float32", callback=callback)
+        kwargs = dict(channels=2, samplerate=self._sr, blocksize=1024, dtype="float32", callback=callback)
+        if self._device is not None:
+            kwargs["device"] = self._device
+        stream = self._factory(**kwargs)
         stream.start()
         self._drone, self._stream = drone, stream
 

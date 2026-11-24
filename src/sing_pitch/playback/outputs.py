@@ -38,6 +38,17 @@ def output_kind(name: str) -> OutputKind:
     return classify_output(name, facts)
 
 
+def output_devices(devices) -> list[dict]:
+    """The output-capable ones of sounddevice's device dicts. Pure, so the window is tested with fake lists."""
+    return [dict(d) for d in devices if d["max_output_channels"] > 0]
+
+
+def list_outputs() -> list[dict]:
+    import sounddevice as sd
+
+    return output_devices(sd.query_devices())
+
+
 def default_output_name() -> str | None:
     try:
         import sounddevice as sd
