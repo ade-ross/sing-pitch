@@ -241,3 +241,16 @@ def test_the_tail_is_one_consistent_reading_even_when_a_stretch_is_appended_whil
     log._start.armed = True
     end_s, song_s, rate = log.tail()
     assert (end_s, rate) == (1.0, 0.5) and abs(song_s - 0.5) < 1e-9      # all from the first stretch
+
+
+def test_pending_seek_is_where_a_jump_not_yet_applied_will_go():
+    tr = Transport(np.zeros((48000, 2), np.float32), sample_rate=48000)
+    tr.render(480)
+    assert tr.pending_seek_s is None
+    tr.seek(0.5)
+    tr.seek(0.75)
+    assert tr.pending_seek_s == 0.75 and tr.position_s == 0.01
+    tr.seek(99.0)
+    assert tr.pending_seek_s == 1.0                  # clamped to the song
+    tr.render(480)
+    assert tr.pending_seek_s is None

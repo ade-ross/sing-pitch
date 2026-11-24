@@ -29,7 +29,12 @@ Melody Takes get a practice transport:
 - **Timeline:** shows the whole song with the reference melody. He clicks it to jump anywhere, and drags across it to
   mark a Section, which he can save by name.
 - **Loop:** a looped Section repeats with a ~2 s Lead-in before each Pass. Each Pass is scored and saved as its own
-  Take.
+  Take. While it repeats the Section is drawn brighter and "Loop · Pass N · last 92 %" counts every wrap. Unticking Loop
+  (or L) lets the song play on past the Section; Clear (or Esc) removes the mark or the shown Section from the timeline and
+  stops the loop; saved Sections stay saved (Delete removes them).
+- **Moving around:** click the timeline, the arrow keys (5 s) or drag the playhead: the same while playing and while
+  paused. A jump closes the Take as before; jumps made while paused add no further cut. A second arrow press made before
+  the first jump is applied starts from where the first one goes.
 - **Speed:** 50–120% in 5% steps, with pitch unchanged. The scoring line follows the new speed.
 - **Take settings:** each Take records its Guide vocal state, Speed and Section, and History can filter on them.
 - **Keyboard:** shortcuts cover play/pause, loop, jumps and Speed, so his hands stay free.

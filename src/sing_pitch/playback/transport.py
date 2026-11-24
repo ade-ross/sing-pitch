@@ -226,9 +226,25 @@ class Transport:
         return self._n / self._sr
 
     @property
+    def pending_seek_s(self) -> float | None:
+        """Where the last seek not yet applied (it applies at the start of the next block) will go, clamped to the
+        song; None when none is waiting. A second arrow key pressed before that block starts from here, not from the
+        stale position_s."""
+        try:
+            target = self._seeks[-1]
+        except IndexError:
+            return None
+        return min(max(0.0, target), self._song_frames / self._sr)
+
+    @property
     def loop(self) -> Loop | None:
         """The loop in effect after the last block (a set_loop shows from the next block)."""
         return self._loop
+
+    @property
+    def pass_index(self) -> int:
+        """The Pass playing in the last block (1, 2, ... counting every wrap); 0 without a loop."""
+        return self._pass if self._loop is not None else 0
 
     @property
     def speed(self) -> float:
