@@ -38,3 +38,19 @@ def test_an_old_melody_take_is_scored_against_t_minus_its_latency_offset(tmp_pat
     frames = load_frames(home, "20261120-210000")
     song_times = saved_song_times(home, "20261120-210000")
     assert all(abs(st - (f.t - 0.25)) < 1e-12 for f, st in zip(frames, song_times))
+
+
+def test_saving_a_new_pass_take_next_to_old_rows_upgrades_the_table_and_old_rows_read_as_not_a_pass(tmp_path):
+    import dataclasses
+
+    from sing_pitch.take_store import save_take
+
+    home = old_home(tmp_path)
+    old_rows = list(csv.DictReader(open(summary_path(home))))
+    old = rescore_take(home, old_rows[0]["id"])
+    assert (old.section_name, old.pass_index) == (None, None)
+    save_take(home, dataclasses.replace(old, id="20261124-120000", section_name="Chorus 1", pass_index=2))
+    rows = list(csv.DictReader(open(summary_path(home))))
+    assert len(rows) == len(old_rows) + 1 and all(r["section_name"] == "" for r in rows[:-1])
+    assert (rows[-1]["section_name"], rows[-1]["pass_index"]) == ("Chorus 1", "2")
+    assert [r["pct_in_tune"] for r in rows[:-1]] == [r["pct_in_tune"] for r in old_rows]     # nothing shifted

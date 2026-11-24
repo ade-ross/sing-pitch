@@ -22,8 +22,10 @@ from ..take_engine import TakeRecord, linear_song_times, score_take
 COLUMNS = (
     "id", "started_at", "reference", "key", "song_id", "octave_shift", "pct_in_tune", "median_abs_cents",
     "tendency", "steadiness_cents", "lowest_note", "highest_note", "n_voiced_frames", "n_scored_frames",
-    "duration_s", "out_of_key_count", "latency_offset_s", "app_version",
+    "duration_s", "out_of_key_count", "latency_offset_s", "app_version", "section_name", "pass_index",
 )
+# Columns added after the first release go at the END; a table with an older header is rewritten with the new one
+# on the next save, its old rows left empty in the new columns (no Section = not a Pass).
 
 
 def summary_path(home: Path) -> Path:
@@ -46,6 +48,7 @@ def _row(record: TakeRecord) -> dict:
         "highest_note": cell(s.highest_note), "n_voiced_frames": s.n_voiced, "n_scored_frames": s.n_scored,
         "duration_s": round(s.duration_s, 3), "out_of_key_count": s.out_of_key_count,
         "latency_offset_s": record.latency_offset_s, "app_version": __version__,
+        "section_name": cell(record.section_name), "pass_index": cell(record.pass_index),
     }
 
 
@@ -72,12 +75,29 @@ def save_take(home: Path, record: TakeRecord) -> TakeRecord:
     )
     path = summary_path(home)
     new_file = not path.exists()
+    if not new_file:
+        _upgrade_header(path)
     with open(path, "a", newline="") as fh:
         writer = csv.DictWriter(fh, fieldnames=COLUMNS)
         if new_file:
             writer.writeheader()
         writer.writerow(_row(record))
     return record
+
+
+def _write_rows(path: Path, rows: list[dict]) -> None:
+    with open(path, "w", newline="") as fh:
+        writer = csv.DictWriter(fh, fieldnames=COLUMNS, restval="", extrasaction="ignore")
+        writer.writeheader()
+        writer.writerows(rows)
+
+
+def _upgrade_header(path: Path) -> None:
+    """A table written by an older version (fewer columns): rewrite it once with the current header."""
+    with open(path, newline="") as fh:
+        header = next(csv.reader(fh), [])
+    if tuple(header) != COLUMNS:
+        _write_rows(path, _rows(path.parent))
 
 
 def load_frames(home: Path, take_id: str) -> list[PitchFrame]:
@@ -168,11 +188,9 @@ def rescore_take(
         song_id=row["song_id"] or None,
         latency_offset_s=latency,
         song_times=tuple(song_times),
+        section_name=row.get("section_name") or None,
+        pass_index=int(row["pass_index"]) if row.get("pass_index") else None,
     )
     if write:
-        rows = [_row(record) if r["id"] == take_id else r for r in rows]
-        with open(summary_path(home), "w", newline="") as fh:
-            writer = csv.DictWriter(fh, fieldnames=COLUMNS)
-            writer.writeheader()
-            writer.writerows(rows)
+        _write_rows(summary_path(home), [_row(record) if r["id"] == take_id else r for r in rows])
     return record

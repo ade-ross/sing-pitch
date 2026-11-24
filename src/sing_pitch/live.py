@@ -11,11 +11,17 @@ import numpy as np
 from .audio_input import AudioInput
 from .pitch import PitchFrame, PitchTracker
 from .reference import Reference
-from .take_engine import FrameScore, LogClock, SongClock, TakeEngine, TakeRecord
+from .take_engine import FrameScore, LogClock, PassTag, SongClock, TakeEngine, TakeRecord
 from .take_store import save_take
 
 FRAME_S = 0.016              # one tracker frame
-MIN_TAKE_SCORED_S = 3.0      # a Take closed by a jump with less scored singing than this is discarded
+MIN_TAKE_SCORED_S = 3.0      # a Take closed by a jump or a loop wrap with less scored singing than this is discarded
+
+
+def pass_tag(loop, pass_index: int) -> PassTag:
+    """The tag of Pass `pass_index` of a playback.transport.Loop; an unnamed mark is named by its span."""
+    name = loop.name or f"{loop.start_s:.1f}-{loop.end_s:.1f} s"
+    return PassTag(name, loop.start_s, loop.end_s, pass_index)
 
 
 def _too_short(record: TakeRecord) -> bool:
@@ -45,11 +51,11 @@ class LiveTake:
     """One Take, fed chunk by chunk. Drive from ONE thread. song_clock: see TakeEngine."""
 
     def __init__(self, tracker: PitchTracker, reference: Reference, sample_rate: int,
-                 song_clock: SongClock | None = None, reset_tracker: bool = True):
-        """reset_tracker False: a Take that goes on from the previous one's audio (after a jump), so the tracker keeps
-        its state and its frame times."""
+                 song_clock: SongClock | None = None, reset_tracker: bool = True, pass_tag: PassTag | None = None):
+        """reset_tracker False: a Take that goes on from the previous one's audio (after a jump or a loop wrap), so
+        the tracker keeps its state and its frame times. pass_tag: see TakeEngine."""
         self._tracker = tracker
-        self._engine = TakeEngine(reference, song_clock=song_clock)
+        self._engine = TakeEngine(reference, song_clock=song_clock, pass_tag=pass_tag)
         self._sample_rate = sample_rate
         if reset_tracker:
             tracker.reset()
@@ -61,6 +67,14 @@ class LiveTake:
     @song_clock.setter
     def song_clock(self, value: SongClock) -> None:
         self._engine.song_clock = value
+
+    @property
+    def pass_tag(self) -> PassTag | None:
+        return self._engine.pass_tag
+
+    @pass_tag.setter
+    def pass_tag(self, value: PassTag | None) -> None:
+        self._engine.pass_tag = value
 
     def feed(self, chunk: np.ndarray) -> list[FrameScore]:
         return self._engine.push(self._tracker.push(chunk, self._sample_rate))
@@ -91,7 +105,12 @@ class LiveRunner:
     jump's input time (event output time + the clock's offset) belong to the old Take, the rest to the new one. A Take
     closed that way with less than MIN_TAKE_SCORED_S of scored singing is discarded; the others are saved at once
     and listed by drain_saved(). On stop() the last Take is saved too, unless it is that short and an earlier Take of
-    the run was saved (a run always leaves at least one Take)."""
+    the run was saved (a run always leaves at least one Take).
+
+    A Section loop works the same way: each "pass_started" event closes the Take there and opens the next one, tagged
+    with the Section and the pass index (PassTag), so every Pass is its own Take and its Lead-in is never scored.
+    "loop_ended" closes the last Pass Take and opens an untagged one. A Pass that starts before the song clock exists
+    (the loop was on at Start) tags the first Take."""
 
     def __init__(self, source: AudioInput, tracker: PitchTracker, reference: Reference, home: Path,
                  backing: Playback | None = None, latency_s: float = 0.0):
@@ -104,7 +123,8 @@ class LiveRunner:
         self._chunks: queue.SimpleQueue = queue.SimpleQueue()
         self._scores: queue.SimpleQueue = queue.SimpleQueue()
         self._take: LiveTake | None = None
-        self._cuts: list[float] = []              # input times of jumps not yet reached by the frames (worker only)
+        self._cuts: list[tuple[float, PassTag | None]] = []   # (input time, tag of the next Take) of boundaries not
+                                                              # yet reached by the frames (worker only)
         self._saved: list[TakeRecord] = []        # Takes saved so far in this run (worker, then stop())
         self._saved_news: queue.SimpleQueue = queue.SimpleQueue()
         self._thread: threading.Thread | None = None
@@ -146,8 +166,10 @@ class LiveRunner:
         self._thread.start()          # chunks that arrived meanwhile wait in the queue
 
     def _on_event(self, event) -> None:       # audio thread: only hand over, in order with the chunks
-        if event.kind == "jumped":
-            self._chunks.put(("jump", event.output_s))
+        if event.kind in ("jumped", "loop_ended"):
+            self._chunks.put(("jump", (event.output_s, None)))
+        elif event.kind == "pass_started":
+            self._chunks.put(("jump", (event.output_s, pass_tag(event.loop, event.pass_index))))
 
     @staticmethod
     def _quietly(cleanup) -> None:
@@ -171,24 +193,26 @@ class LiveRunner:
     def _control(self, kind: str, value) -> None:
         if kind == "align":             # ("align", clock): set before the first frame is scored
             self._take.song_clock = value
-        elif kind == "jump":            # ("jump", output_s): a jump before the clock exists has no Take to close
+        elif kind == "jump":            # ("jump", (output_s, tag)): a boundary before the clock exists has no Take
+            output_s, tag = value       # to close, so the first Take simply takes its tag
             if isinstance(self._take.song_clock, LogClock):
-                self._cuts.append(value + self._take.song_clock.offset_s)
+                self._cuts.append((output_s + self._take.song_clock.offset_s, tag))
+            else:
+                self._take.pass_tag = tag
 
     def _route(self, frames: list[PitchFrame]) -> list[FrameScore]:
         """Tracker frames to the current Take; at each pending jump the Take is closed and the next one opened."""
         scores: list[FrameScore] = []
         while self._cuts and frames:
-            first_after = next((i for i, f in enumerate(frames) if f.t >= self._cuts[0]), None)
+            first_after = next((i for i, f in enumerate(frames) if f.t >= self._cuts[0][0]), None)
             if first_after is None:
                 break
             scores += self._take.push_frames(frames[:first_after])
             frames = frames[first_after:]
-            self._cuts.pop(0)
-            self._next_take()
+            self._next_take(self._cuts.pop(0)[1])
         return scores + self._take.push_frames(frames)
 
-    def _next_take(self) -> None:
+    def _next_take(self, tag: PassTag | None = None) -> None:
         old, clock = self._take, self._take.song_clock
         record = old.close()
         if not _too_short(record):
@@ -196,10 +220,10 @@ class LiveRunner:
             self._saved.append(saved)
             self._saved_news.put(saved)
         self._take = LiveTake(self._tracker, self._reference, self._source.sample_rate, song_clock=clock,
-                              reset_tracker=False)
+                              reset_tracker=False, pass_tag=tag)
 
     def drain_saved(self) -> list[TakeRecord]:
-        """Takes saved at a jump since the last call (the last Take of the run comes from stop())."""
+        """Takes saved at a jump or a loop wrap since the last call (the last Take of the run comes from stop())."""
         out: list[TakeRecord] = []
         while True:
             try:

@@ -12,7 +12,7 @@ from ..pitch import PitchFrame
 from ..reference import Band, Reference
 from .clock import LinearClock, SongClock
 from .gate import VoicingGate, voiced_mask
-from .summary import TakeRecord, TakeSummary, summarise
+from .summary import PassTag, TakeRecord, TakeSummary, summarise
 
 
 @dataclass(frozen=True)
@@ -133,10 +133,14 @@ class TakeEngine:
         config: ScoreConfig = DEFAULT_SCORE_CONFIG,
         started_at: datetime | None = None,
         song_clock: SongClock | None = None,
+        pass_tag: PassTag | None = None,
     ):
         """song_clock: voice time -> the song time it answers (Melody: a LogClock over the Transport's song-time
-        log). Default: each frame's own time. Settable until the first push()."""
+        log). Default: each frame's own time. pass_tag: this Take is one Pass of a looped Section; voice answering
+        song time outside the Section (the Lead-in) gets no song time, so it is shown and never scored. Both are
+        settable until the first push()."""
         self.song_clock: SongClock = song_clock or LinearClock()
+        self.pass_tag = pass_tag
         self._song_times: list[float | None] = []
         self._reference = reference
         self._config = config
@@ -156,6 +160,8 @@ class TakeEngine:
         summary uses the whole Take's own shift, so the first seconds on screen can differ from it."""
         self._frames.extend(frames)
         song_times = [self.song_clock(f.t) for f in frames]
+        if self.pass_tag is not None:
+            song_times = [st if self.pass_tag.scores(st) else None for st in song_times]
         self._song_times.extend(song_times)
         voiced = [self._gate.step(f) for f in frames]
         if self._reference.kind == "melody" and len(self._live_pairs) < self._config.octave_live_lock_frames:
@@ -177,4 +183,6 @@ class TakeEngine:
             song_id=getattr(self._reference, "song_id", None) if self._reference.kind == "melody" else None,
             latency_offset_s=self.song_clock.offset_s,
             song_times=tuple(self._song_times),
+            section_name=None if self.pass_tag is None else self.pass_tag.section_name,
+            pass_index=None if self.pass_tag is None else self.pass_tag.pass_index,
         )

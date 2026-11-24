@@ -17,6 +17,7 @@ from pathlib import Path
 import numpy as np
 
 from .ports import ReferenceLine
+from .sections import SECTIONS, SectionStore
 
 VOCALS, BACKING, REFERENCE, META = "vocals.wav", "backing.wav", "reference.npz", "meta.json"
 
@@ -85,6 +86,10 @@ class Library:
             raise KeyError(f"no song {song_id!r} in the library")
         return self._open(d)
 
+    def sections(self, song_id: str) -> SectionStore:
+        """The song's saved Sections and unnamed mark."""
+        return SectionStore(self.get(song_id).dir)
+
     def find_by_source(self, source_key: str) -> Song | None:
         return next((s for s in self.list_songs() if s.meta.source_key == source_key), None)
 
@@ -106,6 +111,8 @@ class Library:
         if replacing is None:
             staging.rename(final)
             return Song(meta, final)
+        if (final / SECTIONS).exists():        # a re-import keeps the Sections he marked (song times stay valid)
+            shutil.copy2(final / SECTIONS, staging / SECTIONS)
         old = self.root / f".old-{uuid.uuid4().hex[:8]}"
         final.rename(old)
         try:

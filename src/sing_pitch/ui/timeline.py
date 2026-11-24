@@ -3,10 +3,9 @@
 It is a pyqtgraph plot whose x axis is SONG time in seconds (original tempo). Everything that is not "show the song
 and say where it was clicked" is left to the window: the widget only emits `seek_requested(song_s)`.
 
-For Sections (ticket #13): `plot` is the PlotItem, so a `pg.LinearRegionItem` (draggable edge handles included) can
-be added with `timeline.plot.addItem(region)`; a region takes the mouse itself, a click anywhere else still seeks.
-Dragging on empty strip is routed to `_TimelineView.mouseDragEvent`, which is where "drag across the timeline to mark
-a Section" goes (it gets the song time through `timeline.song_time_at(ev.pos())`)."""
+Sections: a left-button drag across the strip marks one (a `pg.LinearRegionItem` whose edges are handles that can be
+dragged, and whose body can be dragged as a whole). A finished drag emits `section_marked(start, end)`, a finished
+edit of the shown Section `section_changed(start, end)`; the window decides what they mean (save, loop). A click outside the Section still seeks."""
 from __future__ import annotations
 
 import numpy as np
@@ -18,10 +17,12 @@ from ..reference import Melody
 LINE_STEP_S = 0.05          # the strip draws the reference at this resolution, however long the song
 PLAYHEAD_PEN = pg.mkPen("#f5f5f5", width=2)
 LINE_PEN = pg.mkPen("#5dade2", width=2)
+SECTION_BRUSH = pg.mkBrush(241, 196, 15, 50)
+MIN_SECTION_S = 0.2         # a shorter drag is a shaky click, not a Section
 
 
 class _TimelineView(pg.ViewBox):
-    """The strip's view box: a click seeks, a drag is left alone (for #13) and nothing zooms or pans."""
+    """The strip's view box: a click seeks, a drag marks a Section, nothing zooms or pans."""
 
     def __init__(self, owner: Timeline):
         super().__init__(enableMenu=False)
@@ -36,7 +37,12 @@ class _TimelineView(pg.ViewBox):
             ev.ignore()
 
     def mouseDragEvent(self, ev, axis=None) -> None:
-        ev.ignore()                  # ticket #13: drag across the strip marks a Section
+        if ev.button() != QtCore.Qt.LeftButton:
+            ev.ignore()
+            return
+        ev.accept()
+        a, b = self._owner.song_time_at(ev.buttonDownPos()), self._owner.song_time_at(ev.pos())
+        self._owner._drag_section(a, b, ev.isFinish())
 
     def wheelEvent(self, ev, axis=None) -> None:
         ev.ignore()
@@ -44,6 +50,8 @@ class _TimelineView(pg.ViewBox):
 
 class Timeline(pg.GraphicsLayoutWidget):
     seek_requested = QtCore.Signal(float)        # song time (s) the user clicked
+    section_marked = QtCore.Signal(float, float)    # (start, end) of a new Section dragged across the strip
+    section_changed = QtCore.Signal(float, float)   # (start, end) after he moved the shown Section's edges or body
 
     def __init__(self):
         super().__init__()
@@ -59,6 +67,11 @@ class Timeline(pg.GraphicsLayoutWidget):
         self._playhead = pg.InfiniteLine(pos=0.0, angle=90, movable=False, pen=PLAYHEAD_PEN)
         self._playhead.setZValue(10)
         self.plot.addItem(self._playhead)
+        self.region = pg.LinearRegionItem((0.0, 1.0), brush=SECTION_BRUSH, swapMode="sort")
+        self.region.setZValue(5)
+        self.region.setVisible(False)
+        self.plot.addItem(self.region)
+        self.region.sigRegionChangeFinished.connect(self._region_edited)
         self._duration = 1.0
         self.set_duration(1.0)
 
@@ -92,6 +105,35 @@ class Timeline(pg.GraphicsLayoutWidget):
     @property
     def playhead_s(self) -> float:
         return float(self._playhead.value())
+
+    @property
+    def section(self) -> tuple[float, float] | None:
+        if not self.region.isVisible():
+            return None
+        start, end = self.region.getRegion()
+        return float(start), float(end)
+
+    def set_section(self, start_s: float | None, end_s: float | None = None) -> None:
+        """Show a Section (None hides it). Does not emit section_changed."""
+        if start_s is None:
+            self.region.setVisible(False)
+            return
+        self.region.blockSignals(True)
+        self.region.setRegion((min(start_s, end_s), max(start_s, end_s)))
+        self.region.blockSignals(False)
+        self.region.setBounds((0.0, self._duration))
+        self.region.setVisible(True)
+
+    def _drag_section(self, a: float, b: float, finished: bool) -> None:
+        if abs(b - a) < MIN_SECTION_S:
+            return
+        self.set_section(a, b)
+        if finished:
+            self.section_marked.emit(*self.section)
+
+    def _region_edited(self, *_) -> None:
+        if self.region.isVisible():
+            self.section_changed.emit(*self.section)
 
     def song_time_at(self, view_pos) -> float:
         """Song time (s, clamped to the song) of a position in the view box's own coordinates (a mouse event's pos)."""

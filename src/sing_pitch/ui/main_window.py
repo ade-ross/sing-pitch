@@ -18,6 +18,7 @@ from ..live import LiveRunner, Playback
 from ..music import NOTE_NAMES, note_name
 from ..pitch import PitchTracker
 from ..playback import BackingPlayer, DronePlayer
+from ..playback.transport import LEAD_IN_S, Loop
 from ..playback.stretch import SpeedCache, Stretcher, time_stretch
 from ..playback.outputs import OutputKind, default_output_name, headphone_warning, output_kind
 from ..reference import Band, Key, Melody, NearestNote, Reference
@@ -69,6 +70,15 @@ def describe(record: TakeRecord) -> str:
         f"tends {s.tendency}   |   {steadiness_text(s)}   |   range {s.lowest_note}-{s.highest_note}   |   "
         f"{s.n_scored * 0.016:.1f} s sung   |   saved as {record.id}"
     )
+
+
+def pass_text(record: TakeRecord) -> str:
+    """One Pass's result, shown while the loop goes on."""
+    s = record.summary
+    if s.n_scored == 0:
+        return f"Pass {record.pass_index} of {record.section_name}: nothing sung in the Section."
+    return (f"Pass {record.pass_index} of {record.section_name}: In tune {s.pct_in_tune:.0f}%   |   "
+            f"median {s.median_abs_cents:.0f} cents off   |   tends {s.tendency}   |   saved as {record.id}")
 
 
 def _volume_slider(tip: str) -> QtWidgets.QSlider:
@@ -154,6 +164,29 @@ class MainWindow(QtWidgets.QWidget):
             shortcut = QtGui.QShortcut(QtGui.QKeySequence(key), self)
             shortcut.setContext(QtCore.Qt.WindowShortcut)
             shortcut.activated.connect(action)
+        self.timeline.section_marked.connect(self._section_marked)
+        self.timeline.section_changed.connect(self._section_edited)
+        self.section_box = QtWidgets.QComboBox()
+        self.section_box.setFocusPolicy(QtCore.Qt.NoFocus)
+        self.section_box.setToolTip("Drag across the timeline to mark a Section; drag its edges to adjust it")
+        self.section_box.currentIndexChanged.connect(self._section_chosen)
+        self.section_name_edit = QtWidgets.QLineEdit()
+        self.section_name_edit.setPlaceholderText("Section name")
+        self.section_name_edit.setMaximumWidth(140)
+        self.save_section_button = QtWidgets.QPushButton("Save")
+        self.save_section_button.clicked.connect(self.save_section)
+        self.rename_section_button = QtWidgets.QPushButton("Rename")
+        self.rename_section_button.clicked.connect(self.rename_section)
+        self.delete_section_button = QtWidgets.QPushButton("Delete")
+        self.delete_section_button.clicked.connect(self.delete_section)
+        self.loop_box = QtWidgets.QCheckBox("Loop (L)")
+        self.loop_box.setFocusPolicy(QtCore.Qt.NoFocus)
+        self.loop_box.setToolTip(f"Repeat the Section; each Pass starts {LEAD_IN_S:.0f} s early (never scored) and is "
+                                 "saved as its own Take")
+        self.loop_box.toggled.connect(self._loop_toggled)
+        loop_key = QtGui.QShortcut(QtGui.QKeySequence(QtCore.Qt.Key_L), self)
+        loop_key.setContext(QtCore.Qt.WindowShortcut)
+        loop_key.activated.connect(self.toggle_loop)                  # bound method: a lambda keeps self alive
         self.speed_box = QtWidgets.QSpinBox()
         self.speed_box.setRange(SPEED_MIN, SPEED_MAX)
         self.speed_box.setSingleStep(SPEED_STEP)
@@ -215,12 +248,18 @@ class MainWindow(QtWidgets.QWidget):
                   self.pause_button, QtWidgets.QLabel("Speed"), self.speed_box, self.speed_label):
             mix.addWidget(w)
         mix.addStretch(1)
+        sections = QtWidgets.QHBoxLayout()
+        for w in (QtWidgets.QLabel("Section"), self.section_box, self.section_name_edit, self.save_section_button,
+                  self.rename_section_button, self.delete_section_button, self.loop_box):
+            sections.addWidget(w)
+        sections.addStretch(1)
         warn = QtWidgets.QHBoxLayout()
         warn.addWidget(self.output_label, 1)
         warn.addWidget(self.headphones_button)
         layout = QtWidgets.QVBoxLayout(self)
         layout.addLayout(top)
         layout.addLayout(mix)
+        layout.addLayout(sections)
         layout.addLayout(warn)
         layout.addWidget(self.plot_widget, 1)
         layout.addWidget(self.timeline)
@@ -256,7 +295,9 @@ class MainWindow(QtWidgets.QWidget):
         self.drone_box.setEnabled(is_key)
         self.song_box.setEnabled(is_melody)
         self._preview_song()
-        for w in (self.guide_box, self.guide_slider, self.backing_slider, self.speed_box):
+        for w in (self.guide_box, self.guide_slider, self.backing_slider, self.speed_box, self.section_box,
+                  self.section_name_edit, self.save_section_button, self.rename_section_button,
+                  self.delete_section_button, self.loop_box):
             w.setEnabled(is_melody)
         self.update_output_warning()
         self._speed_changed()
@@ -273,13 +314,132 @@ class MainWindow(QtWidgets.QWidget):
                 melody = None
         self.timeline.set_melody(melody)
         self.timeline.setVisible(melody is not None)
+        self.reload_sections()
 
     def seek(self, song_s: float) -> None:
-        """Jump the running Melody Take's song to song_s (a click on the Timeline). A jump closes the Take."""
+        """Jump the running Melody Take's song to song_s (a click on the Timeline). A jump closes the Take and ends a
+        loop."""
         if self._backing is None:
             return
         self._backing.seek(song_s)
+        self._set_loop_box(False)
         self.timeline.set_playhead(song_s)
+
+    # --- Sections and the loop ---------------------------------------------------------------------------------
+    def _sections(self):
+        """The chosen song's Section store, or None (no Melody song chosen)."""
+        song_id = self._speed_song()
+        return None if song_id is None else Library(self._home).sections(song_id)
+
+    def reload_sections(self, select: str | None = None) -> None:
+        """Fill the picker from the library: the unnamed mark first, then the saved Sections; show the chosen one."""
+        store = self._sections()
+        self.section_box.blockSignals(True)
+        self.section_box.clear()
+        self.section_box.addItem("unsaved mark", None)
+        for section in (store.saved() if store else []):
+            self.section_box.addItem(section.name, section.name)
+        if select is not None:
+            self.section_box.setCurrentIndex(max(0, self.section_box.findData(select)))
+        self.section_box.blockSignals(False)
+        self._section_chosen()
+
+    def _chosen_section(self):
+        store = self._sections()
+        if store is None:
+            return None
+        name = self.section_box.currentData()
+        try:
+            return store.mark if name is None else store.get(name)
+        except StopIteration:
+            return None
+
+    def _section_chosen(self, *_) -> None:
+        section = self._chosen_section()
+        self.timeline.set_section(*((None,) if section is None else (section.start_s, section.end_s)))
+        if self.section_box.currentData() is not None:
+            self.section_name_edit.setText(self.section_box.currentData())
+        self._apply_loop()
+
+    def _section_marked(self, start_s: float, end_s: float) -> None:
+        """A new drag on the strip: it becomes the unnamed mark (kept until replaced)."""
+        store = self._sections()
+        if store is None:
+            return
+        store.set_mark(start_s, end_s)
+        self.timeline.set_section(start_s, end_s)
+        if self.section_box.currentIndex() != 0:
+            self.section_box.setCurrentIndex(0)            # shows the mark and re-applies the loop
+        else:
+            self._apply_loop()
+
+    def _section_edited(self, start_s: float, end_s: float) -> None:
+        """Edges moved: a saved Section keeps its name and takes the new span, otherwise the mark does."""
+        store, name = self._sections(), self.section_box.currentData()
+        if store is None:
+            return
+        if name is None:
+            store.set_mark(start_s, end_s)
+        else:
+            store.save(name, start_s, end_s)
+        self._apply_loop()
+
+    def save_section(self) -> None:
+        store, span, name = self._sections(), self.timeline.section, self.section_name_edit.text().strip()
+        if store is None or span is None or not name:
+            self.summary_label.setText("Mark a Section on the timeline and type its name to save it.")
+            return
+        store.save(name, *span)
+        self.reload_sections(select=name)
+
+    def rename_section(self) -> None:
+        store, old, new = self._sections(), self.section_box.currentData(), self.section_name_edit.text().strip()
+        if store is None or old is None:
+            self.summary_label.setText("Pick a saved Section to rename.")
+            return
+        try:
+            store.rename(old, new)
+        except ValueError as exc:
+            self.summary_label.setText(f"Cannot rename: {exc}")
+            return
+        self.reload_sections(select=new)
+
+    def delete_section(self) -> None:
+        store, name = self._sections(), self.section_box.currentData()
+        if store is None or name is None:
+            return
+        store.delete(name)
+        self.reload_sections()
+
+    def toggle_loop(self) -> None:
+        if self.loop_box.isEnabled():
+            self.loop_box.setChecked(not self.loop_box.isChecked())
+
+    def _loop(self) -> Loop | None:
+        """The loop the controls ask for: the shown Section, named when it is a saved one."""
+        span = self.timeline.section
+        if not self.loop_box.isChecked() or span is None:
+            return None
+        return Loop(span[0], span[1], self.section_box.currentData(), LEAD_IN_S)
+
+    def _loop_toggled(self, on: bool) -> None:
+        if on and self.timeline.section is None:
+            self._set_loop_box(False)
+            self.summary_label.setText("Mark a Section on the timeline first (drag across it), then loop it.")
+            return
+        self._apply_loop()
+
+    def _apply_loop(self) -> None:
+        """The running Take's player loops what the controls show (a changed Section starts again at Pass 1)."""
+        if self._backing is not None and hasattr(self._backing, "set_loop"):
+            loop = self._loop()
+            if loop != getattr(self._backing, "loop", None):
+                self._backing.set_loop(loop)
+
+    def _set_loop_box(self, on: bool) -> None:
+        self.loop_box.blockSignals(True)
+        self.loop_box.setChecked(on)
+        self.loop_box.blockSignals(False)
 
     def jump_back(self) -> None:
         self.jump_by(-JUMP_S)
@@ -500,6 +660,8 @@ class MainWindow(QtWidgets.QWidget):
                 song = Library(self._home).get(reference.song_id)
                 backing = self._backing_factory(song.backing_path, song.vocals_path)
                 backing.set_gains(*self._gains())
+                if self._loop() is not None:                 # the Take starts on the Section's Lead-in, as Pass 1
+                    backing.set_loop(self._loop())
                 if stems is not None:
                     backing.set_speed(percent / 100, *stems)
                 self._speed_playing = percent
@@ -639,7 +801,8 @@ class MainWindow(QtWidgets.QWidget):
                 self._stop()
                 return
             for record in self._runner.drain_saved():
-                self.summary_label.setText(f"Jumped. Take saved: {describe(record)}")
+                self.summary_label.setText(pass_text(record) if record.pass_index is not None
+                                           else f"Jumped. Take saved: {describe(record)}")
             b = self._backing
             if b is not None and not drain_only and getattr(b, "finished", False) \
                     and b.position_s() > b.duration_s + END_GRACE_S:

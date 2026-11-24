@@ -30,6 +30,20 @@ class TakeSummary:
 
 
 @dataclass(frozen=True)
+class PassTag:
+    """A Take that is one Pass of a looped Section. Only voice answering song time inside [start_s, end_s) is scored:
+    the Lead-in before the start never is."""
+
+    section_name: str        # the saved name, or "start-end s" for an unnamed mark
+    start_s: float
+    end_s: float
+    pass_index: int          # 1 = the first Pass after the loop was switched on
+
+    def scores(self, song_t: float | None) -> bool:
+        return song_t is not None and self.start_s <= song_t < self.end_s
+
+
+@dataclass(frozen=True)
 class TakeRecord:
     id: str
     started_at: datetime
@@ -40,6 +54,8 @@ class TakeRecord:
     song_id: str | None = None
     latency_offset_s: float = 0.0        # the song clock's offset at the start (linear Takes: the whole story)
     song_times: tuple[float | None, ...] | None = None   # per frame, the song time it was scored against
+    section_name: str | None = None     # a Pass Take: its Section (None = not a Pass)
+    pass_index: int | None = None
 
 
 def count_out_of_key(scores: Sequence) -> int:
