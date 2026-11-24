@@ -162,6 +162,35 @@ def test_replaying_an_older_take_shows_its_settings_and_the_old_ones_come_back_a
     assert win.octave_box.currentData() is None and not win.notes_box.isChecked() and win.speed_box.value() == 100
 
 
+def replay_locked_controls(win):
+    return (win.reference_box, win.song_box, win.key_box, win.speed_box, win.speed_70_button, win.speed_85_button,
+            win.speed_100_button, win.octave_box, win.between_box, win.bpm_box, win.beats_box)
+
+
+def test_during_a_replay_the_controls_it_shows_are_locked_and_nothing_is_remembered_or_stretched(qtbot, tmp_path):
+    """Review 5 #3: the replay put its Take's settings on live controls; touching one (Speed, a preset, BPM, the song)
+    wrote them to player.json as the song's own and started a stretch."""
+    win, song = melody_window(qtbot, tmp_path)
+    take = sing_a_take(qtbot, win)
+    remembered = song.dir / "player.json"
+    before = remembered.read_text() if remembered.exists() else None
+    enabled = [w.isEnabled() for w in replay_locked_controls(win)]
+    win.replay_take(take)
+    assert not any(w.isEnabled() for w in replay_locked_controls(win))
+    win.speed_box.setValue(70)                                      # even a change made by code changes nothing
+    win.speed_85_button.click()
+    win.bpm_box.setValue(90.0)
+    win.beats_box.setValue(3)
+    win.between_box.setCurrentText("Count-in")
+    win.octave_box.setCurrentIndex(win.octave_box.findData(1))
+    qtbot.wait(700)                                                 # longer than the stretch's start delay
+    assert win._speed_job is None and not win._speed_timer.isActive()
+    assert not (song.dir / "speed").exists()
+    assert (remembered.read_text() if remembered.exists() else None) == before
+    win.toggle_replay()
+    assert [w.isEnabled() for w in replay_locked_controls(win)] == enabled
+
+
 def test_replaying_while_another_replay_runs_switches_to_the_new_take(qtbot, tmp_path):
     win, song = melody_window(qtbot, tmp_path)
     first = sing_a_take(qtbot, win)
