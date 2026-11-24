@@ -6,6 +6,7 @@ from __future__ import annotations
 
 import csv
 import dataclasses
+import os
 from datetime import datetime
 from pathlib import Path
 
@@ -106,10 +107,19 @@ def save_take(home: Path, record: TakeRecord) -> TakeRecord:
 
 
 def _write_rows(path: Path, rows: list[dict]) -> None:
-    with open(path, "w", newline="") as fh:
-        writer = csv.DictWriter(fh, fieldnames=COLUMNS, restval="", extrasaction="ignore")
-        writer.writeheader()
-        writer.writerows(rows)
+    """Rewrite the whole table atomically: a temp file next to it, then os.replace, so a crash or a full disk
+    halfway leaves the old table whole."""
+    tmp = path.with_name(f"{path.name}.{os.getpid()}.tmp")
+    try:
+        with open(tmp, "w", newline="") as fh:
+            writer = csv.DictWriter(fh, fieldnames=COLUMNS, restval="", extrasaction="ignore")
+            writer.writeheader()
+            writer.writerows(rows)
+            fh.flush()
+            os.fsync(fh.fileno())
+        os.replace(tmp, path)
+    finally:
+        tmp.unlink(missing_ok=True)
 
 
 def _upgrade_header(path: Path) -> None:

@@ -78,6 +78,21 @@ def test_saving_next_to_old_rows_upgrades_the_header_once_and_leaves_old_rows_em
     assert open(summary_path(home)).read().count("guide_vocal") == 1
 
 
+def test_a_header_upgrade_that_fails_halfway_leaves_the_old_table_whole(tmp_path, monkeypatch):
+    home = old_home(tmp_path)
+    before = open(summary_path(home)).read()
+
+    def crash(self, rows):
+        raise OSError("disk full")
+    monkeypatch.setattr(csv.DictWriter, "writerows", crash)
+    try:
+        save_take(home, make_take(datetime(2026, 11, 24, 9, 0, 0)))
+    except OSError:
+        pass
+    assert open(summary_path(home)).read() == before
+    assert [p.name for p in home.iterdir() if p.name.startswith("takes.csv") and p.name != "takes.csv"] == []
+
+
 # --- through the live runner ------------------------------------------------------------------------------------------
 
 class SettingsBacking(Backing):
