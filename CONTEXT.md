@@ -56,7 +56,14 @@ A part of a Melody where the extracted reference pitch is unreliable; shown grey
 _Avoid_: gap, ignored part
 
 **Octave shift**:
-The single whole-octave offset between Simone's voice and the original singer, detected once per Take.
+The whole-octave offset between Simone's voice and the original singer, chosen per Phrase (Auto) or pinned by Simone for the whole Take.
+
+**Phrase**:
+A run of singing between pauses of about half a second or more; the unit an Auto Octave shift is chosen for.
+_Avoid_: line, segment
+
+**Guide lines**:
+Faint copies of the reference melody one octave above and below the active Octave shift.
 
 **Band**:
 How far from the Reference a moment is: green within ±25 cents, yellow 25–50, red beyond ±50.
