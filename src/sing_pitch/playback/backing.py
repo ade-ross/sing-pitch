@@ -119,8 +119,11 @@ class BackingPlayer:
         self._transport.pause()
 
     def seek(self, song_s: float) -> None:
-        """Go on from this song time, from the next block (a "jumped" event goes to on_event). Ends a loop."""
-        self._loop = None
+        """Go on from this song time, from the next block (a "jumped" event goes to on_event). Ends a loop, unless
+        song_s lies inside the looped Section: then the next Pass starts there and the loop goes on."""
+        loop = self._loop
+        if loop is None or not loop.start_s <= song_s < loop.end_s:
+            self._loop = None
         self._transport.seek(song_s)
 
     @property

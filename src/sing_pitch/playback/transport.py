@@ -27,21 +27,61 @@ from .mix import Gains, mix_block
 
 LEAD_IN_S = 2.0      # song played before a looped Section's start on every Pass (never scored)
 MIN_LOOP_S = 0.2     # a shorter (or empty) Section is widened to this, so every Pass renders some song
+CLICK_S = 0.025      # one metronome click of the Count-in
+CLICK_HZ = (1600.0, 1000.0)     # (first beat of the bar, the others)
+CLICK_LEVEL = (0.5, 0.3)        # the first beat is accented
+
+
+@dataclass(frozen=True)
+class CountIn:
+    """One bar of metronome clicks before every Pass, in place of the Lead-in: the song's tempo (beats per minute of
+    the original song, so the clicks scale with Speed) and the beats in a bar."""
+
+    bpm: float
+    beats_per_bar: int = 4
+
+    @property
+    def beat_s(self) -> float:
+        """One beat in song seconds."""
+        return 60.0 / self.bpm
+
+    @property
+    def bar_s(self) -> float:
+        return self.beats_per_bar * self.beat_s
 
 
 @dataclass(frozen=True)
 class Loop:
-    """A looped Section: song times in original seconds. name None = an unnamed mark."""
+    """A looped Section: song times in original seconds. name None = an unnamed mark. With a count_in, every Pass
+    starts with one bar of clicks (the song silent) instead of the Lead-in of song."""
 
     start_s: float
     end_s: float
     name: str | None = None
     lead_in_s: float = LEAD_IN_S
+    count_in: CountIn | None = None
 
     @property
     def pass_start_s(self) -> float:
-        """Where every Pass starts: start - Lead-in, clamped at the song start."""
+        """Where every Pass starts: start - Lead-in, clamped at the song start; with a Count-in, one bar of song time
+        before the start (it may lie before the song start: the song is silent then anyway)."""
+        if self.count_in is not None:
+            return self.start_s - self.count_in.bar_s
         return max(0.0, self.start_s - self.lead_in_s)
+
+
+def click_bar(count_in: CountIn, speed: float, sample_rate: int) -> np.ndarray:
+    """The Count-in as output audio (mono) at this Speed: one click per beat, the first accented, each beat
+    beat_s / speed output seconds after the last."""
+    beat = count_in.beat_s / speed * sample_rate
+    out = np.zeros(math.ceil(count_in.beats_per_bar * beat) + 1, np.float32)
+    t = np.arange(round(CLICK_S * sample_rate)) / sample_rate
+    for k in range(count_in.beats_per_bar):
+        hz, level = (CLICK_HZ[0], CLICK_LEVEL[0]) if k == 0 else (CLICK_HZ[1], CLICK_LEVEL[1])
+        click = (level * np.exp(-t / 0.006) * np.cos(2 * np.pi * hz * t)).astype(np.float32)
+        at = round(k * beat)
+        out[at: at + len(click)] = click[: len(out) - at]
+    return out
 
 
 @dataclass(frozen=True)
@@ -49,7 +89,8 @@ class TransportEvent:
     """Something that changed the song-time mapping, at the first output frame it applies to.
     Kinds: "paused", "resumed", "speed_changed", "jumped" (a seek: song_t is where the song goes on), and for a loop
     "pass_started" (pass_index 1, 2, ...; song_t = start - Lead-in), "pass_ended" (the Pass that just ended) and
-    "loop_ended" (looping switched off, or ended by a seek); all three carry their `loop`. "speed_changed" carries the new `speed` and, when it
+    "loop_ended" (looping switched off, or ended by a seek outside the Section; a seek inside it is a "pass_ended" +
+    "pass_started" at the song time sought); all three carry their `loop`. "speed_changed" carries the new `speed` and, when it
     applied at a Pass boundary, the `loop` (outside a loop, loop is None). "gains_changed" carries the target `gains`
     (Backing, Guide vocal): the first block the new gains apply to."""
 
@@ -161,6 +202,7 @@ class Transport:
         self._pass = 0                      # index of the Pass playing (render thread only)
         self._block0 = 0                    # output frame of the block being rendered (render thread only)
         self._wrap_out_s = 0.0              # output time of the Pass boundary being applied (render thread only)
+        self._clicks: tuple[CountIn, float, np.ndarray] | None = None   # the Count-in bar last built (render thread)
         self.log = SongTimeLog(sample_rate)
 
     @staticmethod
@@ -186,8 +228,8 @@ class Transport:
 
     def set_loop(self, loop: Loop | None) -> None:
         """Loop this Section from the next block (None = stop looping, the song runs on). Turning it on goes straight
-        to start - Lead-in as Pass 1; at the Section end the song wraps back there and the next Pass starts. A seek
-        ends the loop. A Section shorter than MIN_LOOP_S or past the song end is first fitted into the song
+        to start - Lead-in (or the Count-in) as Pass 1; at the Section end the song wraps back there and the next Pass
+        starts. A seek outside the Section ends the loop; one inside it starts the next Pass there. A Section shorter than MIN_LOOP_S or past the song end is first fitted into the song
         (loop shows the fitted one), so every Pass renders some song."""
         self._loop_requests.append(None if loop is None else self._fit_loop(loop))
 
@@ -277,10 +319,14 @@ class Transport:
             target = None
             while self._seeks:
                 target = self._seeks.popleft()
-            self._loop_requests.clear()          # a seek ends the loop (and wins over a loop asked in the same block)
-            events += self._end_loop(0)
-            self._n = min(max(0, round(target * self._sr)), self._song_frames)
-            events += (TransportEvent("jumped", self.log.rendered_s, self.position_s),)
+            loop = self._loop
+            if loop is not None and not self._loop_requests and loop.start_s <= target < loop.end_s:
+                events += self._jump_in_loop(target)     # inside the looping Section: the next Pass starts there
+            else:
+                self._loop_requests.clear()      # a seek ends the loop (and wins over a loop asked in the same block)
+                events += self._end_loop(0)
+                self._n = min(max(0, round(target * self._sr)), self._song_frames)
+                events += (TransportEvent("jumped", self.log.rendered_s, self.position_s),)
         if self._loop_requests:
             loop = None
             while self._loop_requests:
@@ -309,7 +355,12 @@ class Transport:
                 count = min(count, left)
             n = self._n
             g0, g1 = (tuple(a + (b - a) * x / frames for a, b in zip(start, end)) for x in (pos, pos + count))
-            audio = self._mix(self._audio, self._vocal, n, speed, count, g0, g1)
+            loop = self._loop
+            if loop is not None and loop.count_in is not None and n < loop.start_s * self._sr - 1e-6:
+                count = min(count, math.ceil((loop.start_s * self._sr - n) / speed - 1e-9))
+                audio = self._count_in(loop, n, speed, count)
+            else:
+                audio = self._mix(self._audio, self._vocal, n, speed, count, g0, g1)
             if fade_from is not None and pos == 0:   # a Speed change: crossfade (only up to a wrap in this block)
                 old = self._mix(*fade_from[:2], n, fade_from[2], count, g0, g1)
                 weight = (np.arange(1, count + 1, dtype=np.float32) / frames)[:, None]
@@ -342,6 +393,15 @@ class Transport:
         return (TransportEvent("pass_ended", out_s, song_s, index, loop),
                 TransportEvent("loop_ended", out_s, song_s, loop=loop))
 
+    def _jump_in_loop(self, song_s: float) -> tuple[TransportEvent, ...]:
+        """A seek inside the looping Section: the Pass playing ends here and the next one starts at song_s (no Lead-in
+        or Count-in: he chose where to go on), so each Take stays one unbroken stretch and the loop goes on."""
+        out_s, loop = self.log.rendered_s, self._loop
+        ended = TransportEvent("pass_ended", out_s, self.position_s, self._pass, loop)
+        self._pass += 1
+        self._n = round(song_s * self._sr)
+        return (ended, TransportEvent("pass_started", out_s, self.position_s, self._pass, loop))
+
     def _wrap(self, pos: int) -> tuple[TransportEvent, ...]:
         """A Pass boundary at frame `pos` of the block being rendered: the next Pass starts at start - Lead-in.
         A Speed change asked for during the loop is applied here, so a Pass is never half at one Speed."""
@@ -354,6 +414,18 @@ class Transport:
         if self._speed_requests:
             events += self._apply_speed()
         return events + (TransportEvent("pass_started", out_s, self.position_s, self._pass, self._loop),)
+
+    def _count_in(self, loop: Loop, n: float, speed: float, frames: int) -> np.ndarray:
+        """`frames` frames of the Count-in from song frame n (it runs from pass_start_s to the Section start): the
+        clicks only, the song silent, whatever the gains."""
+        if self._clicks is None or self._clicks[:2] != (loop.count_in, speed):
+            self._clicks = (loop.count_in, speed, click_bar(loop.count_in, speed, self._sr))
+        bar = self._clicks[2]
+        i = round((n - loop.pass_start_s * self._sr) / speed)
+        mono = np.zeros(frames, np.float32)
+        part = bar[max(0, i): max(0, i + frames)]
+        mono[: len(part)] = part
+        return np.repeat(mono[:, None], 2, axis=1)
 
     @staticmethod
     def _mix(backing, vocal, n, speed, frames, start, end) -> np.ndarray:
