@@ -133,10 +133,20 @@ he does not play guitar while using it.
   while the Phrase grows, until about 2 s of it (125 scored frames) are scored, then kept for the rest of that
   Phrase; the summary and the saved row use each Phrase's whole-Phrase k, so the first seconds of a Phrase on screen
   can differ from them. The blue line is drawn at the active k (live and on replay, each frame at the k it was scored
-  at), with faint Guide lines one octave above and below; the y-window follows the voice. `octave_shift` in the
+  at), with faint Guide lines one octave above and below; the y-window follows the voice and the coming Reference (see Vertical range). `octave_shift` in the
   summary is the pinned k, or for Auto the most common Phrase shift (ties to the one with more scored frames, then
   the smaller |k|); `octave_mode` (auto / pinned) is a new column of takes.csv. Takes saved before this have an empty
   `octave_mode` and re-score with one shift for the whole Take, exactly as they were scored.
+- **Vertical range:** 24 semitones (12 either side of a centre in whole semitones), because 4 s of a song spans up to
+  ~20. The centre follows the median of the last 2 s of voice and the coming 4 s of the Reference at the Octave shift
+  drawn (the voice only when it is within 5 semitones of it, i.e. not an octave off), and it moves only when that
+  content would come within 1 semitone of an edge (hysteresis); a move then centres on the next 10 s of the Reference
+  too and eases over ~0.3 s. One stray voice frame or one wild Reference frame moves nothing. With no Reference (Nearest
+  note, Key) the voice median alone moves it, when it is 4 semitones off the centre.
+- **Speed presets and replaying from History:** buttons 70 / 85 / 100 % next to the Speed box set it (same preparation
+  and cache path). History lists the Takes (newest first) with a Replay button and double-click; the main window then
+  replays that Take with its saved Reference, song, Octave, Notes and Speed on the controls, and puts the controls back
+  when the replay ends. Nothing is remembered or stretched by a replay; a missing song or a running Take says so.
 - **Unscored stretches:** reference frames with RMVPE confidence under 0.3, smoothed: dips shorter than 0.12 s between
   reliable frames are filled, reliable runs shorter than 0.12 s are dropped. Greyed on the live and replay plot, left
   out of all five numbers and of Steadiness.

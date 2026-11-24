@@ -243,6 +243,11 @@ def saved_reference(home: Path, take_id: str) -> Reference:
     return _reference_for(next(r for r in _rows(home) if r["id"] == take_id), home)
 
 
+def saved_row(home: Path, take_id: str) -> dict:
+    """The summary-table row of a saved Take, as read from takes.csv."""
+    return next(r for r in _rows(home) if r["id"] == take_id)
+
+
 def saved_octave(home: Path, take_id: str) -> OctaveSetting:
     """How the saved Take's Octave shift was chosen: what a replay or re-score must use to reproduce its numbers."""
     return row_octave(next(r for r in _rows(home) if r["id"] == take_id))

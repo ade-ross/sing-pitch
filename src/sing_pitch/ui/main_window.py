@@ -2,6 +2,7 @@
 from __future__ import annotations
 
 from collections import deque
+import math
 import time
 from pathlib import Path
 from typing import Callable
@@ -28,23 +29,30 @@ from ..replay import Replay
 from ..settings import DEFAULT_OUTPUT, Settings
 from ..take_engine import (AUTO, FrameScore, LinearClock, PauseFold, SampledClock, SongClock, TakeRecord, pinned,
                            project_song_time, replay_scores)
-from ..take_store import (last_take_id, load_frames, rescore_take, saved_clock_times, saved_latency, saved_octave,
-                          saved_reference, saved_song_times)
+from ..take_store import (last_take_id, load_frames, rescore_take, row_notes, row_settings, saved_clock_times,
+                          saved_latency, saved_octave, saved_reference, saved_row, saved_song_times)
 from .eliding import eliding_combo
 from .gui_gc import collect_on_the_ui_thread_only
 from .song_axis import SongTimeAxis
 from .timeline import Timeline
 from .speed_prep import SpeedPreparer
+from .y_window import YWindow
 
 PAST_S = 4.0          # the plot is centred on now: this much of the voice and the Reference behind the now-line...
 FUTURE_S = 4.0        # ...and this much of the Reference ahead of it
 TICK_MS = 33          # ~30 Hz redraw
 SPEED_MIN, SPEED_MAX, SPEED_STEP = 50, 120, 5     # Speed in percent of the original
+REFERENCE_TEXT = {"nearest": "Nearest note", "key": "Key", "melody": "Melody"}    # reference.kind -> the box's text
+SPEED_PRESETS = (70, 85, 100)    # the buttons beside the Speed box
 SPEED_DEBOUNCE_MS = 400   # +/- pressed several times: stretch only the Speed he stops on
 END_GRACE_S = 1.0     # Melody: keep listening this long after the Backing ends
 JUMP_S = 5.0          # the arrow keys jump this far
 DRAW_STEP_S = 0.01    # the reference line is drawn at this resolution on the voice clock
-HALF_RANGE = 8        # semitones shown above and below the centre
+HALF_RANGE = 12      # semitones shown above and below the centre (4 s of a song spans up to ~20)
+Y_VOICE_S = 2.0       # the voice's median over this many seconds decides where the vertical range sits
+Y_LOOK_S = 6.0        # a move of the vertical range also looks this many seconds beyond the right half
+Y_EASE = 0.3          # share of the way to the new centre covered per redraw (about 0.3 s for a move)
+Y_EASE_SNAP = 0.05    # semitones: closer than this the range lands on the centre
 BAND_COLOUR = {Band.GREEN: "#2ecc71", Band.YELLOW: "#f1c40f", Band.RED: "#e74c3c"}
 UNSCORED_COLOUR = "#8a8a8a"   # sung where the Reference has nothing reliable: shown, never scored
 BRUSH = {b: pg.mkBrush(c) for b, c in BAND_COLOUR.items()}
@@ -165,6 +173,7 @@ class MainWindow(QtWidgets.QWidget):
         self._paused = False
         self._runner: LiveRunner | None = None
         self._replay: Replay | None = None
+        self._visited: dict | None = None            # the controls as they were before a replay put a Take's on them
         self._replay_started = 0.0
         self._replay_take_id: str | None = None
         self._t: deque[float] = deque()           # voice time of each drawn frame (the plot shows view time, see _fold)
@@ -173,7 +182,10 @@ class MainWindow(QtWidgets.QWidget):
         self._out: deque[bool] = deque()          # True = sung note outside the Key
         self._oct: deque[int] = deque()           # the Octave shift each frame was scored at
         self._oct_known = False                   # a scored frame has set it (until then the line sits at 0)
-        self._centre = 60.0
+        self._y = YWindow(60, HALF_RANGE)            # where the vertical range is heading; _y_drawn is what shows
+        self._y_drawn = 60.0
+        self._y_ticks_from: int | None = None
+        self._ahead = np.empty(0)                    # MIDI of the Reference coming in the right half, as drawn
 
         self.device_box = eliding_combo()
         self.output_box = eliding_combo()
@@ -262,6 +274,8 @@ class MainWindow(QtWidgets.QWidget):
         self.speed_box.setFocusPolicy(QtCore.Qt.NoFocus)         # so + and - stay shortcuts of the window
         self.speed_box.setToolTip("Speed, pitch unchanged (+ and - change it by 5 %)")
         self.speed_label = QtWidgets.QLabel("")
+        self.speed_70_button, self.speed_85_button, self.speed_100_button = (
+            self._preset_button(percent) for percent in SPEED_PRESETS)
         self.octave_box = QtWidgets.QComboBox()
         for k in (None, *player_settings.OCTAVE_CHOICES):      # Auto, then the pinned shifts
             self.octave_box.addItem("Auto" if k is None else f"{k:+d}" if k else "0", k)
@@ -286,6 +300,10 @@ class MainWindow(QtWidgets.QWidget):
         self.note_length_slider.sliderReleased.connect(self._notes_changed)
         self.speed_box.valueChanged.connect(self._speed_changed)
         self.speed_box.valueChanged.connect(self._remember_player_settings)
+        self.speed_box.valueChanged.connect(self._sync_speed_presets)
+        self.speed_70_button.clicked.connect(self._preset_70)           # bound methods: a lambda keeps self alive
+        self.speed_85_button.clicked.connect(self._preset_85)
+        self.speed_100_button.clicked.connect(self._preset_100)
         for key, slot in (("+", self.speed_up), ("=", self.speed_up), ("-", self.speed_down)):
             QtGui.QShortcut(QtGui.QKeySequence(key), self, activated=slot)    # bound method: a lambda keeps self alive
         self.calibrate_button = QtWidgets.QPushButton("Calibrate latency")
@@ -332,7 +350,7 @@ class MainWindow(QtWidgets.QWidget):
         self._dots = pg.ScatterPlotItem(size=6, pen=None)
         plot.addItem(self._dots)
         self._plot = plot
-        self._set_y(self._centre)
+        self._set_y(60)
         self._set_now(0.0)
 
         devices = QtWidgets.QHBoxLayout()               # two short rows, so the window can be narrow (#25)
@@ -348,7 +366,8 @@ class MainWindow(QtWidgets.QWidget):
         top.setStretchFactor(self.song_box, 1)
         mix = QtWidgets.QHBoxLayout()
         for w in (self.guide_box, self.guide_slider, QtWidgets.QLabel("Backing"), self.backing_slider,
-                  self.pause_button, QtWidgets.QLabel("Speed"), self.speed_box, self.speed_label, QtWidgets.QLabel("Octave"),
+                  self.pause_button, QtWidgets.QLabel("Speed"), self.speed_box, self.speed_70_button, self.speed_85_button,
+                  self.speed_100_button, self.speed_label, QtWidgets.QLabel("Octave"),
                   self.octave_box, self.notes_box, self.note_length_slider, self.note_length_label):
             mix.addWidget(w)
         mix.addStretch(1)
@@ -512,8 +531,8 @@ class MainWindow(QtWidgets.QWidget):
         self.song_box.setEnabled(is_melody)
         self._restore_player_settings()
         self._preview_song()
-        for w in (self.guide_box, self.guide_slider, self.backing_slider, self.speed_box, self.octave_box,
-                  self.notes_box, self.note_length_slider, self.section_box, self.section_name_edit,
+        for w in (self.guide_box, self.guide_slider, self.backing_slider, self.speed_box, self.speed_70_button,
+                  self.speed_85_button, self.speed_100_button, self.octave_box, self.notes_box, self.note_length_slider, self.section_box, self.section_name_edit,
                   self.clear_button):
             w.setEnabled(is_melody)
         self._sync_section_controls()
@@ -823,6 +842,7 @@ class MainWindow(QtWidgets.QWidget):
         for widget in (self.notes_box, self.note_length_slider):
             widget.blockSignals(False)
         self.note_length_label.setText(format_length(self._note_length()))
+        self._sync_speed_presets()
 
     # --- Notes mode -------------------------------------------------------------------------------------------------
     def _note_length(self) -> float:
@@ -849,6 +869,33 @@ class MainWindow(QtWidgets.QWidget):
         return AUTO if k is None or self.reference_box.currentText() != "Melody" else pinned(k)
 
     # --- Speed -------------------------------------------------------------------------------------------------
+    def _preset_button(self, percent: int) -> QtWidgets.QPushButton:
+        button = QtWidgets.QPushButton(f"{percent} %")
+        button.setCheckable(True)
+        button.setChecked(percent == 100)
+        button.setFocusPolicy(QtCore.Qt.NoFocus)                 # so + and - stay shortcuts of the window
+        button.setToolTip(f"Set the Speed to {percent} %: the same as typing it in the box")
+        button.setFixedWidth(44)
+        return button
+
+    def _preset_70(self) -> None:
+        self._press_preset(70)
+
+    def _preset_85(self) -> None:
+        self._press_preset(85)
+
+    def _preset_100(self) -> None:
+        self._press_preset(100)
+
+    def _press_preset(self, percent: int) -> None:
+        self.speed_box.setValue(percent)
+        self._sync_speed_presets()                                # a press on the Speed already set must stay pressed
+
+    def _sync_speed_presets(self, *_) -> None:
+        """The preset of the Speed now set is shown pressed; none when the box holds some other Speed."""
+        for button, percent in zip((self.speed_70_button, self.speed_85_button, self.speed_100_button), SPEED_PRESETS):
+            button.setChecked(self.speed_box.value() == percent)
+
     def speed_up(self) -> None:
         self._step_speed(1)
 
@@ -905,6 +952,7 @@ class MainWindow(QtWidgets.QWidget):
             self.speed_box.blockSignals(True)
             self.speed_box.setValue(self._speed_playing)
             self.speed_box.blockSignals(False)
+            self._sync_speed_presets()
             self._remember_player_settings()          # the failed Speed is not kept as the song's Speed
             return
         self._speed_ready = (song_id, percent, stems)
@@ -973,15 +1021,57 @@ class MainWindow(QtWidgets.QWidget):
         """What the plot's x axis says at view times x: the song time heard there (Melody), else the time since Start."""
         return np.asarray(x, dtype=float) if self._melody is None else self._song_times(np.asarray(x, dtype=float))
 
+    @property
+    def _centre(self) -> int:
+        """Where the vertical range is heading (whole semitones); what is drawn catches up with it, see _ease_y."""
+        return self._y.centre
+
     def _set_y(self, centre: float) -> None:
-        self._centre = centre
-        lo, hi = int(round(centre)) - HALF_RANGE, int(round(centre)) + HALF_RANGE
+        """Put the vertical range on `centre` at once (a new Take or replay opens where the voice will be)."""
+        self._y.set(centre)
+        self._y_drawn = float(self._y.centre)
+        self._apply_y()
+
+    def _apply_y(self) -> None:
+        lo, hi = self._y_drawn - HALF_RANGE, self._y_drawn + HALF_RANGE
         self._plot.setYRange(lo, hi, padding=0)
-        ticks = [(m, f"{NOTE_NAMES[m % 12]}{m // 12 - 1}") for m in range(lo - 1, hi + 2)]
-        self._plot.getAxis("left").setTicks([ticks])
+        first = math.floor(lo)
+        if first != self._y_ticks_from:                    # the labels are the same until the view passes a semitone
+            self._y_ticks_from = first
+            ticks = [(m, f"{NOTE_NAMES[m % 12]}{m // 12 - 1}") for m in range(first - 1, first + 2 * HALF_RANGE + 3)]
+            self._plot.getAxis("left").setTicks([ticks])
+
+    def _follow_y(self) -> None:
+        """Once per redraw: let the voice (its median over the last seconds) and the coming Reference decide whether the
+        vertical range must move (see y_window); the picture then eases to it."""
+        voice = np.empty(0)
+        if self._t:
+            t, midi = np.fromiter(self._t, float), np.fromiter(self._midi, float)
+            voice = midi[t >= t[-1] - Y_VOICE_S]
+        self._y.follow(voice, self._ahead, self._further_reference)
+        self._ease_y()
+
+    def _further_reference(self) -> np.ndarray:
+        """MIDI of the Reference in the Y_LOOK_S seconds after the right half, at the Octave shift held (a move of the
+        vertical range centres on this too)."""
+        if self._melody is None or not self._t:
+            return np.empty(0)
+        start = self._now_line.value() + FUTURE_S
+        x = np.arange(start, start + Y_LOOK_S, DRAW_STEP_S)
+        fold = self._fold()
+        _, midi, unscored = self._sample_reference(x, fold)
+        return (midi + 12.0 * self._octaves_at(x, fold))[~unscored]
+
+    def _ease_y(self) -> None:
+        """Move the drawn range a fraction of the way to where it is heading (a pan of a few tenths of a second)."""
+        gap = self._y.centre - self._y_drawn
+        if gap == 0:
+            return
+        self._y_drawn = float(self._y.centre) if abs(gap) < Y_EASE_SNAP else self._y_drawn + Y_EASE * gap
+        self._apply_y()
 
     def toggle_replay(self) -> None:
-        """Play the most recent saved Take's pitch line back through the live view."""
+        """Play the most recent saved Take's pitch line back through the live view (press again to stop)."""
         if self._replay is not None:
             self._end_replay()
             return
@@ -989,19 +1079,34 @@ class MainWindow(QtWidgets.QWidget):
         if take_id is None:
             self.summary_label.setText("No saved Take to replay yet.")
             return
+        self.replay_take(take_id)
+
+    def replay_take(self, take_id: str) -> None:
+        """Play any saved Take back through the live view, with the settings it was sung with on the controls
+        (Reference, song, Octave, Notes, Speed). A replay in progress is replaced. The controls go back to what they
+        were when it ends, and nothing is remembered or stretched on the way."""
+        if self._runner is not None or self._calibration is not None:
+            self._say_replay_failed("Stop the Take before replaying another." if self._runner is not None
+                                    else "Wait for the calibration to finish before replaying.")
+            return
         try:
             reference = saved_reference(self._home, take_id)       # a Melody Take whose song was removed raises here
             latency = saved_latency(self._home, take_id)
             song_times = saved_song_times(self._home, take_id)
             frames = load_frames(self._home, take_id)
-            scores = replay_scores(frames, reference, song_times=song_times, octave=saved_octave(self._home, take_id))
+            octave = saved_octave(self._home, take_id)
+            scores = replay_scores(frames, reference, song_times=song_times, octave=octave)
             replay = Replay(scores)
             octave_k = next((s.octave for s in scores if s.band is not None), 0)      # where the Take was scored
             replay_clock = SampledClock([f.t for f in frames], saved_clock_times(self._home, take_id),   # + Lead-in
                                         getattr(reference, "end_s", None))
+            saved = self._saved_settings(take_id, reference, octave)
         except Exception as exc:
-            self.summary_label.setText(f"Cannot replay Take {take_id}: {exc}")
+            self._say_replay_failed(f"Cannot replay Take {take_id}: {exc}")
             return
+        if self._replay is not None:
+            self._end_replay()
+        self._visited = self._show_settings(saved)
         self._replay, self._replay_clock, self._replay_take_id = replay, replay_clock, take_id
         self._replay_started = time.monotonic()
         self._show_melody(reference, latency, octave_k)
@@ -1014,6 +1119,51 @@ class MainWindow(QtWidgets.QWidget):
             w.setEnabled(False)
         self.summary_label.setText(f"Replaying Take {take_id}...")
         self._timer.start(TICK_MS)
+        if self.history_window is not None:
+            self.history_window.show_status("")
+        self.raise_()
+
+    def _say_replay_failed(self, text: str) -> None:
+        self.summary_label.setText(text)
+        if self.history_window is not None:
+            self.history_window.show_status(text)
+
+    def _saved_settings(self, take_id: str, reference: Reference, octave) -> dict:
+        """What a saved Take's table row says the controls were: Reference, song, Key, Octave, Notes, Speed."""
+        row = saved_row(self._home, take_id)
+        notes, length = row_notes(row)
+        return {"reference": REFERENCE_TEXT.get(reference.kind, "Nearest note"), "song": row["song_id"] or None,
+                "key": reference if reference.kind == "key" else None,
+                "octave": octave.k if octave.mode == "pinned" else None, "notes": notes == "on",
+                "length": player_settings.DEFAULT_MIN_NOTE_S if length is None else length, "speed": row_settings(row)[2]}
+
+    def _controls_now(self) -> dict:
+        return {"reference": self.reference_box.currentText(), "song": self.song_box.currentData(),
+                "key": self.key_box.currentData(), "octave": self.octave_box.currentData(),
+                "notes": self.notes_box.isChecked(), "length": self._note_length(), "speed": self.speed_box.value()}
+
+    def _show_settings(self, settings: dict) -> dict:
+        """Put these settings on the controls without anything reacting to them (nothing remembered, nothing
+        stretched, no preview). Returns the settings that were there, to put back."""
+        before = self._controls_now()
+        boxes = (self.reference_box, self.song_box, self.key_box, self.octave_box, self.notes_box,
+                 self.note_length_slider, self.speed_box)
+        for box in boxes:
+            box.blockSignals(True)
+        self.reference_box.setCurrentText(settings["reference"])
+        if settings["song"] is not None and self.song_box.findData(settings["song"]) >= 0:
+            self.song_box.setCurrentIndex(self.song_box.findData(settings["song"]))
+        if settings["key"] is not None and self.key_box.findData(settings["key"]) >= 0:
+            self.key_box.setCurrentIndex(self.key_box.findData(settings["key"]))
+        self.octave_box.setCurrentIndex(max(0, self.octave_box.findData(settings["octave"])))
+        self.notes_box.setChecked(settings["notes"])
+        self.note_length_slider.setValue(slider_of_length(settings["length"]))
+        self.speed_box.setValue(settings["speed"])
+        for box in boxes:
+            box.blockSignals(False)
+        self.note_length_label.setText(format_length(self._note_length()))
+        self._sync_speed_presets()
+        return before
 
     def _take_numbers(self, take_id: str | None) -> str | None:
         """The numbers of a saved Take as Stop showed them (None when they cannot be worked out)."""
@@ -1029,6 +1179,9 @@ class MainWindow(QtWidgets.QWidget):
         self._timer.stop()
         numbers = self._take_numbers(self._replay_take_id)
         self._replay = self._replay_clock = self._replay_take_id = None
+        if self._visited is not None:
+            self._show_settings(self._visited)                    # the controls as they were before the replay
+            self._visited = None
         self.replay_button.setText("Replay last Take")
         self.button.setEnabled(True)
         for w in (self.notes_box, self.note_length_slider):
@@ -1042,6 +1195,7 @@ class MainWindow(QtWidgets.QWidget):
 
         if self.history_window is None:
             self.history_window = HistoryView(self._home)
+            self.history_window.replay_requested.connect(self.replay_take)       # a bound method: no lambda
         else:
             self.history_window.reload()
         self.history_window.show()
@@ -1058,6 +1212,7 @@ class MainWindow(QtWidgets.QWidget):
     def _show_melody(self, reference: Reference, latency_s: float, octave_k: int = 0) -> None:
         self._melody = reference if reference.kind == "melody" else None
         self._melody_latency = latency_s
+        self._ahead = np.empty(0)
         for curve in (self._ref_curve, *self._guide_curves):
             curve.setData([], [])
         self._show_labels([])
@@ -1175,9 +1330,6 @@ class MainWindow(QtWidgets.QWidget):
                 self.note_label.setText(f"{note_name(round(last.midi))}  out of key")
             else:
                 self.note_label.setText(f"{last.note_name}  {last.cents:+.0f} c")
-            voiced = [s.midi for s in scores if s.midi is not None]
-            if voiced and abs(voiced[-1] - self._centre) > HALF_RANGE - 2:
-                self._set_y(voiced[-1])
 
     def start_calibration(self) -> None:
         """Clicks in the headphones; clap or sing "ta" on each. The measured delay becomes the default latency
@@ -1305,6 +1457,8 @@ class MainWindow(QtWidgets.QWidget):
         else:
             self._show_labels([])
         self._ref_curve.setData(x, midi + shift)
+        coming = (x > t_end) & ~unscored
+        self._ahead = (midi + shift)[coming]
         for curve, d in zip(self._guide_curves, (12, -12)):
             curve.setData(x, midi + shift + d)
         edges = np.flatnonzero(np.diff(np.concatenate([[0], unscored.astype(np.int8), [0]])))
@@ -1393,5 +1547,6 @@ class MainWindow(QtWidgets.QWidget):
         now = fold.to_view(self._now_voice())
         self._set_now(now)
         self._draw_melody(now)
+        self._follow_y()
         if self._replay is not None and self._replay.finished:
             self._end_replay(finished=True)

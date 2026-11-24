@@ -18,7 +18,15 @@ EMPTY_TEXT = "No Takes yet. Sing a Take and it will show up here."
 EMPTY_FILTER_TEXT = "No scored Takes match this filter."
 
 
+TABLE_HEADERS = ("When", "Reference", "Song", "Speed", "In tune", "Median cents off")
+
+
 class HistoryView(QtWidgets.QWidget):
+    """The Takes as two charts and a list. `replay_requested(take id)` fires when a row's Replay is asked for (the
+    Replay button on the chosen row, or a double-click on it); the main window does the replaying."""
+
+    replay_requested = QtCore.Signal(str)
+
     def __init__(self, home: Path | None = None):
         super().__init__()
         self.setWindowTitle("sing-pitch history")
@@ -40,6 +48,21 @@ class HistoryView(QtWidgets.QWidget):
                          (self.notes_box, "Show only Takes scored as a line or as Notes")):
             box.setToolTip(tip)
         self.refresh_button.setToolTip("Read the saved Takes again")
+        self.takes_table = QtWidgets.QTableWidget(0, len(TABLE_HEADERS))
+        self.takes_table.setHorizontalHeaderLabels(TABLE_HEADERS)
+        self.takes_table.setEditTriggers(QtWidgets.QAbstractItemView.NoEditTriggers)
+        self.takes_table.setSelectionBehavior(QtWidgets.QAbstractItemView.SelectRows)
+        self.takes_table.setSelectionMode(QtWidgets.QAbstractItemView.SingleSelection)
+        self.takes_table.verticalHeader().setVisible(False)
+        header = self.takes_table.horizontalHeader()
+        header.setStretchLastSection(True)
+        header.setSectionResizeMode(0, QtWidgets.QHeaderView.ResizeToContents)
+        self.takes_table.setToolTip("Your Takes, newest first: double-click one to replay it")
+        self.replay_button = QtWidgets.QPushButton("Replay")
+        self.replay_button.setToolTip("Replay the chosen Take in the main window, with the settings it was sung with")
+        self.replay_button.setEnabled(False)
+        self.status_label = QtWidgets.QLabel("")
+        self.status_label.setWordWrap(True)
         self.empty_label = QtWidgets.QLabel(EMPTY_TEXT)
         self.empty_label.setAlignment(QtCore.Qt.AlignCenter)
 
@@ -74,9 +97,17 @@ class HistoryView(QtWidgets.QWidget):
         layout.addLayout(top)
         layout.addLayout(more)
         layout.addWidget(self.empty_label, 1)
-        layout.addWidget(self.plot_widget, 1)
+        layout.addWidget(self.plot_widget, 2)
+        layout.addWidget(self.takes_table, 1)
+        replay_row = QtWidgets.QHBoxLayout()
+        replay_row.addWidget(self.replay_button)
+        replay_row.addWidget(self.status_label, 1)
+        layout.addLayout(replay_row)
 
         self.refresh_button.clicked.connect(self.reload)
+        self.replay_button.clicked.connect(self._replay_chosen)
+        self.takes_table.itemSelectionChanged.connect(self._row_chosen)
+        self.takes_table.cellDoubleClicked.connect(self._replay_row)
         for box in self._boxes():
             box.currentIndexChanged.connect(self._apply_filters)
         self.reload()
@@ -114,6 +145,7 @@ class HistoryView(QtWidgets.QWidget):
         self.show_series(self.history.series(ref, song, guide, speed, section, notes))
 
     def show_series(self, series: Series) -> None:
+        self._fill_table(series)
         if series.started_at:
             xs = [t.timestamp() for t in series.started_at]
             self.pct_curve.setData(xs, series.pct_in_tune)
@@ -125,3 +157,37 @@ class HistoryView(QtWidgets.QWidget):
             self.empty_label.setText(EMPTY_TEXT if self.history.is_empty else EMPTY_FILTER_TEXT)
         self.empty_label.setVisible(not series.started_at)
         self.plot_widget.setVisible(bool(series.started_at))
+        self.takes_table.setVisible(bool(series.started_at))
+        self.replay_button.setVisible(bool(series.started_at))
+
+    def _fill_table(self, series: Series) -> None:
+        points = [p for p in reversed(series.points) if p.take_id]
+        self.takes_table.setRowCount(len(points))
+        for r, p in enumerate(points):
+            cells = (p.started_at.strftime("%Y-%m-%d %H:%M"), REFERENCE_LABEL.get(p.reference, p.reference),
+                     p.song or "", f"{p.speed_pct} %", f"{p.pct_in_tune:.0f} %", f"{p.median_abs_cents:.0f}")
+            for c, text in enumerate(cells):
+                item = QtWidgets.QTableWidgetItem(text)
+                if c == 0:
+                    item.setData(QtCore.Qt.UserRole, p.take_id)
+                self.takes_table.setItem(r, c, item)
+        self.status_label.setText("")
+        self._row_chosen()
+
+    def _row_chosen(self) -> None:
+        self.replay_button.setEnabled(bool(self.takes_table.selectionModel().selectedRows()))
+
+    def _replay_chosen(self) -> None:
+        rows = self.takes_table.selectionModel().selectedRows()
+        if rows:
+            self._replay_row(rows[0].row(), 0)
+
+    def _replay_row(self, row: int, _column: int) -> None:
+        item = self.takes_table.item(row, 0)
+        if item is not None:
+            self.status_label.setText("")
+            self.replay_requested.emit(item.data(QtCore.Qt.UserRole))
+
+    def show_status(self, text: str) -> None:
+        """What happened to the last Replay request (it failed: the main window says why)."""
+        self.status_label.setText(text)
