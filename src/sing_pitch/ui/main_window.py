@@ -551,13 +551,18 @@ class MainWindow(QtWidgets.QWidget):
             self.speed_box.blockSignals(True)
             self.speed_box.setValue(self._speed_playing)
             self.speed_box.blockSignals(False)
+            self._remember_player_settings()          # the failed Speed is not kept as the song's Speed
             return
         self._speed_ready = (song_id, percent, stems)
         self._set_player_speed(percent, stems)
 
     def _set_player_speed(self, percent: int, stems) -> None:
-        self._speed_playing = percent
+        """Hand the player this Speed. The Speed it already plays is not handed again: a speed_changed would split
+        the running Take for nothing (during a Take, one song and percent always mean the same stems)."""
         self.speed_label.setText("")
+        if self._backing is not None and percent == self._speed_playing:
+            return
+        self._speed_playing = percent
         if self._backing is not None:
             self._backing.set_speed(percent / 100, *(stems or ()))
 

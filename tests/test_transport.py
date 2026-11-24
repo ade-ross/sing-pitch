@@ -163,3 +163,59 @@ def test_a_speed_change_while_paused_applies_without_sound_and_the_song_ends_by_
     while not tr.finished:
         tr.render(100)
     assert tr.position_s >= 0.3
+
+
+
+
+def test_a_speed_asked_for_at_any_point_of_a_render_is_never_lost():
+    """set_speed from the UI thread can land while render() runs on the audio thread. Every interleaving is tried:
+    the UI call is made at the k-th executed line of render() (for every k), and the Speed asked last must apply."""
+    import sys
+
+    import sing_pitch.playback.transport as module
+
+    song = ramp_song(2000)
+    slow, fast = stretched(song, 0.5), stretched(song, 0.8)
+    k = 0
+    while True:
+        tr = Transport(song, sample_rate=SR)
+        tr.render(10)
+        tr.set_speed(0.5, slow)
+        seen, fired = [0], [False]
+
+        def tracer(frame, event, arg):
+            if frame.f_code.co_filename != module.__file__:
+                return tracer
+            if event == "line" and not fired[0] and frame.f_code.co_name != "set_speed":
+                if seen[0] == k:
+                    fired[0] = True
+                    tr.set_speed(0.8, fast)        # the UI thread's call lands here
+                seen[0] += 1
+            return tracer
+        sys.settrace(tracer)
+        try:
+            tr.render(10)
+        finally:
+            sys.settrace(None)
+        if not fired[0]:
+            break
+        tr.render(10)
+        assert tr.speed == 0.8, f"the request made at line {k} of render() was lost"
+        k += 1
+    assert k > 20
+
+
+def test_setting_the_speed_that_plays_with_the_same_arrays_changes_nothing():
+    song = ramp_song(3000)
+    vocal = ramp_song(3000)
+    slow = stretched(song, 0.5)
+    tr = Transport(song, vocal, sample_rate=SR)
+    tr.render(100)
+    tr.set_speed(1.0, song, vocal)
+    assert tr.render(100).events == ()
+    tr.set_speed(0.5, slow)
+    assert [e.kind for e in tr.render(100).events] == ["speed_changed"]
+    tr.set_speed(0.5, slow)
+    assert tr.render(100).events == ()
+    tr.set_speed(0.5, stretched(song, 0.5))            # new arrays: a real change
+    assert [e.kind for e in tr.render(100).events] == ["speed_changed"]
