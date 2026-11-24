@@ -139,6 +139,24 @@ def test_a_notes_take_records_its_mode_and_length_and_a_rescore_reproduces_it(tm
         assert (again.note_mode, again.min_note_s) == ("on", length)
 
 
+def test_a_rescore_against_a_given_reference_records_that_references_mode_not_the_rows(tmp_path):
+    saved = saved_notes_take(tmp_path, 0.3)
+    melody = Melody.from_song(library_song(tmp_path, reference_line(FLAT_E), title="Other", seconds=3.0))
+    as_line = rescore_take(tmp_path, saved.id, reference=melody)
+    assert (as_line.note_mode, as_line.min_note_s) == ("off", None)
+    as_notes = rescore_take(tmp_path, saved.id, reference=melody.notes(PER_PHRASE))
+    assert (as_notes.note_mode, as_notes.min_note_s) == ("on", PER_PHRASE)
+
+
+def test_a_notes_row_with_a_lost_length_stays_notes_at_the_default_length():
+    from sing_pitch.library.player_settings import DEFAULT_MIN_NOTE_S
+    from sing_pitch.take_store import row_notes
+
+    for cell in ("", "oops", None):
+        assert row_notes({"note_mode": "on", "min_note_s": cell}) == ("on", DEFAULT_MIN_NOTE_S)
+    assert row_notes({"note_mode": "off", "min_note_s": "0.5"}) == ("off", None)
+
+
 def test_a_line_take_records_note_mode_off(tmp_path):
     saved = saved_notes_take(tmp_path, None)
     row = row_of(tmp_path, saved.id)

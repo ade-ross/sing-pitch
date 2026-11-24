@@ -17,6 +17,7 @@ import numpy as np
 
 from .. import __version__
 from ..config import DEFAULT_SCORE_CONFIG, ScoreConfig
+from ..library.player_settings import DEFAULT_MIN_NOTE_S
 from ..pitch import PitchFrame
 from ..reference import Key, Melody, NearestNote, Reference
 from ..take_engine import AUTO, LEGACY, OctaveSetting, TakeRecord, linear_song_times, pinned, score_take
@@ -69,7 +70,8 @@ def row_octave(row: dict) -> OctaveSetting:
 
 def row_notes(row: dict) -> tuple[str, float | None]:
     """(note_mode, min_note_s) of a table row: ("on", length) for a Notes-mode Take (length math.inf when its cell is
-    "phrase": one note per Phrase), else ("off", None); rows saved before these columns read as off."""
+    "phrase": one note per Phrase; a lost or unreadable length reads as DEFAULT_MIN_NOTE_S, the mode is kept), else
+    ("off", None); rows saved before these columns read as off."""
     if row.get("note_mode") != "on":
         return "off", None
     cell = row.get("min_note_s") or ""
@@ -78,7 +80,7 @@ def row_notes(row: dict) -> tuple[str, float | None]:
     try:
         return "on", float(cell)
     except ValueError:
-        return "off", None
+        return "on", DEFAULT_MIN_NOTE_S
 
 
 def _length_cell(record: TakeRecord) -> str | float:
@@ -264,12 +266,17 @@ def rescore_take(
     Key and Melody Takes rebuild theirs from the row (Melody via the song id in the library)."""
     rows = _rows(home)
     row = next(r for r in rows if r["id"] == take_id)
+    given = reference is not None
     if reference is None:
         reference = _reference_for(row, home)
     frames = load_frames(home, take_id)
     latency = float(row["latency_offset_s"] or 0.0)
     song_times = _song_times(home, take_id, row, frames)
     guide_vocal, guide_gain, speed_pct = row_settings(row)
+    note_mode, min_note_s = row_notes(row)
+    if given:                                                  # a Reference of the caller's: its mode, not the row's
+        min_note_s = getattr(reference, "min_note_s", None)
+        note_mode = "off" if min_note_s is None else "on"
     record = TakeRecord(
         id=take_id,
         started_at=datetime.fromisoformat(row["started_at"]),
@@ -283,7 +290,7 @@ def rescore_take(
         section_name=row.get("section_name") or None,
         pass_index=int(row["pass_index"]) if row.get("pass_index") else None,
         guide_vocal=guide_vocal, guide_gain=guide_gain, speed_pct=speed_pct,
-        note_mode=row_notes(row)[0], min_note_s=row_notes(row)[1],
+        note_mode=note_mode, min_note_s=min_note_s,
     )
     if write:
         _write_rows(summary_path(home), [_row(record) if r["id"] == take_id else r for r in rows])
