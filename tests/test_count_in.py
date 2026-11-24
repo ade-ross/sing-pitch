@@ -99,3 +99,16 @@ def test_without_a_count_in_the_lead_in_plays_the_song_as_before():
     tr.set_loop(Loop(*SECTION, lead_in_s=2.0))
     b = tr.render(256)
     assert np.isclose(b.audio[0, 0], 1000.0 + 1.0 * SR)
+
+
+@pytest.mark.parametrize("section", [SECTION, (0.5, 2.0)])     # the second Count-in starts before the song start
+def test_a_speed_change_asked_with_the_loop_crossfades_against_silence_in_the_count_in(section):
+    """Review 5 #2: a Speed change pending when the first Pass starts used to crossfade the old Speed's song into the
+    Count-in, and a Count-in before the song start (negative song frame) wrapped the slice to the song end."""
+    tr = Transport(ramp_song(10.0), sample_rate=SR)
+    tr.render(256)                                  # something rendered: a Speed change now crossfades
+    tr.set_speed(0.7, ramp_song(10.0, 0.7))
+    tr.set_loop(Loop(*section, count_in=TEMPO))
+    audio = np.concatenate([tr.render(256).audio for _ in range(round(1.5 * SR / 256))])
+    assert np.abs(audio).max() < 1.0                # only clicks: the song (>= 1000) is never heard
+

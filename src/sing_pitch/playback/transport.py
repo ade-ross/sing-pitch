@@ -356,13 +356,15 @@ class Transport:
             n = self._n
             g0, g1 = (tuple(a + (b - a) * x / frames for a, b in zip(start, end)) for x in (pos, pos + count))
             loop = self._loop
-            if loop is not None and loop.count_in is not None and n < loop.start_s * self._sr - 1e-6:
+            counting = loop is not None and loop.count_in is not None and n < loop.start_s * self._sr - 1e-6
+            if counting:
                 count = min(count, math.ceil((loop.start_s * self._sr - n) / speed - 1e-9))
                 audio = self._count_in(loop, n, speed, count)
             else:
                 audio = self._mix(self._audio, self._vocal, n, speed, count, g0, g1)
             if fade_from is not None and pos == 0:   # a Speed change: crossfade (only up to a wrap in this block)
-                old = self._mix(*fade_from[:2], n, fade_from[2], count, g0, g1)
+                # the song is silent in a Count-in at either Speed: fade the clicks in from silence
+                old = np.zeros_like(audio) if counting else self._mix(*fade_from[:2], n, fade_from[2], count, g0, g1)
                 weight = (np.arange(1, count + 1, dtype=np.float32) / frames)[:, None]
                 audio = old * (1.0 - weight) + audio * weight
             parts.append(audio)
@@ -432,4 +434,10 @@ class Transport:
         """`frames` frames of the array pair from song frame n (index n / speed in the stretched arrays), the gains
         ramping from start to end."""
         i = round(n / speed)
+        if i < 0:       # before the song start: silence, never a slice wrapped round to the song end
+            out = np.zeros((frames, 2), np.float32)
+            skip = min(-i, frames)
+            if skip < frames:
+                out[skip:] = Transport._mix(backing, vocal, 0.0, speed, frames - skip, start, end)
+            return out
         return mix_block(backing[i : i + frames], None if vocal is None else vocal[i : i + frames], start, end, frames)
