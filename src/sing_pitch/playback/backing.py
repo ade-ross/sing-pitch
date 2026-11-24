@@ -81,6 +81,11 @@ class BackingPlayer:
         self._gains = (float(backing), float(vocal))
         self._transport.set_gains(*self._gains)
 
+    @property
+    def current_gains(self) -> Gains:
+        """(Backing, Guide vocal) linear gains as last set."""
+        return self._gains
+
     def set_speed(self, speed: float, backing: np.ndarray | None = None, vocal: np.ndarray | None = None) -> None:
         """Speed (1.0 = original) with the Backing and the vocal stem already stretched to it (playback/stretch.py;
         not needed at 1.0). Applies from the next block, crossfaded, and stays for the next start(). Any thread."""

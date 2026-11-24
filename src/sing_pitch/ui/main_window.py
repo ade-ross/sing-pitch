@@ -13,7 +13,7 @@ from PySide6 import QtCore, QtGui, QtWidgets
 from ..audio_input import AudioInput, SoundDeviceInput, list_inputs, pick_input
 from ..config import SAMPLE_RATE, data_dir
 from ..calibration import CalibrationRun
-from ..library import Library
+from ..library import Library, PlayerSettings
 from ..live import LiveRunner, Playback
 from ..music import NOTE_NAMES, note_name
 from ..pitch import PitchTracker
@@ -148,11 +148,14 @@ class MainWindow(QtWidgets.QWidget):
         self.drone_box = QtWidgets.QCheckBox("Drone")
         self.song_box = QtWidgets.QComboBox()
         self.reload_songs()
+        self.song_box.currentIndexChanged.connect(self._restore_player_settings)   # first: Speed and Section read them
+        self.song_box.currentIndexChanged.connect(self._speed_changed)
         self.guide_box = QtWidgets.QCheckBox("Guide vocal")
         self.guide_slider = _volume_slider("Guide vocal volume")
         self.backing_slider = _volume_slider("Backing volume")
         for w in (self.guide_box, self.guide_slider, self.backing_slider):
             (w.toggled if w is self.guide_box else w.valueChanged).connect(self._apply_gains)
+            (w.toggled if w is self.guide_box else w.valueChanged).connect(self._remember_player_settings)
         self.pause_button = QtWidgets.QPushButton("Pause")
         self.pause_button.setToolTip("Space. Left/Right arrows jump 5 s; click the timeline to jump anywhere.")
         self.pause_button.setEnabled(False)
@@ -196,7 +199,7 @@ class MainWindow(QtWidgets.QWidget):
         self.speed_box.setToolTip("Speed, pitch unchanged (+ and - change it by 5 %)")
         self.speed_label = QtWidgets.QLabel("")
         self.speed_box.valueChanged.connect(self._speed_changed)
-        self.song_box.currentIndexChanged.connect(self._speed_changed)
+        self.speed_box.valueChanged.connect(self._remember_player_settings)
         for key, slot in (("+", self.speed_up), ("=", self.speed_up), ("-", self.speed_down)):
             QtGui.QShortcut(QtGui.QKeySequence(key), self, activated=slot)    # bound method: a lambda keeps self alive
         self.calibrate_button = QtWidgets.QPushButton("Calibrate latency")
@@ -294,6 +297,7 @@ class MainWindow(QtWidgets.QWidget):
         self.key_box.setEnabled(is_key)
         self.drone_box.setEnabled(is_key)
         self.song_box.setEnabled(is_melody)
+        self._restore_player_settings()
         self._preview_song()
         for w in (self.guide_box, self.guide_slider, self.backing_slider, self.speed_box, self.section_box,
                   self.section_name_edit, self.save_section_button, self.rename_section_button,
@@ -332,8 +336,11 @@ class MainWindow(QtWidgets.QWidget):
         return None if song_id is None else Library(self._home).sections(song_id)
 
     def reload_sections(self, select: str | None = None) -> None:
-        """Fill the picker from the library: the unnamed mark first, then the saved Sections; show the chosen one."""
+        """Fill the picker from the library: the unnamed mark first, then the saved Sections; show the chosen one
+        (else the one the song was last left on)."""
         store = self._sections()
+        if select is None and (player := self._player_store()) is not None:
+            select = player.load().section
         self.section_box.blockSignals(True)
         self.section_box.clear()
         self.section_box.addItem("unsaved mark", None)
@@ -359,6 +366,7 @@ class MainWindow(QtWidgets.QWidget):
         self.timeline.set_section(*((None,) if section is None else (section.start_s, section.end_s)))
         if self.section_box.currentData() is not None:
             self.section_name_edit.setText(self.section_box.currentData())
+        self._remember_player_settings()
         self._apply_loop()
 
     def _section_marked(self, start_s: float, end_s: float) -> None:
@@ -464,6 +472,34 @@ class MainWindow(QtWidgets.QWidget):
         """Slider and checkbox changes reach the player at once, also mid-Take; it ramps them within a block."""
         if self._backing is not None:
             self._backing.set_gains(*self._gains())
+
+    # --- per-song player settings -------------------------------------------------------------------------------
+    def _player_store(self):
+        """The chosen song's player settings (Melody with a song chosen), else None."""
+        song_id = self._speed_song()
+        return None if song_id is None else Library(self._home).player_settings(song_id)
+
+    def _remember_player_settings(self, *_) -> None:
+        """Keep the controls as the chosen song's settings; the song reopens like this."""
+        store = self._player_store()
+        if store is not None:
+            store.save(PlayerSettings(self.guide_box.isChecked(), self.guide_slider.value() / 100,
+                                      self.backing_slider.value() / 100, self.speed_box.value(),
+                                      self.section_box.currentData()))
+
+    def _restore_player_settings(self, *_) -> None:
+        """Put the chosen song's saved Guide vocal, volumes and Speed on the controls (the Section is picked by
+        reload_sections). Not while a Take runs."""
+        store = self._player_store()
+        if store is None or self._runner is not None:
+            return
+        saved = store.load()
+        for widget, value in ((self.guide_box, saved.guide_on), (self.guide_slider, round(100 * saved.guide_gain)),
+                              (self.backing_slider, round(100 * saved.backing_gain)),
+                              (self.speed_box, saved.speed_pct)):
+            widget.blockSignals(True)
+            (widget.setChecked if widget is self.guide_box else widget.setValue)(value)
+            widget.blockSignals(False)
 
     # --- Speed -------------------------------------------------------------------------------------------------
     def speed_up(self) -> None:

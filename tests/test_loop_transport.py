@@ -82,3 +82,52 @@ def test_at_half_speed_a_pass_lasts_twice_as_long_and_still_wraps_on_the_section
         t.append(b.song_t)
     t = np.concatenate(t)
     assert np.allclose(starts, [0.0, 6.0]) and t.max() < 4.0 and np.isclose(t[6000], 1.0)
+
+
+# --- a Speed change during the loop applies at the next Pass (ticket #15) -------------------------------------------
+
+def test_a_speed_change_mid_loop_lets_the_current_pass_finish_at_the_old_speed_and_the_next_use_the_new_one():
+    tr = Transport(ramp_song(10000), sample_rate=SR)
+    tr.set_loop(Loop(3.0, 4.0, lead_in_s=2.0))      # a Pass: song 1.0 .. 4.0 = 3000 frames at Speed 1
+    tr.render(500)
+    tr.set_speed(0.5, ramp_song(20000))
+    mid = tr.render(1500)                           # still inside Pass 1
+    assert [e.kind for e in mid.events] == [] and tr.speed == 1.0
+    assert np.allclose(np.diff(mid.song_t), 1 / SR)
+    b = tr.render(1500)                             # 1000 frames of Pass 1 left: 1000 old-Speed frames, then Pass 2
+    assert kinds(b) == [("pass_ended", 1), ("speed_changed", None), ("pass_started", 2)]
+    assert all(np.isclose(e.output_s, 3.0) and np.isclose(e.song_t, 1.0) for e in b.events[1:])
+    assert b.events[1].speed == 0.5 and b.events[1].loop is not None
+    assert np.allclose(np.diff(b.song_t[:1000]), 1 / SR)
+    assert np.isclose(b.song_t[1000], 1.0) and np.allclose(np.diff(b.song_t[1000:]), 0.5 / SR)
+    assert tr.speed == 0.5
+    assert np.isclose(tr.log.song_time(2.9), 3.9) and np.isclose(tr.log.song_time(3.1), 1.05)
+
+
+def test_a_speed_asked_for_in_a_loop_that_ends_first_applies_at_the_next_block_without_a_loop():
+    tr = Transport(ramp_song(10000), sample_rate=SR)
+    tr.set_loop(Loop(3.0, 4.0, lead_in_s=2.0))
+    tr.render(500)
+    tr.set_speed(0.5, ramp_song(20000))
+    tr.set_loop(None)
+    tr.render(100)                                  # loop_ended is reported here; the Speed waits
+    b = tr.render(100)
+    assert [e.kind for e in b.events] == ["speed_changed"] and b.events[0].loop is None and tr.speed == 0.5
+
+
+def test_outside_a_loop_a_speed_change_still_applies_at_the_next_block():
+    tr = Transport(ramp_song(10000), sample_rate=SR)
+    tr.render(100)
+    tr.set_speed(0.5, ramp_song(20000))
+    b = tr.render(100)
+    assert [e.kind for e in b.events] == ["speed_changed"] and b.events[0].speed == 0.5 and tr.speed == 0.5
+
+
+def test_a_gain_change_is_reported_at_the_next_block_with_the_new_gains():
+    tr = Transport(ramp_song(10000), sample_rate=SR, gains=(1.0, 0.0))
+    assert tr.render(100).events == ()
+    tr.set_gains(0.5, 0.8)
+    b = tr.render(100)
+    assert [(e.kind, e.gains) for e in b.events] == [("gains_changed", (0.5, 0.8))]
+    assert np.isclose(b.events[0].output_s, 0.1)
+    assert tr.render(100).events == ()

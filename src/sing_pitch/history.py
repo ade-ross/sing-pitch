@@ -6,7 +6,9 @@ from dataclasses import dataclass
 from datetime import datetime
 from pathlib import Path
 
-from .take_store import summary_path
+from .take_store import GUIDE_STATES, row_settings, summary_path
+
+WHOLE_SONG = ""      # the Section filter value for Takes that were not a Pass of a Section
 
 
 @dataclass(frozen=True)
@@ -16,6 +18,9 @@ class HistoryPoint:
     song: str | None
     pct_in_tune: float
     median_abs_cents: float
+    guide_vocal: str = "off"          # "off" | "on" | "mixed"; rows saved before the column read as off
+    speed_pct: int = 100
+    section: str | None = None
 
 
 @dataclass(frozen=True)
@@ -43,9 +48,26 @@ class History:
     def songs(self) -> list[str]:
         return sorted({p.song for p in self._points if p.song})
 
-    def series(self, reference: str | None = None, song: str | None = None) -> Series:
+    @property
+    def guide_states(self) -> list[str]:
+        return [g for g in GUIDE_STATES if any(p.guide_vocal == g for p in self._points)]
+
+    @property
+    def speeds(self) -> list[int]:
+        return sorted({p.speed_pct for p in self._points})
+
+    @property
+    def sections(self) -> list[str]:
+        return sorted({p.section for p in self._points if p.section})
+
+    def series(self, reference: str | None = None, song: str | None = None, guide_vocal: str | None = None,
+               speed: int | None = None, section: str | None = None) -> Series:
+        """The Takes matching every filter given (None = any). section: a Section name, or WHOLE_SONG for Takes that
+        were not a Pass."""
         pts = [p for p in self._points
-               if (reference is None or p.reference == reference) and (song is None or p.song == song)]
+               if (reference is None or p.reference == reference) and (song is None or p.song == song)
+               and (guide_vocal is None or p.guide_vocal == guide_vocal) and (speed is None or p.speed_pct == speed)
+               and (section is None or (p.section or WHOLE_SONG) == section)]
         return Series([p.started_at for p in pts], [p.pct_in_tune for p in pts], [p.median_abs_cents for p in pts])
 
 
@@ -59,12 +81,14 @@ def load_history(home: Path) -> History:
     with open(path, newline="") as fh:
         for r in csv.DictReader(fh):
             try:
+                guide, _, speed = row_settings(r)
                 points.append(HistoryPoint(
                     started_at=datetime.fromisoformat(r["started_at"]),
                     reference=r["reference"],
                     song=(r.get("song_id") or r.get("song") or None),
                     pct_in_tune=float(r["pct_in_tune"]),
                     median_abs_cents=float(r["median_abs_cents"]),
+                    guide_vocal=guide, speed_pct=speed, section=(r.get("section_name") or None),
                 ))
             except (KeyError, TypeError, ValueError):
                 continue
