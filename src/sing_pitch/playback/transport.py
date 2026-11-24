@@ -115,6 +115,13 @@ class SongTimeLog:
         song = None if song0 is None else (song0 + (frames - start) * rate) / self.sample_rate
         return frames / self.sample_rate, song, rate
 
+    def paused_spans(self) -> list[tuple[float, float]]:
+        """(start, end) output seconds of every paused stretch, oldest first; end inf = still paused at the end."""
+        n = len(self._start)                    # read first: the fields of the first n stretches are complete
+        starts, song0 = self._start[:n], self._song0[:n]
+        return [(starts[i] / self.sample_rate, starts[i + 1] / self.sample_rate if i + 1 < n else math.inf)
+                for i in range(n) if song0[i] is None]
+
     def song_time(self, output_s: float) -> float | None:
         """Song time (s) rendered at this output time; None while paused. Before the first stretch it extends the
         first one back, after the last rendered frame the last one forward (a linear song keeps its old meaning)."""

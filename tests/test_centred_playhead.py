@@ -213,17 +213,18 @@ def test_after_the_end_of_the_song_the_right_half_is_empty(qtbot, tmp_path):
     win.toggle()
 
 
-def test_paused_the_right_half_shows_what_plays_on_resume(qtbot, tmp_path):
+def test_paused_the_plot_stands_at_the_pause_and_the_right_half_shows_what_plays_on_resume(qtbot, tmp_path):
     win, player, log, offset = running(qtbot, tmp_path)
     log.append(round(3 * SR), 0.0)                        # song 0 -> 3 s
     log.append(round(2 * SR), None)                       # paused for 2 s (output 3 -> 5): the song waits at 3.0
     player.position = 3.0
-    now = 5.0 + offset
-    assert win._draw_clock()(now) is None                 # the voice answers nothing now
-    assert np.isnan(midi_at(win, now, now - 0.5))
+    assert win._draw_clock()(5.0 + offset) is None        # the voice answers nothing now
+    now = win._fold().to_view(5.0 + offset)
+    assert now == approx(3.0 + offset)                    # the pause is folded away: the view stands at it (#20)
+    assert midi_at(win, now, now - 0.5) == approx(note_midi(2.5))     # no gap behind the now-line
     for dt in (0.5, 1.7, 3.2):
         if away_from_a_note_change(3.0 + dt):
-            assert midi_at(win, now, now + dt) == approx(note_midi(3.0 + dt))    # as if resumed now, Speed 100
+            assert midi_at(win, now, now + dt) == approx(note_midi(3.0 + dt))    # what plays on resume, Speed 100
     win.toggle()
 
 

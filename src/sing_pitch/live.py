@@ -181,6 +181,7 @@ class LiveRunner:
         self._thread: threading.Thread | None = None
         self._error: Exception | None = None      # what killed the worker, if anything
         self._run_started = datetime.now()        # wall clock at input time 0: a cut's Take starts at this + its time
+        self._received = 0                        # mic samples delivered so far (audio thread writes, UI reads)
 
     def start(self) -> None:
         """Open the Backing and the input, then start the worker: a Start that fails leaves no thread behind."""
@@ -190,10 +191,13 @@ class LiveRunner:
         self._speed_next = None
         self._guide = [(-math.inf, getattr(self._backing, "current_gains", (1.0, 0.0))[1])]
         self._run_started = datetime.now()
+        self._received = 0
         self._take = LiveTake(self._tracker, self._reference, self._source.sample_rate, started_at=self._run_started,
                               octave=self._octave)
         if self._backing is None:
-            on_chunk = self._chunks.put
+            def on_chunk(chunk: np.ndarray) -> None:      # PortAudio thread
+                self._received += len(chunk)
+                self._chunks.put(chunk)
         else:
             self._backing.on_event = self._on_event
             try:
@@ -210,6 +214,7 @@ class LiveRunner:
                     log = self._backing.song_log
                     output_at_zero = log.rendered_s - len(chunk) / self._source.sample_rate
                     self._chunks.put(("align", LogClock(log, self._latency_s, output_at_zero)))
+                self._received += len(chunk)
                 self._chunks.put(chunk)
 
         try:
@@ -326,6 +331,14 @@ class LiveRunner:
         """The song clock's offset at the Take start (voice time - song time while the song plays linearly), for
         drawing the reference line on the voice clock."""
         return None if self._take is None else self._take.song_clock.offset_s
+
+    @property
+    def heard_t(self) -> float:
+        """The voice time of what is in the headphones now: the newest mic sample's time plus the input's own latency.
+        The calibrated latency is the output part plus the input part, so in song terms this is the rendered output
+        minus the output part of the latency. Every tracker frame is older than this by the tracker's look-ahead
+        (SwiftF0: ~0.18 s) and the queueing, so the plot's now-line is drawn here, not at the newest frame."""
+        return self._received / self._source.sample_rate + getattr(self._source, "latency_s", 0.0)
 
     def drain(self) -> list[FrameScore]:
         out: list[FrameScore] = []

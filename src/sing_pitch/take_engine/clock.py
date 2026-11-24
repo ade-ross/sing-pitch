@@ -16,6 +16,8 @@ class SongLog(Protocol):
 
     def tail(self) -> tuple[float, float | None, float] | None: ...
 
+    def paused_spans(self) -> list[tuple[float, float]]: ...
+
 
 class SongClock(Protocol):
     offset_s: float      # t - song time at the Take start: drawn on the plot and kept in takes.csv (latency_offset_s)
@@ -52,6 +54,10 @@ class LogClock:
         heard: the voice time is ahead of the live voice by about the latency. Song time None = paused there."""
         tail = self._log.tail()
         return None if tail is None else (tail[0] + self.offset_s, tail[1], tail[2])
+
+    def paused_spans(self) -> list[tuple[float, float]]:
+        """(start, end) voice times the song was paused (end inf = still paused): the voice there answers nothing."""
+        return [(start + self.offset_s, end + self.offset_s) for start, end in self._log.paused_spans()]
 
 
 class SampledClock:
@@ -92,6 +98,49 @@ class SampledClock:
             return None
         value = float(edge + (t - at) * rate)
         return None if self._song_end_s is not None and value > self._song_end_s else value
+
+    def paused_spans(self) -> list[tuple[float, float]]:
+        """(start, end) voice times of each run of frames without a song time (paused): from its first frame to the
+        next frame with one (inf when the Take ended paused)."""
+        paused = np.isnan(self._song).astype(np.int8)
+        edges = np.flatnonzero(np.diff(np.concatenate([[0], paused, [0]])))
+        return [(float(self._t[a]), float(self._t[b]) if b < len(self._t) else np.inf)
+                for a, b in zip(edges[::2], edges[1::2])]
+
+
+class PauseFold:
+    """Voice time <-> view time, the plot's x axis: voice time with every pause of the song folded away. While the
+    song is paused the view time stands still, and on resume it goes on from the same place, so the plot freezes and
+    then continues seamlessly. spans: the clock's paused_spans() (voice times, sorted, apart; end inf = paused now).
+    No spans (Nearest note, Key, a Take never paused): view time = voice time."""
+
+    def __init__(self, spans: Sequence[tuple[float, float]] = ()):
+        self._start = np.array([s for s, _ in spans], dtype=np.float64)
+        self._end = np.array([e for _, e in spans], dtype=np.float64)
+        length = self._end - self._start
+        self._before = np.concatenate([[0.0], np.cumsum(length)[:-1]])     # folded away before each span
+        self._at = self._start - self._before                              # the view time each span folds to
+
+    def paused(self, t: float) -> bool:
+        """The voice time t lies in a pause: the voice there is neither drawn nor scored."""
+        return bool(np.any((self._start <= t) & (t < self._end)))
+
+    def to_view(self, t):
+        t = np.asarray(t, dtype=np.float64)
+        view = t.copy()
+        for start, end in zip(self._start, self._end):
+            view = view - np.clip(t - start, 0.0, end - start)
+        return float(view) if view.ndim == 0 else view
+
+    def to_voice(self, x):
+        """The voice time shown at view time x. At a fold the voice time just after the pause (where the song went
+        on); past the fold of a pause still going on, its start (the song waits there)."""
+        x = np.asarray(x, dtype=np.float64)
+        voice = x.copy()
+        for start, end, before, at in zip(self._start, self._end, self._before, self._at):
+            after = x >= at
+            voice = np.where(after, start if np.isinf(end) else x + before + (end - start), voice)
+        return float(voice) if voice.ndim == 0 else voice
 
 
 def project_song_time(dt: np.ndarray, song_s: float, rate: float, loop_end_s: float | None = None,
