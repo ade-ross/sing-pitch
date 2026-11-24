@@ -102,11 +102,12 @@ class FakeMic:
         delay = round(self.delay_s * self.sample_rate)
         if isinstance(self._source, str):
             return self._hub._mix_at(frame - delay, n)
-        idx = round(self.offset_s * self.sample_rate) + (frame - self._origin - delay) + np.arange(n)
+        rel = (frame - self._origin - delay) + np.arange(n)      # frames since the voice started singing
+        idx = round(self.offset_s * self.sample_rate) + rel
         src = self._source
         if self.loop and len(src):
             idx = idx % len(src)
-        ok = (idx >= 0) & (idx < len(src))
+        ok = (rel >= 0) & (idx >= 0) & (idx < len(src))          # silent until then, and after the end
         out = np.zeros(n, np.float32)
         out[ok] = src[idx[ok]]
         return out
@@ -311,7 +312,7 @@ class Flags:
 
 def parse_flags(argv: list[str]) -> tuple[Flags, list[str]]:
     """The test-mode flags out of argv, and the rest. Without them the app is exactly the normal one."""
-    p = argparse.ArgumentParser(add_help=False)
+    p = argparse.ArgumentParser(add_help=False, allow_abbrev=False)
     p.add_argument("--fake-mic")
     p.add_argument("--fake-mic-offset", type=float, default=0.0)
     p.add_argument("--fake-mic-loop", action="store_true")

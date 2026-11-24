@@ -1,0 +1,51 @@
+"""The fake audio hub: real-time pace, and what the file mic hears relative to the output."""
+import time
+
+import numpy as np
+
+from sing_pitch.testmode import FakeAudioHub, FakeMic
+
+SR, STEP = 48000, 256
+
+
+def test_the_clock_runs_at_time_scale_times_the_wall_clock():
+    hub = FakeAudioHub(time_scale=2.0)
+    try:
+        t0, a0 = time.monotonic(), hub.now_s
+        time.sleep(0.5)
+        elapsed = hub.now_s - a0
+        assert abs(elapsed - 2.0 * (time.monotonic() - t0)) < 0.1
+    finally:
+        hub.close()
+
+
+def test_the_file_mic_starts_with_the_output_and_hears_it_delay_late():
+    """Sample k of the wav (counted from the offset) is heard at output frame k + delay."""
+    hub = FakeAudioHub(time_scale=20.0)
+    ramp = np.arange(SR, dtype=np.float32)          # sample value = its index in the file
+    chunks, out_frames = [], []
+
+    def callback(outdata, frames, time_info, status):
+        out_frames.append(frames)
+        outdata[:] = 0
+
+    try:
+        with hub.held():
+            out = hub.open_output(callback=callback, channels=2, blocksize=1024, samplerate=SR, dtype="float32")
+            out.start()
+            mic = FakeMic(hub, ramp, offset_s=0.25, delay_s=0.1)
+            mic.start(chunks.append)
+        while len(chunks) < 200:
+            time.sleep(0.01)
+        mic.stop(), out.stop()
+    finally:
+        hub.close()
+    heard = np.concatenate(chunks)
+    assert all(len(c) == STEP for c in chunks)
+    delay = round(0.1 * SR)
+    assert np.all(heard[:delay] == 0)                                 # nothing yet: the voice is late
+    assert heard[delay] == round(0.25 * SR)                           # then the file from its offset
+    rest = SR - round(0.25 * SR)
+    assert np.all(np.diff(heard[delay : delay + rest]) == 1)          # in real time, no gap or repeat
+    assert np.all(heard[delay + rest :] == 0)                         # the file ended: silence
+    assert set(out_frames) == {1024}
