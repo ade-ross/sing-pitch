@@ -14,18 +14,22 @@ def eliding_combo(chars: int = 16) -> QtWidgets.QComboBox:
 
 
 class ElidedLabel(QtWidgets.QLabel):
-    """A one-line label that never asks for room: whatever its text says, it asks the layout for no minimum width and
-    shows what fits, with "…" for the rest and the whole text in its tooltip. A status text can then never widen the
-    window (#25, #35, #52), and a window that resizes itself under a running Take breaks the sync (#49).
-    `text()` is always the full text. `takes_the_rest`: the label wants no room of its own and shows in whatever the
-    row has left over (give it a stretch factor in the row); otherwise it asks for its text's width and gives way only
-    when the row is short."""
+    """A label that never asks for room: whatever its text says, it asks the layout for no minimum width and shows
+    what fits, with "…" for the rest and the whole text in its tooltip. A status text can then never widen the window
+    (#25, #35, #52, #66), and a window that resizes itself under a running Take breaks the sync (#49).
+    `text()` is always the full text. `lines` > 1: the text wraps (at spaces, or anywhere inside a word too long for
+    a line) into that many lines; the label is always exactly that tall, so a longer text never changes its height.
+    `takes_the_rest`: the label wants no room of its own and shows in whatever the row has left over (give it a
+    stretch factor in the row); otherwise it asks for its text's width and gives way only when the row is short."""
 
-    def __init__(self, text: str = "", takes_the_rest: bool = False):
+    def __init__(self, text: str = "", takes_the_rest: bool = False, lines: int = 1):
         super().__init__()
-        self._full, self._tip = text, ""
+        self._full, self._tip, self._lines = text, "", lines
         self.setSizePolicy(QtWidgets.QSizePolicy.Ignored if takes_the_rest else QtWidgets.QSizePolicy.Preferred,
-                           QtWidgets.QSizePolicy.Preferred)
+                           QtWidgets.QSizePolicy.Fixed if lines > 1 else QtWidgets.QSizePolicy.Preferred)
+        if lines > 1:
+            self.setAlignment(QtCore.Qt.AlignLeft | QtCore.Qt.AlignTop)
+            self.setFixedHeight(lines * self.fontMetrics().lineSpacing() + 2 * self.margin())
         self._fit()
 
     def text(self) -> str:
@@ -51,11 +55,33 @@ class ElidedLabel(QtWidgets.QLabel):
         super().resizeEvent(event)
         self._fit()
 
+    def _wrapped(self, width: int) -> str:
+        """The text as at most `lines` lines no wider than `width`; the last one elided when there is more."""
+        fm = self.fontMetrics()
+        todo, lines = " ".join(self._full.split()), []
+        while todo and len(lines) < self._lines:
+            if len(lines) == self._lines - 1:
+                lines.append(fm.elidedText(todo, QtCore.Qt.ElideRight, width))
+                break
+            cut = len(todo)
+            while cut > 1 and fm.horizontalAdvance(todo[:cut]) > width:
+                cut -= 1
+            if cut < len(todo) and (space := todo.rfind(" ", 0, cut + 1)) > 0:
+                cut = space                         # break at a space when there is one on this line
+            lines.append(todo[:cut].rstrip())
+            todo = todo[cut:].lstrip()
+        return "\n".join(lines)
+
     def _fit(self) -> None:
-        shown = self._full
-        if self.width() > 1 and self.fontMetrics().horizontalAdvance(self._full) > self.width():
-            shown = self.fontMetrics().elidedText(self._full, QtCore.Qt.ElideRight, self.width())
-        elided = shown != self._full
+        width = max(self.width() - 2 * self.margin(), 0)
+        if self._lines > 1:
+            shown = self._wrapped(width) if width > 1 else self._full
+            elided = width > 1 and shown.replace("\n", " ") != " ".join(self._full.split())
+        else:
+            shown = self._full
+            if width > 1 and self.fontMetrics().horizontalAdvance(self._full) > width:
+                shown = self.fontMetrics().elidedText(self._full, QtCore.Qt.ElideRight, width)
+            elided = shown != self._full
         tip = (f"{self._full}\n\n{self._tip}" if self._tip else self._full) if elided else self._tip
         if shown != super().text():
             super().setText(shown)

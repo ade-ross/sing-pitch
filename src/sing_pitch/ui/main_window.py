@@ -58,6 +58,9 @@ SECTION_NAME_MIN_W = 90                          # the Section name field never 
 # First-launch size: on the macOS style the five control rows take about 270 px, so 620 left the plot about 150 px; the
 # minimum size (set by the rows) is not raised for it.
 DEFAULT_SIZE = (1000, 800)
+ROW_SPACING = 8
+PLOT_MIN_H = 200                                 # the plot is never squeezed below this, even at the minimum window size
+SCREEN_MARGIN = (0, 60)                          # room the window frame and the menu bar / Dock take from the screen
 Y_VOICE_S = 2.0       # the voice's median over this many seconds decides where the vertical range sits
 Y_LOOK_S = 6.0        # a move of the vertical range also looks this many seconds beyond the right half
 Y_EASE = 0.3          # share of the way to the new centre covered per redraw (about 0.3 s for a move)
@@ -183,7 +186,7 @@ class MainWindow(QtWidgets.QWidget):
         super().__init__()
         collect_on_the_ui_thread_only()       # the worker threads below must never finalise a Qt object (gui_gc.py)
         self.setWindowTitle("sing-pitch")
-        self.resize(*DEFAULT_SIZE)
+        self.resize(*self._first_size())
         self._tracker, self._home, self._input_factory = tracker, home or data_dir(), input_factory
         self._drone_factory = drone_factory
         self._drone: DronePlayer | None = None
@@ -410,13 +413,14 @@ class MainWindow(QtWidgets.QWidget):
             QtGui.QShortcut(QtGui.QKeySequence(key), self, activated=slot)    # bound method: a lambda keeps self alive
         self.calibrate_button = QtWidgets.QPushButton("Calibrate latency")
         self.calibrate_button.clicked.connect(self.start_calibration)
-        self.output_label = ElidedLabel(takes_the_rest=True)
+        self.output_label = ElidedLabel(takes_the_rest=True, lines=2)
         self.output_label.setStyleSheet("color: #e67e22;")
         self.headphones_button = QtWidgets.QPushButton("These are headphones")
         self.headphones_button.clicked.connect(self.confirm_headphones)
-        keep_room = self.headphones_button.sizePolicy()
-        keep_room.setRetainSizeWhenHidden(True)           # the notice row keeps its height with or without the button
-        self.headphones_button.setSizePolicy(keep_room)
+        for w in (self.headphones_button, self.output_label):
+            keep_room = w.sizePolicy()
+            keep_room.setRetainSizeWhenHidden(True)       # the notice row keeps its height with or without the notice
+            w.setSizePolicy(keep_room)
         self.reference_box.currentTextChanged.connect(self._reference_changed)
         self.song_box.currentIndexChanged.connect(self._preview_song)
         self._reference_changed()
@@ -431,8 +435,7 @@ class MainWindow(QtWidgets.QWidget):
         self.note_label.setStyleSheet("font-size: 32px; font-weight: bold;")
         self.note_label.setFixedSize(NOTE_LABEL_WIDTH, 48)
         self.note_label.setAlignment(QtCore.Qt.AlignRight | QtCore.Qt.AlignVCenter)
-        self.summary_label = QtWidgets.QLabel(self._library_notice or "Press Start and sing.")
-        self.summary_label.setWordWrap(True)
+        self.summary_label = ElidedLabel(self._library_notice or "Press Start and sing.", lines=2)   # any text: same size (#66)
 
         song_axis = SongTimeAxis()
         self.plot_widget = pg.PlotWidget(background="#1e1e1e", axisItems={"bottom": song_axis})
@@ -511,13 +514,10 @@ class MainWindow(QtWidgets.QWidget):
         layout.addWidget(self.timeline)
         layout.addWidget(self.summary_label)
 
-        shown = not self.timeline.isHidden()               # how much height the Timeline adds to the window's minimum
-        heights = []
-        for visible in (True, False):
-            self.timeline.setVisible(visible)
-            layout.invalidate()
-            heights.append(layout.totalMinimumSize().height())
-        self._plot_min_h, self._timeline_room = self.plot_widget.minimumSizeHint().height(), heights[0] - heights[1]
+        self.plot_widget.setMinimumHeight(PLOT_MIN_H)       # the plot keeps a usable height at the smallest window
+        layout.setSpacing(ROW_SPACING)                      # a fixed gap (the style's differs per pair of widgets), so
+        shown = not self.timeline.isHidden()               # the Timeline's room is exactly its height plus one gap
+        self._plot_min_h, self._timeline_room = PLOT_MIN_H, max(self.timeline.minimumSize().height(), self.timeline.minimumSizeHint().height()) + ROW_SPACING
         self._show_timeline(shown)
 
         self._timer = QtCore.QTimer(self)
@@ -526,6 +526,16 @@ class MainWindow(QtWidgets.QWidget):
         self._describe_controls()
         self._name_widgets()
         self._restore_last_choice()
+
+    @staticmethod
+    def _first_size() -> tuple[int, int]:
+        """The first-launch size: DEFAULT_SIZE, clamped to the screen the window opens on (a 1280x720 laptop)."""
+        screen = QtGui.QGuiApplication.primaryScreen()
+        if screen is None:
+            return DEFAULT_SIZE
+        room = screen.availableGeometry()
+        return (min(DEFAULT_SIZE[0], room.width() - SCREEN_MARGIN[0]),
+                min(DEFAULT_SIZE[1], room.height() - SCREEN_MARGIN[1]))
 
     def _describe_controls(self) -> None:
         """A tooltip on every control (the ones with a longer story to tell were given theirs where they are built)."""
@@ -1179,7 +1189,7 @@ class MainWindow(QtWidgets.QWidget):
         button.setChecked(percent == 100)
         button.setFocusPolicy(QtCore.Qt.NoFocus)                 # so + and - stay shortcuts of the window
         button.setToolTip(f"Set the Speed to {percent} %: the same as typing it in the box")
-        button.setFixedWidth(44)
+        button.setFixedWidth(52)                                  # "100 %" needs 45 on the macOS style (#68)
         return button
 
     def _preset_70(self) -> None:
@@ -1474,26 +1484,28 @@ class MainWindow(QtWidgets.QWidget):
         return {"reference": REFERENCE_TEXT.get(reference.kind, "Nearest note"), "song": row["song_id"] or None,
                 "key": reference if reference.kind == "key" else None,
                 "octave": octave.k if octave.mode == "pinned" else None, "notes": notes == "on",
-                "length": player_settings.DEFAULT_MIN_NOTE_S if length is None else length, "speed": row_settings(row)[2]}
+                "length": player_settings.DEFAULT_MIN_NOTE_S if length is None else length, "speed": row_settings(row)[2],
+                "tolerance": saved_config(self._home, take_id).green_cents}
 
     def _replay_controls(self) -> tuple[QtWidgets.QWidget, ...]:
         """The controls a replay puts its Take's settings on, and those that would act on them (Speed presets, the
         Count-in's tempo): greyed while it runs."""
         return (self.reference_box, self.song_box, self.key_box, self.octave_box, self.speed_box,
                 self.speed_70_button, self.speed_85_button, self.speed_100_button, self.between_box, self.bpm_box,
-                self.beats_box)
+                self.beats_box, self.tolerance_slider)
 
     def _controls_now(self) -> dict:
         return {"reference": self.reference_box.currentText(), "song": self.song_box.currentData(),
                 "key": self.key_box.currentData(), "octave": self.octave_box.currentData(),
-                "notes": self.notes_box.isChecked(), "length": self._note_length(), "speed": self.speed_box.value()}
+                "notes": self.notes_box.isChecked(), "length": self._note_length(), "speed": self.speed_box.value(),
+                "tolerance": self.tolerance_slider.value()}
 
     def _show_settings(self, settings: dict) -> dict:
         """Put these settings on the controls without anything reacting to them (nothing remembered, nothing
         stretched, no preview). Returns the settings that were there, to put back."""
         before = self._controls_now()
         boxes = (self.reference_box, self.song_box, self.key_box, self.octave_box, self.notes_box,
-                 self.note_length_slider, self.speed_box)
+                 self.note_length_slider, self.speed_box, self.tolerance_slider)
         for box in boxes:
             box.blockSignals(True)
         self.reference_box.setCurrentText(settings["reference"])
@@ -1505,8 +1517,10 @@ class MainWindow(QtWidgets.QWidget):
         self.notes_box.setChecked(settings["notes"])
         self.note_length_slider.setValue(slider_of_length(settings["length"]))
         self.speed_box.setValue(settings["speed"])
+        self.tolerance_slider.setValue(settings["tolerance"])      # a replay shows its Take's Tolerance; nothing is saved
         for box in boxes:
             box.blockSignals(False)
+        self.tolerance_label.setText(f"±{self.tolerance_slider.value()} c")
         self.note_length_label.setText(format_length(self._note_length()))
         self._sync_speed_presets()
         return before
