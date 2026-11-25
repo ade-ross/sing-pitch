@@ -122,8 +122,18 @@ pause. After each action it checks: at most one output stream open (none without
 window's pause state and the Transport agree with what the user did; while paused (after the plot has settled) the
 recorded output is silent and the song position, Timeline playhead, now-line and x range stand still and no frame
 sung during the pause is scored or drawn; after a resume the song goes on from where it stood. A failing run prints
-its action list. `tests/test_pause_random.py` runs three fixed seeds in the suite; by hand:
-`cd tests && PYTHONPATH=. uv run --project .. python pause_fuzz.py <first seed> <how many> <steps>`.
+its action list.
+
+Since round 2 the checks run over the whole of every pause, not a window after a settle: the output of every audio step
+is kept (peaks only), so any sound during a pause is found; the window is sampled every ~8 ms through the pause
+(Timeline playhead, now-line, x range, song position, frames sung while paused that were drawn or scored); the song
+time a resume starts from is compared with the one paused at, from the song log; a run can add the fake device's
+faults (`faults="..."`, `FAULTS` in the file is a rough device) and resize storms. Choosing or marking a Section, a
+loop change, seeks and arrows move the song on purpose, so the pause being watched is closed there; saving a Section
+must not move it. `tests/pause_mutants.py` has three deliberately broken Transports (sound that goes on 0.8 s after
+Space, a block of sound leaking every 2 s, a resume that jumps 1.5 s ahead); `tests/test_pause_random.py` requires
+the hunt to catch each one on a directed script, and runs three fixed seeds (one with faults) in the suite. By hand:
+`cd tests && PYTHONPATH=. uv run --project .. python pause_fuzz.py <first seed> <how many> <steps> [none|faults|SPEC]`.
 
 Not covered: the real mic and speakers, device lists (test mode shows one fake input and the system-default fake
 output), and the headphones check (the fake output counts as headphones). The fake's timestamps are exact; how exact

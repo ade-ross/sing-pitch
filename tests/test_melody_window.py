@@ -31,6 +31,14 @@ class FakeBacking:
         self.speed = speed
         self.speeds.append((speed, backing, vocal))
 
+    paused = False
+
+    def pause(self):
+        self.paused = True
+
+    def play(self):
+        self.paused = False
+
     def start(self):
         self.started = True
 
