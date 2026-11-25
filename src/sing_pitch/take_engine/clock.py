@@ -70,8 +70,8 @@ class StreamTimeline:
       do not count as jitter). The tolerance is max(TOLERANCE_S, JITTER_K x sigma).
     - Within the tolerance: nothing changes (jitter, or drift too small to matter yet).
     - Later than the model by more: a tentative anchor at once (a lost block must show before the next one), which the
-      next block confirms (it agrees with the new anchor within the tolerance) or retracts (it agrees with the old
-      model: the stamp was a spike, counted in `spikes`). A confirmed jump of more than max(GLITCH_S, tolerance) is
+      next block confirms (it agrees with the new anchor within the tolerance and not with the old model) or retracts
+      (the stamp was a spike, counted in `spikes`). A confirmed jump of more than max(GLITCH_S, tolerance) is
       lost audio: `glitches`, its length in `lost_s`; smaller ones are drift.
     - Earlier than the model by more: never lost audio. It must repeat in the next block (a lasting step: the reported
       latency changed, e.g. a Bluetooth renegotiation, or drift) before an anchor is made; one alone is a spike. A
@@ -85,8 +85,8 @@ class StreamTimeline:
     the count first."""
 
     TOLERANCE_S = 0.0005       # the tolerance never goes below this
-    JITTER_K = 4.0             # ...and is this many sigmas of the measured jitter above it
-    JITTER_WINDOW = 64         # blocks the jitter is measured over
+    JITTER_K = 5.0             # ...and is this many sigmas of the measured jitter above it
+    JITTER_WINDOW = 256        # blocks the jitter is measured over
     GLITCH_S = 0.002           # a confirmed jump beyond max(this, tolerance) is lost audio (or a latency step back)
     HIST_STEP_S = 20e-6        # |residual| histogram for the health record: 20 us bins up to 100 ms
     HIST_BINS = 5000
@@ -162,7 +162,7 @@ class StreamTimeline:
         jump = float(host_s - (self._h[n - 1] + stream_s - self._s[n - 1]))
         if self._tentative is not None:          # this block decides the tentative anchor before it
             step, self._tentative = self._tentative, None
-            if abs(jump) <= tol:                  # confirmed: the step lasts
+            if abs(jump) <= tol < abs(jump + step):   # confirmed: it fits the new anchor and not the old model
                 self._residual(jump)
                 if step > max(self.GLITCH_S, tol):
                     self.glitches += 1
@@ -173,7 +173,9 @@ class StreamTimeline:
             jump = float(host_s - (self._h[n - 1] + stream_s - self._s[n - 1]))
         self._residual(jump)
         if abs(jump) <= tol:
-            self._pending = None
+            if self._pending is not None:         # a step back that did not last
+                self.spikes += 1
+                self._pending = None
             return
         if jump > 0:                              # later than the model: tentative at once
             self._pending = None
