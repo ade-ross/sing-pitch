@@ -1092,6 +1092,13 @@ class MainWindow(QtWidgets.QWidget):
         elif not paused and shown == PAUSED_TEXT:
             self.summary_label.setText(self._unpaused_text)
 
+    def _set_start_waiting(self, waiting: bool) -> None:
+        """A Start waiting for its Speed shows on the button as "Cancel start" (pressing it again cancels), so a slow
+        preparation never leaves a Start button that looks idle and is not."""
+        self._start_waiting = waiting
+        if self._runner is None:
+            self.button.setText("Cancel start" if waiting else "Start")
+
     def _show_speed_hint(self) -> None:
         """In a loop a Speed change applies from the next Pass: until then the box says the new Speed while the old one
         plays, so the label says "70 % from the next Pass"."""
@@ -1300,10 +1307,10 @@ class MainWindow(QtWidgets.QWidget):
             return
         song_id, percent = self._speed_song(), self.speed_box.value()
         if failed is not None or song_id is None or self._replay is not None or self._calibration is not None:
-            self._start_waiting = False
+            self._set_start_waiting(False)
             self.summary_label.setText(f"Not started: {failed}" if failed else "Start cancelled.")
         elif percent == 100 or (self._speed_ready and self._speed_ready[:2] == (song_id, percent)):
-            self._start_waiting = False
+            self._set_start_waiting(False)
             self._start_or_undo()
         else:
             self.summary_label.setText(f"Starting when {percent} % is ready… (Start again to cancel)")
@@ -1641,7 +1648,7 @@ class MainWindow(QtWidgets.QWidget):
             run.finish()
 
     def _close_speed_work(self) -> None:
-        self._start_waiting = False
+        self._set_start_waiting(False)
         self._speed_timer.stop()
         self._speed_job = None                   # a stretch still running finishes into the cache; nobody listens
 
@@ -1653,7 +1660,7 @@ class MainWindow(QtWidgets.QWidget):
         if self._replay is not None:
             return
         if self._start_waiting:                      # pressed again while waiting for the Speed: no Take after all
-            self._start_waiting = False
+            self._set_start_waiting(False)
             self.summary_label.setText("Start cancelled.")
             return
         if self._runner is None:
@@ -1703,7 +1710,7 @@ class MainWindow(QtWidgets.QWidget):
                 percent = self.speed_box.value()
                 stems = None if percent == 100 else self._stems_for_start(reference.song_id, percent)
                 if percent != 100 and stems is None:          # starts by itself once ready (QA #32)
-                    self._start_waiting = True
+                    self._set_start_waiting(True)
                     self.summary_label.setText(f"Starting when {percent} % is ready… (Start again to cancel)")
                     return
                 song = Library(self._home).get(reference.song_id)
