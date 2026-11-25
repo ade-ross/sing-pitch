@@ -260,6 +260,7 @@ class FakeAudioHub:
         self._cond = threading.Condition()   # guards everything below; held while a step runs
         self._frame = 0
         self._pace = (time.monotonic(), 0)   # (wall clock, hub frame) the pace counts from
+        self._late_s = 0.0                   # how late the step being run is (app seconds)
         self._outputs: list[FakeOutputStream] = []
         self._inputs: list[FakeMic] = []
         self._held = 0
@@ -353,9 +354,10 @@ class FakeAudioHub:
         return out
 
     # --- the thread -----------------------------------------------------------------------------------------------
-    def _step(self, late_s: float = 0.0) -> None:
-        """One step. late_s: app seconds the step runs after it was due (the deadline faults)."""
-        n, frame, faults = self.step, self._frame, self.faults
+    def _step(self) -> None:
+        """One step. self._late_s: app seconds this step runs after it was due (the deadline faults; set by _run, so
+        the signature stays the one tests wrap)."""
+        n, frame, faults, late_s = self.step, self._frame, self.faults, self._late_s
         lost_out = self._underflow.hit(frame) or (faults.deadline_out_ms is not None
                                                   and late_s * 1000 > faults.deadline_out_ms)
         lost_in = self._overflow.hit(frame) or (faults.deadline_in_ms is not None
@@ -392,7 +394,8 @@ class FakeAudioHub:
                 if self._closed:
                     return
                 due = t0 + (self._frame - f0) / self.sample_rate / self.time_scale
-                self._step(max(0.0, time.monotonic() - due) * self.time_scale)
+                self._late_s = max(0.0, time.monotonic() - due) * self.time_scale
+                self._step()
                 due = t0 + (self._frame - f0) / self.sample_rate / self.time_scale
             wait = due - time.monotonic()
             if wait > 0:
