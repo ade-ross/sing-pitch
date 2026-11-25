@@ -1,4 +1,5 @@
-"""The Backing in the headphones during a Melody Take. The frame counter of its output callback is the song clock."""
+"""The Backing in the headphones during a Melody Take. The frame counter of its output callback is the song clock;
+the DAC timestamp of each block says when those frames are heard (output_times)."""
 from __future__ import annotations
 
 from pathlib import Path
@@ -7,6 +8,7 @@ from typing import Callable
 import numpy as np
 
 from ..config import SAMPLE_RATE
+from ..take_engine.clock import PORTAUDIO, StreamTimeline
 from .drone import _open_output
 from .mix import Gains
 from .transport import Loop, SongTimeLog, Transport, TransportEvent
@@ -60,6 +62,7 @@ class BackingPlayer:
         self._device = device
         self._transport = self._new_transport()
         self._stream = None
+        self.output_times = StreamTimeline()    # DAC time of the rendered frames (see start)
         self.on_event: Callable[[TransportEvent], None] | None = None   # runs in the audio callback: only hand over
 
     def _new_transport(self) -> Transport:
@@ -156,11 +159,22 @@ class BackingPlayer:
         return self._transport.pass_index
 
     def start(self) -> None:
-        """From the song start, with a fresh song-time log; the gains as they are now (no ramp up from silence)."""
+        """From the song start, with a fresh song-time log; the gains as they are now (no ramp up from silence).
+        Every block's DAC time (time_info.outputBufferDacTime) goes into output_times before it is rendered, so the
+        song can be read on the host clock (take_engine.LogClock): a block the callback could not deliver in time is
+        then a silence the song waits through, not a shift of everything after it (#49)."""
         self.stop()
         transport = self._transport = self._new_transport()
+        times: StreamTimeline | None = None
+        log = transport.log
 
         def callback(outdata, frames, time_info, status):
+            if times is not None:
+                if status and status.output_underflow:
+                    times.flagged += 1
+                dac = time_info.outputBufferDacTime if time_info is not None else 0.0
+                if dac > 0:                # 0: the driver had no timestamp for this block
+                    times.add(log.rendered_s, dac)
             block = transport.render(frames)
             outdata[:] = block.audio
             if block.events and self.on_event is not None:
@@ -170,8 +184,10 @@ class BackingPlayer:
         kwargs = dict(channels=2, samplerate=self._sr, blocksize=1024, dtype="float32", callback=callback)
         if self._device is not None:
             kwargs["device"] = self._device
-        self._stream = self._factory(**kwargs)
-        self._stream.start()
+        stream = self._factory(**kwargs)
+        times = self.output_times = StreamTimeline(getattr(stream, "clock", PORTAUDIO))
+        self._stream = stream
+        stream.start()
 
     def stop(self) -> None:
         if self._stream is None:

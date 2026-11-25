@@ -42,18 +42,36 @@ def list_inputs() -> list[dict]:
 
 
 class SoundDeviceInput:
-    """Real microphone. The PortAudio callback only copies the chunk out; all work happens elsewhere."""
+    """Real microphone. The PortAudio callback only copies the chunk out; all work happens elsewhere. `times` is when
+    each delivered sample was captured on the host clock (the device's ADC timestamps, take_engine.StreamTimeline),
+    keyed by the count of samples delivered since start(): a chunk the device lost shows there, not in the count."""
 
     def __init__(self, device_index: int, sample_rate: int = SAMPLE_RATE, blocksize: int = BLOCKSIZE):
+        from ..take_engine import StreamTimeline
+
         self.device_index = device_index
         self.sample_rate = sample_rate
         self._blocksize = blocksize
         self._stream = None
+        self.times = StreamTimeline()
 
     def start(self, on_chunk: Callable[[np.ndarray], None]) -> None:
         import sounddevice as sd
 
+        from ..take_engine import StreamTimeline
+
+        times = self.times = StreamTimeline()
+        received = 0
+        rate = self.sample_rate
+
         def callback(indata, frames, time_info, status):
+            nonlocal received
+            if status and status.input_overflow:
+                times.flagged += 1
+            adc = time_info.inputBufferAdcTime if time_info is not None else 0.0
+            if adc > 0:                    # 0: the driver had no timestamp for this block
+                times.add(received / rate, adc)
+            received += frames
             on_chunk(indata[:, 0].copy())  # buffer is reused by PortAudio
 
         self._stream = sd.InputStream(

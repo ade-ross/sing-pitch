@@ -15,7 +15,8 @@ from .audio_input import AudioInput
 from .config import DEFAULT_SCORE_CONFIG, ScoreConfig
 from .pitch import PitchFrame, PitchTracker
 from .reference import Reference
-from .take_engine import AUTO, FrameScore, LogClock, OctaveSetting, PassTag, SongClock, TakeEngine, TakeRecord
+from .take_engine import (AUTO, FrameScore, LogClock, OctaveSetting, PassTag, SongClock, TakeEngine, TakeRecord,
+                          device_times)
 from .take_store import save_take
 
 FRAME_S = 0.016              # one tracker frame
@@ -141,11 +142,13 @@ class LiveRunner:
     Melody Takes pass the Backing player and the calibrated loop latency. The Backing starts first; at the first
     mic chunk the runner reads how much output the Backing had rendered when the input clock was at 0, and from then
     on a voice frame at input time t is scored against the song time the Backing's song-time log shows at output
-    time t - latency_s (a LogClock), so pauses and seeks (later loops, Speed) keep the sync.
+    time t - latency_s (a LogClock), so pauses and seeks (later loops, Speed) keep the sync. When both the Backing
+    (output_times) and the source (times) carry device timestamps on one clock, the LogClock meets voice and output
+    on that host clock (#49): a lost output block or mic chunk, or drift between the devices, no longer shifts them.
 
     A jump (the Backing's "jumped" event) closes the current Take and opens the next one: voice frames before the
-    jump's input time (event output time + the clock's offset) belong to the old Take, the rest to the new one. A Take
-    closed that way with less than MIN_TAKE_SCORED_S of scored singing is discarded (a Pass Take: less than
+    jump's input time (its output time on the voice clock, LogClock.to_voice) belong to the old Take, the rest to the
+    new one. A Take closed that way with less than MIN_TAKE_SCORED_S of scored singing is discarded (a Pass Take: less than
     MIN_PASS_FRACTION of its Section, see _too_short); the others are saved at once
     and listed by drain_saved(). On stop() the last Take is saved too, unless it is that short and an earlier Take of
     the run was saved (a run always leaves at least one Take).
@@ -210,16 +213,19 @@ class LiveRunner:
             except Exception:
                 self._quietly(self._backing.stop)
                 raise
-            first = True
+            clock: LogClock | None = None
 
-            def on_chunk(chunk: np.ndarray) -> None:      # PortAudio thread: one read, one assignment
-                nonlocal first
-                if first:
-                    first = False
-                    log = self._backing.song_log
-                    output_at_zero = log.rendered_s - len(chunk) / self._source.sample_rate
-                    self._chunks.put(("align", LogClock(log, self._latency_s, output_at_zero)))
+            def on_chunk(chunk: np.ndarray) -> None:      # PortAudio thread: a few reads and assignments
+                nonlocal clock
                 self._received += len(chunk)
+                log, end = self._backing.song_log, self._received / self._source.sample_rate
+                if clock is None:
+                    devices = device_times(getattr(self._backing, "output_times", None),
+                                           getattr(self._source, "times", None))
+                    clock = LogClock(log, self._latency_s, log.rendered_s - end, devices, aligned_at_s=end)
+                    self._chunks.put(("align", clock))
+                elif not clock.aligned and log.rendered_s > 0:     # nothing was played at the first chunk
+                    clock.realign(log.rendered_s - end, end)
                 self._chunks.put(chunk)
 
         try:
@@ -273,14 +279,14 @@ class LiveRunner:
         elif kind == "gains":           # ("gains", (output_s, Guide vocal gain)): from that voice time on
             output_s, gain = value
             if isinstance(self._take.song_clock, LogClock):
-                self._guide.append((output_s + self._take.song_clock.offset_s, gain))
+                self._guide.append((self._take.song_clock.to_voice(output_s), gain))
             else:                       # before the clock exists: it is how the first Take starts
                 self._guide = [(-math.inf, gain)]
         elif kind == "jump":            # ("jump", (output_s, tag, speed)): a boundary before the clock exists has no
             output_s, tag, pct = value  # Take to close, so the first Take simply takes its tag and Speed
             pct, self._speed_next = pct if pct is not None else self._speed_next, None
             if isinstance(self._take.song_clock, LogClock):
-                self._cuts.append((output_s + self._take.song_clock.offset_s, tag, pct))
+                self._cuts.append((self._take.song_clock.to_voice(output_s), tag, pct))
             else:
                 self._take.pass_tag = tag
                 self._speed_pct = pct if pct is not None else self._speed_pct
@@ -351,11 +357,25 @@ class LiveRunner:
 
     @property
     def heard_t(self) -> float:
-        """The voice time of what is in the headphones now: the newest mic sample's time plus the input's own latency.
-        The calibrated latency is the output part plus the input part, so in song terms this is the rendered output
-        minus the output part of the latency. Every tracker frame is older than this by the tracker's look-ahead
-        (SwiftF0: ~0.18 s) and the queueing, so the plot's now-line is drawn here, not at the newest frame."""
+        """The voice time of what is in the headphones now. With device timestamps (a timed LogClock): the voice time
+        being captured now, read on the host clock at the moment of asking, so it moves smoothly between mic chunks and
+        does not depend on when a callback or the worker last ran (#49). Without: the newest mic sample's time plus the
+        input's own latency. The calibrated latency is the output part plus the input part, so in song terms this is
+        the rendered output minus the output part of the latency. Every tracker frame is older than this by the
+        tracker's look-ahead (SwiftF0: ~0.18 s) and the queueing, so the plot's now-line is drawn here, not at the
+        newest frame."""
+        clock = self.song_clock
+        now = clock.voice_now() if isinstance(clock, LogClock) else None
+        if now is not None:
+            return now
         return self._received / self._source.sample_rate + getattr(self._source, "latency_s", 0.0)
+
+    @property
+    def glitches(self) -> tuple[int, int]:
+        """(lost output blocks, lost mic chunks) the device timestamps showed so far in this run (0, 0 untimed)."""
+        out = getattr(self._backing, "output_times", None)
+        inp = getattr(self._source, "times", None)
+        return (out.glitches if out is not None else 0, inp.glitches if inp is not None else 0)
 
     def drain(self) -> list[FrameScore]:
         out: list[FrameScore] = []

@@ -1687,7 +1687,9 @@ class MainWindow(QtWidgets.QWidget):
         the song goes on, on resume, from where the player waits."""
         clock = self._draw_clock()
         fold = fold or self._fold(clock)
-        song = np.array([np.nan if (t := clock(v)) is None else t for v in fold.to_voice(x)])
+        voice = fold.to_voice(x)
+        many = getattr(clock, "song_times", None)          # one pass over the array (a LogClock), not a call per point
+        song = many(voice) if many is not None else np.array([np.nan if (t := clock(v)) is None else t for v in voice])
         tail = getattr(clock, "tail", None)
         tail = tail() if tail is not None else None
         if tail is None:                                 # a replay's clock knows its whole Take, a linear one goes on

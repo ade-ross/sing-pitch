@@ -6,6 +6,8 @@ from dataclasses import dataclass
 
 import numpy as np
 
+from .take_engine.clock import LogClock, device_times
+
 N_CLICKS = 8
 INTERVAL_S = 0.75     # 80 bpm: easy to anticipate, long enough for a 350 ms Bluetooth delay
 FIRST_S = 1.5         # time to get ready
@@ -89,6 +91,7 @@ class CalibrationRun:
         self._player = factory(self.audio, self._sr)
         self._chunks: list[np.ndarray] = []
         self._song_at_zero = 0.0
+        self._clock = None           # a LogClock with latency 0 (see start), when the player keeps a song-time log
 
     @property
     def duration_s(self) -> float:
@@ -98,11 +101,23 @@ class CalibrationRun:
         self._player.start()
         first = True
 
+        received = 0
+
         def on_chunk(chunk):
-            nonlocal first
+            nonlocal first, received
+            received += len(chunk)
+            end = received / self._sr
+            log = getattr(self._player, "song_log", None)
             if first:
                 first = False
-                self._song_at_zero = self._player.position_s() - len(chunk) / self._sr
+                self._song_at_zero = self._player.position_s() - end
+                if log is not None:      # the same clock a Melody Take is aligned on, latency 0: a click's own time
+                    devices = device_times(getattr(self._player, "output_times", None),
+                                           getattr(self._source, "times", None))
+                    self._clock = LogClock(log, 0.0, log.rendered_s - end, devices, aligned_at_s=end)
+            elif self._clock is not None and not self._clock.aligned and log.rendered_s > 0:
+                self._song_at_zero = self._player.position_s() - end      # nothing was played at the first chunk
+                self._clock.realign(log.rendered_s - end, end)
             self._chunks.append(chunk)
 
         try:
@@ -115,5 +130,12 @@ class CalibrationRun:
         self._source.stop()
         self._player.stop()
         recording = np.concatenate(self._chunks) if self._chunks else np.zeros(0, np.float32)
-        # click times on the input clock; the delay found is the Take's loop latency
-        return measure_latency(recording, self._sr, np.asarray(self.click_times) - self._song_at_zero)
+        # click times on the input clock; the delay found is the Take's loop latency. With device timestamps each click
+        # is placed where it was really heard (#49: a block lost during the clicks would otherwise add to the latency);
+        # without, by counting frames. With nothing lost both give the same number, so either is a Take's latency.
+        clicks = np.asarray(self.click_times, dtype=np.float64)
+        if self._clock is not None and self._clock.timed:
+            on_input = np.array([self._clock.to_voice(c) for c in clicks])
+        else:
+            on_input = clicks - self._song_at_zero
+        return measure_latency(recording, self._sr, on_input)
