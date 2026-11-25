@@ -61,7 +61,10 @@ class SpeedPreparer(QtCore.QObject):
             with self._lock:
                 jobs = self._inflight.pop(key)
             for waiting in jobs:
-                self.done.emit(waiting, stems, error)   # queued to the UI thread: the receiver lives there
+                try:
+                    self.done.emit(waiting, stems, error)   # queued to the UI thread: the receiver lives there
+                except RuntimeError:                        # the window was closed while this was stretching
+                    return
 
         threading.Thread(target=work, name=f"speed-{percent}", daemon=True).start()
         return job

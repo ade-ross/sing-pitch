@@ -13,7 +13,7 @@ class SeekableBacking(FakeBacking):
 
     def __init__(self, path=None, vocals=None):
         super().__init__(path, vocals)
-        self.calls, self.position = [], 12.0
+        self.calls, self.position, self.paused = [], 12.0, False
 
     def position_s(self):
         return self.position
@@ -23,9 +23,11 @@ class SeekableBacking(FakeBacking):
 
     def pause(self):
         self.calls.append(("pause",))
+        self.paused = True
 
     def play(self):
         self.calls.append(("play",))
+        self.paused = False
 
 
 def running_window(qtbot, tmp_path):

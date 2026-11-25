@@ -76,6 +76,13 @@ class Playback(Protocol):
 
     def stop(self) -> None: ...
 
+    def play(self) -> None: ...
+
+    def pause(self) -> None: ...
+
+    @property
+    def paused(self) -> bool: ...     # the one answer to "is the song paused" (the Transport's)
+
     on_event: object             # settable: called from the audio thread with each TransportEvent
 
     # Optional, read once at start() (a player without them counts as Guide vocal off, Speed 100):
@@ -151,7 +158,9 @@ class LiveRunner:
     new one. A Take closed that way with less than MIN_TAKE_SCORED_S of scored singing is discarded (a Pass Take: less than
     MIN_PASS_FRACTION of its Section, see _too_short); the others are saved at once
     and listed by drain_saved(). On stop() the last Take is saved too, unless it is that short and an earlier Take of
-    the run was saved (a run always leaves at least one Take).
+    the run was saved (a run always leaves at least one Take), and never when nothing at all was scored: `dropped`
+    then holds the Take that was not saved (None when the last Take was saved), and stop() returns the Take that
+    stands for the run: the last saved one, or the unsaved empty record when the run saved nothing.
 
     A Section loop works the same way: each "pass_started" event closes the Take there and opens the next one, tagged
     with the Section and the pass index (PassTag), so every Pass is its own Take and its Lead-in is never scored.
@@ -184,6 +193,7 @@ class LiveRunner:
         self._speed_next: int | None = None       # a Speed applied at a Pass boundary, for the cut that follows
         self._guide: list[tuple[float, float]] = [(-math.inf, 0.0)]    # (voice time, Guide vocal gain) (worker only)
         self._saved: list[TakeRecord] = []        # Takes saved so far in this run (worker, then stop())
+        self.dropped: TakeRecord | None = None    # the last Take of the run when stop() did not save it (see stop())
         self._saved_news: queue.SimpleQueue = queue.SimpleQueue()
         self._cut_news: queue.SimpleQueue = queue.SimpleQueue()    # voice time of each Take boundary passed
         self._thread: threading.Thread | None = None
@@ -195,6 +205,7 @@ class LiveRunner:
         """Open the Backing and the input, then start the worker: a Start that fails leaves no thread behind."""
         self._error = None
         self._cuts, self._saved = [], []
+        self.dropped = None
         self._speed_pct = round(100 * getattr(self._backing, "speed", 1.0))
         self._speed_next = None
         self._guide = [(-math.inf, getattr(self._backing, "current_gains", (1.0, 0.0))[1])]
@@ -395,14 +406,28 @@ class LiveRunner:
         return error
 
     def stop(self) -> TakeRecord:
-        self._source.stop()
-        if self._backing is not None:
-            self._backing.stop()
-        self._chunks.put(None)
-        self._thread.join()
+        """End the Take. The Backing is stopped whatever the microphone does: an input that fails to stop must never
+        leave the song playing into the headphones. Its failure is not worth the Take: the audio is already here."""
+        try:
+            self._source.stop()
+        except Exception:
+            pass
+        finally:
+            try:
+                if self._backing is not None:
+                    self._backing.stop()
+            finally:
+                self._chunks.put(None)
+                self._thread.join()
         if self._error is not None:
             raise self._pop_error()
         record = self._with_settings(self._take.finish())
-        if self._saved and _too_short(record, self._reference, self._take.pass_tag):
-            return self._saved[-1]
+        self.dropped = None
+        if _too_short(record, self._reference, self._take.pass_tag):
+            if self._saved:                       # an earlier Take of the run is the result; the last bit is dropped
+                self.dropped = record
+                return self._saved[-1]
+            if record.summary.n_scored == 0:      # nothing scored and nothing before it: no Take at all (#54). Not
+                self.dropped = record             # saved, so it can never be "Replay last Take"; returned unsaved
+                return record
         return save_take(self._home, record)

@@ -87,9 +87,11 @@ class SoundDeviceInput:
 
     def stop(self) -> None:
         if self._stream is not None:
-            self._stream.stop()
-            self._stream.close()
-            self._stream = None
+            stream, self._stream = self._stream, None
+            try:
+                stream.stop()
+            finally:
+                stream.close()
 
 
 class ArrayInput:

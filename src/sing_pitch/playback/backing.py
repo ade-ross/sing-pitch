@@ -121,6 +121,11 @@ class BackingPlayer:
     def pause(self) -> None:
         self._transport.pause()
 
+    @property
+    def paused(self) -> bool:
+        """The Transport's own answer (see Transport.paused): there is no second flag to disagree with."""
+        return self._transport.paused
+
     def seek(self, song_s: float) -> bool:
         """Go on from this song time, from the next block (a "jumped" event goes to on_event). Ends a loop, unless
         song_s lies inside the loop the Transport plays (the fitted Section): then the next Pass starts there and the
@@ -190,8 +195,21 @@ class BackingPlayer:
         stream.start()
 
     def stop(self) -> None:
+        """Silence: the stream is stopped and closed whatever the device does. A device that fails to stop (earbuds
+        that switched profile, a unplugged output) is aborted and closed anyway and the failure is not raised: a stream
+        left open keeps playing the song into the headphones, with nothing left that could pause it."""
         if self._stream is None:
             return
         stream, self._stream = self._stream, None
-        stream.stop()
-        stream.close()
+        try:
+            stream.stop()
+        except Exception:
+            try:
+                stream.abort()
+            except Exception:
+                pass
+        finally:
+            try:
+                stream.close()
+            except Exception:
+                pass

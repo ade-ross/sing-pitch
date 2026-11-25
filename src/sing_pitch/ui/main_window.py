@@ -33,7 +33,7 @@ from ..take_engine import (AUTO, FrameScore, LinearClock, NoteTally, PauseFold, 
 from ..take_engine.note_scores import scored_per_note
 from ..take_store import (last_take_id, load_frames, rescore_take, row_notes, row_settings, saved_clock_times,
                           saved_config, saved_latency, saved_octave, saved_reference, saved_row, saved_song_times)
-from .eliding import eliding_combo
+from .eliding import ElidedLabel, eliding_combo
 from .gui_gc import collect_on_the_ui_thread_only
 from .song_axis import SongTimeAxis
 from .timeline import Timeline
@@ -54,6 +54,10 @@ DRAW_STEP_S = 0.01    # the reference line is drawn at this resolution on the vo
 HALF_RANGE = 12      # semitones shown above and below the centre (4 s of a song spans up to ~20)
 NOTE_LABEL_MIN_PX = 14   # note names on the left axis at least this far apart: on a short plot only every 2nd (3rd...)
 SLIDER_MIN_W = 80
+SECTION_NAME_MIN_W = 90                          # the Section name field never shrinks to a stub (#53)
+# First-launch size: on the macOS style the five control rows take about 270 px, so 620 left the plot about 150 px; the
+# minimum size (set by the rows) is not raised for it.
+DEFAULT_SIZE = (1000, 800)
 Y_VOICE_S = 2.0       # the voice's median over this many seconds decides where the vertical range sits
 Y_LOOK_S = 6.0        # a move of the vertical range also looks this many seconds beyond the right half
 Y_EASE = 0.3          # share of the way to the new centre covered per redraw (about 0.3 s for a move)
@@ -63,8 +67,10 @@ UNSCORED_COLOUR = "#8a8a8a"   # sung where the Reference has nothing reliable: s
 BRUSH = {b: pg.mkBrush(c) for b, c in BAND_COLOUR.items()}
 BRUSH[None] = pg.mkBrush(UNSCORED_COLOUR)
 UNSCORED_SPAN_BRUSH = pg.mkBrush(138, 138, 138, 70)   # Unscored stretch of the Melody, greyed on the plot
-REFERENCE_PEN = pg.mkPen("#5dade2", width=4)
-VERDICT_PEN = {b: pg.mkPen(c, width=4) for b, c in BAND_COLOUR.items()}   # Notes mode: a bar whose note has its verdict
+TOLERANCE_BAND_ALPHA = ((25, 150), (100, 80))        # fill opacity (0-255) at the Tolerance in cents: a wide band is fainter,
+                                                    # so +-100 is a halo and not a ribbon, while +-25 still shows by its fill
+REFERENCE_PEN = pg.mkPen("#5dade2", width=2)     # thin: the Tolerance band around it gives the line its body
+VERDICT_PEN = {b: pg.mkPen(c, width=2) for b, c in BAND_COLOUR.items()}   # Notes mode: a bar whose note has its verdict
 GUIDE_PEN = pg.mkPen(93, 173, 226, 150, width=2)    # the Reference an octave above and below: clear, but fainter and thinner than the blue line
 NOTE_LABEL_COLOR = (235, 245, 255)                  # Notes mode: the note name over each bar
 VERDICT_ERAS = 4                                    # Notes mode: the Takes (Passes) before whose verdicts are still drawn
@@ -134,6 +140,30 @@ def _volume_slider(tip: str) -> QtWidgets.QSlider:
     return slider
 
 
+class _SpaceIsNotText(QtCore.QObject):
+    """Event filter for a number box: a Space typed there is not text for it, so the window's Space shortcut gets it."""
+
+    def eventFilter(self, obj, event) -> bool:
+        if event.type() == QtCore.QEvent.ShortcutOverride and event.key() == QtCore.Qt.Key_Space:
+            event.ignore()
+            return True
+        return False
+
+
+def stop_text(saved: TakeRecord | None, dropped: TakeRecord | None) -> str:
+    """What Stop says: the Take that stands for the run, and, when the last bit sung was not saved, what became of it."""
+    if dropped is None:
+        return describe(saved)
+    s = dropped.summary
+    what = f"Pass {dropped.pass_index} of {dropped.section_name}" if dropped.pass_index is not None else "The last Take"
+    if saved is None:
+        return "No voiced sound heard. The Take is not saved." if dropped.pass_index is None else \
+            f"{what}: nothing sung, not saved."
+    why = "nothing sung" if s.n_scored == 0 else f"only {s.n_scored * 0.016:.1f} s sung"
+    last = pass_text(saved) if saved.pass_index is not None else describe(saved)
+    return f"{what} not saved: {why}.   |   Last saved: {last}"
+
+
 class MainWindow(QtWidgets.QWidget):
     def __init__(
         self,
@@ -153,7 +183,7 @@ class MainWindow(QtWidgets.QWidget):
         super().__init__()
         collect_on_the_ui_thread_only()       # the worker threads below must never finalise a Qt object (gui_gc.py)
         self.setWindowTitle("sing-pitch")
-        self.resize(1000, 620)
+        self.resize(*DEFAULT_SIZE)
         self._tracker, self._home, self._input_factory = tracker, home or data_dir(), input_factory
         self._drone_factory = drone_factory
         self._drone: DronePlayer | None = None
@@ -185,7 +215,7 @@ class MainWindow(QtWidgets.QWidget):
         self._melody: Melody | None = None           # drawn beside the live line during Melody Takes and replays
         self._melody_latency = 0.0
         self._replay_clock: SongClock | None = None  # the replayed Take's own song times, for drawing the reference
-        self._paused = False
+        self._replay_paused_at: float | None = None  # monotonic time a replay was paused at (None = running)
         self._runner: LiveRunner | None = None
         self._replay: Replay | None = None
         self._visited: dict | None = None            # the controls as they were before a replay put a Take's on them
@@ -203,6 +233,8 @@ class MainWindow(QtWidgets.QWidget):
         self._y_drawn = 60.0
         self._y_ticks_from: tuple[int, int] | None = None
         self._ahead = np.empty(0)                    # MIDI of the Reference coming in the right half, as drawn
+        self._band_line: tuple[np.ndarray, np.ndarray] | None = None   # (x, MIDI) the Tolerance band is drawn around
+        self._replay_tolerance: float | None = None  # a replay's: the Tolerance its Take was saved with (else the slider's)
         self._note_tally: NoteTally | None = None   # Notes mode per note: the running Take's (or replay's) notes
         self._verdicts: dict[int, Band] = {}        # ...and the verdict of each note that has ended
         self._verdicts_since = -math.inf            # voice time the running Take (this Pass) began: verdicts apply after
@@ -245,20 +277,23 @@ class MainWindow(QtWidgets.QWidget):
                             (QtCore.Qt.Key_Right, self.jump_forward)):    # bound methods: a lambda keeps self alive
             shortcut = QtGui.QShortcut(QtGui.QKeySequence(key), self)
             shortcut.setContext(QtCore.Qt.WindowShortcut)
+            shortcut.setAutoRepeat(key != QtCore.Qt.Key_Space)    # a held Space would flip pause and play again and again
             shortcut.activated.connect(action)
         self.timeline.section_marked.connect(self._section_marked)
         self.timeline.section_changed.connect(self._section_edited)
-        self.section_box = eliding_combo(12)
+        self.section_box = eliding_combo(8)
         self.section_box.setFocusPolicy(QtCore.Qt.NoFocus)
         self.section_box.setToolTip("Drag across the timeline to mark a Section; drag its edges to adjust it")
         self.section_box.currentIndexChanged.connect(self._section_chosen)
         self.section_name_edit = QtWidgets.QLineEdit()
         self.section_name_edit.setPlaceholderText("Section name")
+        self.section_name_edit.setMinimumWidth(SECTION_NAME_MIN_W)    # the others give way, not this (#53)
         self.section_name_edit.setMaximumWidth(140)
         self.section_name_edit.returnPressed.connect(self.section_name_edit.clearFocus)   # keys go back to the window
         self.save_section_button = QtWidgets.QPushButton("Save")
         self.save_section_button.clicked.connect(self.save_section)
         self._pending_overwrite: tuple[str, float, float] | None = None     # a Save waiting for Overwrite / Cancel
+        self._section_message: str | None = None     # the last thing said about a Section, until the state it described is gone
         self.overwrite_button = QtWidgets.QPushButton("Overwrite")
         self.overwrite_button.clicked.connect(self.overwrite_section)
         self.cancel_overwrite_button = QtWidgets.QPushButton("Cancel")
@@ -268,6 +303,7 @@ class MainWindow(QtWidgets.QWidget):
         self.overwrite_button.hide()
         self.cancel_overwrite_button.hide()
         self.section_name_edit.textChanged.connect(self._forget_overwrite)
+        self.section_name_edit.textChanged.connect(self._forget_section_message)
         self.rename_section_button = QtWidgets.QPushButton("Rename")
         self.rename_section_button.clicked.connect(self.rename_section)
         self.delete_section_button = QtWidgets.QPushButton("Delete")
@@ -293,17 +329,18 @@ class MainWindow(QtWidgets.QWidget):
         self.bpm_box.setToolTip("The song's tempo for the Count-in, detected at import; type your own if it is wrong "
                                 "(30–300, remembered for this song); 0 or empty goes back to the detected tempo")
         self.bpm_box.editingFinished.connect(self.bpm_box.clearFocus)    # keys go back to the window
+        self.bpm_box.installEventFilter(_SpaceIsNotText(self.bpm_box))   # Space pauses even from this box
         self.beats_box = QtWidgets.QSpinBox()
         self.beats_box.setRange(*player_settings.BEATS_PER_BAR_RANGE)
         self.beats_box.setValue(4)
         self.beats_box.setSuffix(" / bar")
         self.beats_box.setFocusPolicy(QtCore.Qt.NoFocus)
         self.beats_box.setToolTip("Beats per bar: the Count-in plays this many clicks, the first one accented")
-        self.tempo_label = QtWidgets.QLabel("")
+        self.tempo_label = ElidedLabel(takes_the_rest=True)
         self.tempo_label.setStyleSheet("color: #e67e22;")
         for w in (self.between_box, self.bpm_box, self.beats_box):
             (w.currentIndexChanged if w is self.between_box else w.valueChanged).connect(self._between_changed)
-        self.loop_label = QtWidgets.QLabel("")             # "Loop · Pass N · last 92 %" while the Section repeats
+        self.loop_label = ElidedLabel()             # "Loop · Pass N · last 92 %" while the Section repeats
         self.loop_label.setStyleSheet("color: #f1c40f; font-weight: bold;")
         self.clear_button = QtWidgets.QPushButton("Clear")
         self.clear_button.setToolTip("Esc. Remove the mark (or the shown Section) from the timeline and stop looping. "
@@ -323,7 +360,7 @@ class MainWindow(QtWidgets.QWidget):
         self.speed_box.setSuffix(" %")
         self.speed_box.setFocusPolicy(QtCore.Qt.NoFocus)         # so + and - stay shortcuts of the window
         self.speed_box.setToolTip("Speed, pitch unchanged (+ and - change it by 5 %)")
-        self.speed_label = QtWidgets.QLabel("")
+        self.speed_label = ElidedLabel()
         self.speed_70_button, self.speed_85_button, self.speed_100_button = (
             self._preset_button(percent) for percent in SPEED_PRESETS)
         self.octave_box = QtWidgets.QComboBox()
@@ -404,6 +441,10 @@ class MainWindow(QtWidgets.QWidget):
         self._unscored = pg.BarGraphItem(x0=[], x1=[], y0=[], y1=[], brush=UNSCORED_SPAN_BRUSH, pen=None)
         self._unscored.setZValue(-5)
         plot.addItem(self._unscored)
+        self._tolerance_band = QtWidgets.QGraphicsPathItem()    # one path for the whole band, under the lines and dots
+        self._tolerance_band.setPen(QtGui.QPen(QtCore.Qt.NoPen))
+        self._tolerance_band.setZValue(-4)
+        plot.addItem(self._tolerance_band, ignoreBounds=True)
         self._guide_curves = [plot.plot(pen=GUIDE_PEN, connect="finite") for _ in (12, -12)]   # Guide lines
         self._ref_curve = plot.plot(pen=REFERENCE_PEN, connect="finite")
         self._verdict_curves = {b: plot.plot(pen=pen, connect="finite") for b, pen in VERDICT_PEN.items()}
@@ -435,16 +476,19 @@ class MainWindow(QtWidgets.QWidget):
         mix = QtWidgets.QHBoxLayout()
         for w in (self.guide_box, self.guide_slider, QtWidgets.QLabel("Backing"), self.backing_slider,
                   self.pause_button, QtWidgets.QLabel("Speed"), self.speed_box, self.speed_70_button, self.speed_85_button,
-                  self.speed_100_button, self.speed_label):
-            mix.addWidget(w)
-        mix.addStretch(1)
+                  self.speed_100_button, self.speed_label, self.loop_label):
+            mix.addWidget(w)           # the three labels ask for no minimum width: a text never resizes the window (#52)
+        mix.addWidget(self.tempo_label, 1)
+        mix.setSpacing(10)
         sections = QtWidgets.QHBoxLayout()
         for w in (QtWidgets.QLabel("Section"), self.section_box, self.section_name_edit, self.save_section_button,
                   self.rename_section_button, self.delete_section_button, self.clear_button, self.loop_box,
-                  self.between_box, self.bpm_box, self.beats_box, self.tempo_label, self.loop_label):
+                  self.between_box, self.bpm_box, self.beats_box):
             sections.addWidget(w)
+        sections.setSpacing(6)
         sections.addWidget(self.overwrite_button)
         sections.addWidget(self.cancel_overwrite_button)
+        sections.setStretchFactor(self.section_box, 1)       # a wider window shows more of a Section's name
         sections.addStretch(1)
         warn = QtWidgets.QHBoxLayout()                  # how it is scored: Octave, Notes, Tolerance (QA #46: off the mix row)
         for w in (QtWidgets.QLabel("Octave"), self.octave_box, self.notes_box, self.note_length_slider,
@@ -530,6 +574,7 @@ class MainWindow(QtWidgets.QWidget):
         self.tolerance_label.setText(f"±{cents} c")
         self._settings.tolerance_cents = cents
         self._settings.save()
+        self._draw_band()
 
     def _score_config(self) -> ScoreConfig:
         """How the next Take is scored: the Tolerance set (and the default Timing window)."""
@@ -618,6 +663,8 @@ class MainWindow(QtWidgets.QWidget):
         self.key_box.setEnabled(is_key)
         self.drone_box.setEnabled(is_key)
         self.song_box.setEnabled(is_melody)
+        self._forget_section_message()
+        self._show_tempo()
         self._restore_player_settings()
         self._preview_song()
         for w in (self.guide_box, self.guide_slider, self.backing_slider, self.speed_box, self.speed_70_button,
@@ -716,6 +763,7 @@ class MainWindow(QtWidgets.QWidget):
         store.set_mark(start_s, end_s)
         self.timeline.set_section(start_s, end_s)
         self._forget_overwrite()
+        self._forget_section_message()
         self.section_name_edit.setText("")                 # the name belonged to the previous mark
         self._sync_section_controls()
         if self.section_box.currentIndex() != 0:
@@ -738,10 +786,10 @@ class MainWindow(QtWidgets.QWidget):
     def save_section(self) -> None:
         store, span, name = self._sections(), self.timeline.section, self.section_name_edit.text().strip()
         if store is None or span is None:
-            self.summary_label.setText("Mark a Section on the timeline first (drag across it).")
+            self._say_about_section("Mark a Section on the timeline first (drag across it).")
             return
         if not name:
-            self.summary_label.setText("Type a name for the Section to save it.")
+            self._say_about_section("Type a name for the Section to save it.")
             return
         taken = next((s for s in store.saved() if s.name == name), None)
         if taken is not None and self.section_box.currentData() != name:
@@ -758,7 +806,7 @@ class MainWindow(QtWidgets.QWidget):
         self._forget_overwrite()
         self.section_name_edit.clearFocus()          # else L, Space and the arrows keep typing into the field
         self.reload_sections(select=name)
-        self.summary_label.setText(f'Saved Section "{name}".')
+        self._say_about_section(f'Saved Section "{name}".')
 
     def overwrite_section(self) -> None:
         """Overwrite, after Save asked: replace the Section that has this name with the mark that was shown."""
@@ -766,6 +814,17 @@ class MainWindow(QtWidgets.QWidget):
         self._forget_overwrite()
         if pending is not None and store is not None:
             self._save_section(store, pending[0], pending[1:])
+
+    def _say_about_section(self, text: str) -> None:
+        self.summary_label.setText(text)
+        self._section_message = text
+
+    def _forget_section_message(self, *_) -> None:
+        """A Section message is true only until the mark, the name or the Reference changes: then it goes, unless the
+        status line has said something else since."""
+        if self._section_message is not None and self.summary_label.text() == self._section_message:
+            self.summary_label.setText("")
+        self._section_message = None
 
     def _forget_overwrite(self, *_) -> None:
         """Drop the Overwrite question (Cancel, or the mark, name or picker changed under it)."""
@@ -778,25 +837,25 @@ class MainWindow(QtWidgets.QWidget):
     def rename_section(self) -> None:
         store, old, new = self._sections(), self.section_box.currentData(), self.section_name_edit.text().strip()
         if store is None or old is None:
-            self.summary_label.setText("Pick a saved Section to rename.")
+            self._say_about_section("Pick a saved Section to rename.")
             return
         try:
             store.rename(old, new)
         except ValueError as exc:
-            self.summary_label.setText(f"Cannot rename: {exc}")
+            self._say_about_section(f"Cannot rename: {exc}")
             return
         self.section_name_edit.clearFocus()
         self.reload_sections(select=new)
-        self.summary_label.setText(f'Renamed Section "{old}" to "{new}".')
+        self._say_about_section(f'Renamed Section "{old}" to "{new}".')
 
     def delete_section(self) -> None:
         store, name = self._sections(), self.section_box.currentData()
         if store is None or name is None:
-            self.summary_label.setText("Pick a saved Section to delete.")
+            self._say_about_section("Pick a saved Section to delete.")
             return
         store.delete(name)
         self.reload_sections()
-        self.summary_label.setText(f'Deleted Section "{name}".')
+        self._say_about_section(f'Deleted Section "{name}".')
 
     def clear_section(self) -> None:
         """Clear / Esc: no mark and no loop. The unsaved mark is forgotten and nothing is shown on the timeline; a saved
@@ -804,6 +863,7 @@ class MainWindow(QtWidgets.QWidget):
         if not self.clear_button.isEnabled():
             return
         self._set_loop_box(False)
+        self._forget_section_message()
         store = self._sections()
         if store is not None:
             store.set_mark(None)
@@ -869,7 +929,9 @@ class MainWindow(QtWidgets.QWidget):
     def _show_tempo(self) -> None:
         song_id = self._speed_song()
         note, self._bpm_note = self._bpm_note, ""    # what the BPM box just did with a typed value: said once
-        if self.between_box.currentText() != "Count-in" or song_id is None or self.bpm_box.value() > 0:
+        if self.reference_box.currentText() != "Melody":      # the Count-in is Melody's: its note goes with it
+            self.tempo_label.setText("")
+        elif self.between_box.currentText() != "Count-in" or song_id is None or self.bpm_box.value() > 0:
             self.tempo_label.setText(note if self.between_box.currentText() == "Count-in" else "")
         elif self._tempo_finder.busy(song_id):
             self.tempo_label.setText("finding the tempo…")
@@ -893,7 +955,7 @@ class MainWindow(QtWidgets.QWidget):
     def _loop_toggled(self, on: bool) -> None:
         if on and self.timeline.section is None:
             self._set_loop_box(False)
-            self.summary_label.setText("Mark a Section on the timeline first (drag across it), then loop it.")
+            self._say_about_section("Mark a Section on the timeline first (drag across it), then loop it.")
             return
         self._last_pass_pct = None
         self._remember_player_settings()
@@ -946,14 +1008,42 @@ class MainWindow(QtWidgets.QWidget):
             base = self._backing.position_s() if pending is None else pending
             self.seek(max(0.0, base + seconds))
 
+    @property
+    def _paused(self) -> bool:
+        """Is the song paused: the player's own answer (the Transport's), or a replay's. The window keeps no flag."""
+        if self._backing is not None:
+            return bool(getattr(self._backing, "paused", False))     # a player that cannot pause is never paused
+        return self._replay_paused_at is not None
+
     def toggle_pause(self) -> None:
-        """Space: pause or resume the song of the running Melody Take. The Take goes on; the plot stands still while
-        the song is paused (singing then is neither drawn nor scored) and goes on from the same place on resume."""
-        if self._backing is None:
+        """Space: pause or resume the song of the running Melody Take, or the replay on show. The Take goes on; the plot
+        stands still while the song is paused (singing then is neither drawn nor scored) and goes on from the same
+        place on resume. What is paused is read from the player, so Space always flips what is really happening."""
+        if self._backing is not None:
+            (self._backing.play if self._paused else self._backing.pause)()
+        elif self._replay is not None:
+            self._toggle_replay_pause()
+        else:
             return
-        self._paused = not self._paused
-        (self._backing.pause if self._paused else self._backing.play)()
-        self.pause_button.setText("Play" if self._paused else "Pause")
+        self._show_pause()
+
+    def _show_pause(self) -> None:
+        """The Pause button says what the player is doing (also when something else changed it)."""
+        text = "Play" if self._paused else "Pause"
+        if self.pause_button.text() != text:
+            self.pause_button.setText(text)
+
+    def _toggle_replay_pause(self) -> None:
+        now = time.monotonic()
+        if self._replay_paused_at is None:
+            self._replay_paused_at = now
+        else:
+            self._replay_started += now - self._replay_paused_at     # the replay goes on from where it stood
+            self._replay_paused_at = None
+
+    def _replay_elapsed(self) -> float:
+        """Seconds of the replayed Take shown so far: standing still while it is paused."""
+        return (time.monotonic() if self._replay_paused_at is None else self._replay_paused_at) - self._replay_started
 
     def _apply_gains(self, *_) -> None:
         """Slider and checkbox changes reach the player at once, also mid-Take; it ramps them within a block."""
@@ -1120,7 +1210,7 @@ class MainWindow(QtWidgets.QWidget):
             self.summary_label.setText(f"Not started: {failed}" if failed else "Start cancelled.")
         elif percent == 100 or (self._speed_ready and self._speed_ready[:2] == (song_id, percent)):
             self._start_waiting = False
-            self._start()
+            self._start_or_undo()
         else:
             self.summary_label.setText(f"Starting when {percent} % is ready… (Start again to cancel)")
 
@@ -1315,7 +1405,10 @@ class MainWindow(QtWidgets.QWidget):
         for w, _ in self._replay_locked:          # what the replay shows cannot be changed meanwhile
             w.setEnabled(False)
         self._replay, self._replay_clock, self._replay_take_id = replay, replay_clock, take_id
-        self._replay_started = time.monotonic()
+        self._replay_tolerance = config.green_cents
+        self._replay_started, self._replay_paused_at = time.monotonic(), None
+        self.pause_button.setEnabled(True)               # Space pauses a replay too
+        self._show_pause()
         self._show_melody(reference, latency, octave_k)
         self._start_note_tally(reference, config)
         self._t.clear(), self._midi.clear(), self._band.clear(), self._out.clear(), self._oct.clear()
@@ -1393,7 +1486,11 @@ class MainWindow(QtWidgets.QWidget):
         finished." beside them when it ran out."""
         self._timer.stop()
         numbers = self._take_numbers(self._replay_take_id)
-        self._replay = self._replay_clock = self._replay_take_id = None
+        self._replay = self._replay_clock = self._replay_take_id = self._replay_tolerance = None
+        self._replay_paused_at = None
+        self.pause_button.setEnabled(False)
+        self._show_pause()
+        self._draw_band()
         if self._visited is not None:
             self._show_settings(self._visited)                    # the controls as they were before the replay
             self._visited = None
@@ -1422,6 +1519,41 @@ class MainWindow(QtWidgets.QWidget):
         self.history_window.show()
         self.history_window.raise_()
 
+    def closeEvent(self, event) -> None:
+        """Closing the window is Stop, and more: the Take is ended and saved as Stop does, a replay and a calibration
+        end, a Speed being prepared is forgotten, History closes with it (it is a window of its own, so the app would
+        otherwise live on with the song playing from a hidden window). The worker thread is stopped here, before any
+        Qt object goes. Each step is tried even if one before it fails."""
+        for step in (self._close_take, self._close_replay, self._close_calibration, self._close_speed_work,
+                     self._close_history):
+            try:
+                step()
+            except Exception:
+                pass
+        super().closeEvent(event)
+
+    def _close_take(self) -> None:
+        if self._runner is not None:
+            self._stop()
+
+    def _close_replay(self) -> None:
+        if self._replay is not None:
+            self._end_replay()
+
+    def _close_calibration(self) -> None:
+        if self._calibration is not None:
+            run, self._calibration = self._calibration, None
+            run.finish()
+
+    def _close_speed_work(self) -> None:
+        self._start_waiting = False
+        self._speed_timer.stop()
+        self._speed_job = None                   # a stretch still running finishes into the cache; nobody listens
+
+    def _close_history(self) -> None:
+        if self.history_window is not None:
+            self.history_window.close()
+
     def toggle(self) -> None:
         if self._replay is not None:
             return
@@ -1430,9 +1562,19 @@ class MainWindow(QtWidgets.QWidget):
             self.summary_label.setText("Start cancelled.")
             return
         if self._runner is None:
-            self._start()
+            self._start_or_undo()
         else:
             self._stop()
+
+    def _start_or_undo(self) -> None:
+        """Start; if anything fails once the Backing is already playing, stop it again: a Take that is half set up is
+        worse than none (the song would play on with nothing showing it and nothing to pause it)."""
+        try:
+            self._start()
+        except Exception as exc:
+            if self._runner is not None:
+                self._stop()
+            self.summary_label.setText(f"Could not start: {exc}")
 
     def _show_melody(self, reference: Reference, latency_s: float, octave_k: int = 0) -> None:
         self._melody = reference if reference.kind == "melody" else None
@@ -1442,6 +1584,8 @@ class MainWindow(QtWidgets.QWidget):
             curve.setData([], [])
         self._show_labels([])
         self._unscored.setOpts(x0=[], x1=[], y0=[], y1=[])
+        self._band_line = None
+        self._draw_band()
         self.timeline.set_melody(self._melody, getattr(self._backing, "duration_s", None))
         self.timeline.setVisible(self._melody is not None)
         if self._melody is not None:
@@ -1483,13 +1627,13 @@ class MainWindow(QtWidgets.QWidget):
             self._runner = None
             self.summary_label.setText(f"Could not open the input or the output: {exc}")
             return
-        self._backing, self._paused = backing, False
+        self._backing = backing
         self._last_pass_pct = None
         self._show_loop()
         self._show_melody(reference, latency, self._octave_setting().k)
         self._start_note_tally(reference, config)
-        self.pause_button.setText("Pause")
         self.pause_button.setEnabled(backing is not None)
+        self._show_pause()
         self._t.clear(), self._midi.clear(), self._band.clear(), self._out.clear(), self._oct.clear()
         self._oct_known = False
         self._set_now(0.0)
@@ -1523,9 +1667,11 @@ class MainWindow(QtWidgets.QWidget):
         except Exception as exc:        # the worker thread crashed: the Take is lost, say why
             record, error = None, str(exc)    # the text, not exc: a local holding it is a cycle via its traceback
         self._backing = None
+        dropped = getattr(self._runner, "dropped", None)
         self._runner = None
         self._show_loop()
         self.pause_button.setEnabled(False)
+        self._show_pause()     # reads "Pause" now: no Backing, no replay paused
         self.button.setText("Start")
         self.device_box.setEnabled(True)
         self.output_box.setEnabled(True)
@@ -1535,7 +1681,8 @@ class MainWindow(QtWidgets.QWidget):
         self.tolerance_slider.setEnabled(True)
         self._reference_changed()
         self.replay_button.setEnabled(True)
-        self.summary_label.setText(describe(record) if record else f"The Take failed: {error}")
+        self.summary_label.setText(stop_text(None if record is dropped else record, dropped) if record
+                                   else f"The Take failed: {error}")
 
     def ingest(self, scores: list[FrameScore]) -> None:
         fold = self._fold()
@@ -1665,7 +1812,7 @@ class MainWindow(QtWidgets.QWidget):
         if self._runner is not None:
             return max(newest, self._runner.heard_t)
         if self._replay is not None:
-            return max(newest, self._replay.origin_s + time.monotonic() - self._replay_started)
+            return max(newest, self._replay.origin_s + self._replay_elapsed())
         return newest
 
     def _octaves_at(self, x: np.ndarray, fold: PauseFold | None = None) -> np.ndarray:
@@ -1751,10 +1898,34 @@ class MainWindow(QtWidgets.QWidget):
         self._ahead = (midi + shift)[coming]
         for curve, d in zip(self._guide_curves, (12, -12)):
             curve.setData(x, guide + shift + d)
+        self._band_line = (x, guide + shift)             # the band covers every bar, judged or not, and no Guide line
+        self._draw_band()
         edges = np.flatnonzero(np.diff(np.concatenate([[0], unscored.astype(np.int8), [0]])))
         starts, ends = edges[::2], edges[1::2]
         self._unscored.setOpts(x0=x[starts], x1=x[ends - 1] + DRAW_STEP_S, y0=[0.0] * len(starts),
                                y1=[127.0] * len(starts))
+
+    def _draw_band(self) -> None:
+        """The Tolerance as a soft band: exactly +- the Tolerance (cents, a hundredth of a semitone each) around the
+        blue line as last drawn, as ONE path with a closed piece per unbroken stretch of the line (so it breaks where
+        the line does: Unscored stretches, gaps between bars). A replay shows its Take's Tolerance, else the slider's."""
+        path = QtGui.QPainterPath()
+        if self._band_line is not None:
+            x, y = self._band_line
+            cents = self.tolerance_slider.value() if self._replay_tolerance is None else self._replay_tolerance
+            half = cents / 100
+            (c0, a0), (c1, a1) = TOLERANCE_BAND_ALPHA
+            alpha = int(np.interp(cents, (c0, c1), (a0, a1)))
+            self._tolerance_band.setBrush(pg.mkBrush(93, 173, 226, alpha))
+            edges = np.flatnonzero(np.diff(np.concatenate([[0], np.isfinite(y).astype(np.int8), [0]])))
+            xs, ys, gap = [], [], np.array([np.nan])
+            for a, b in zip(edges[::2], edges[1::2]):
+                if b - a > 1:                            # one sample has no width
+                    xs += [x[a:b], x[a:b][::-1], gap]    # the upper edge there, then the lower edge back
+                    ys += [y[a:b] + half, y[a:b][::-1] - half, gap]
+            if xs:
+                path = pg.functions.arrayToQPath(np.concatenate(xs), np.concatenate(ys), connect="finite")
+        self._tolerance_band.setPath(path)
 
     def _note_bars(self, x: np.ndarray, song: np.ndarray, midi: np.ndarray, octaves: np.ndarray,
                    shift: np.ndarray) -> np.ndarray:
@@ -1819,7 +1990,7 @@ class MainWindow(QtWidgets.QWidget):
                 self._stop()            # the song is over (plus time for the late voice to arrive)
                 return
         elif self._replay is not None:
-            elapsed = time.monotonic() - self._replay_started
+            elapsed = self._replay_elapsed()
             self.ingest(self._replay.advance(elapsed))
             song_s = self._replay_clock(self._replay.origin_s + elapsed)       # the playhead follows the replayed song
             if song_s is not None:
@@ -1827,6 +1998,7 @@ class MainWindow(QtWidgets.QWidget):
         if self._backing is not None and not drain_only:
             self.timeline.set_playhead(self._backing.position_s())
             self._show_loop()
+            self._show_pause()
         if not self._t:
             return
         fold = self._fold()

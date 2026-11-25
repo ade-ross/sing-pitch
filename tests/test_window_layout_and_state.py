@@ -315,13 +315,13 @@ def test_the_plot_axis_of_a_take_without_a_song_shows_time_since_start(qtbot, tm
 
 # --- Guide lines ---------------------------------------------------------------------------------------------------
 
-def test_guide_lines_are_clearly_visible_but_fainter_and_thinner_than_the_active_line(qtbot, tmp_path):
+def test_guide_lines_are_clearly_visible_but_fainter_and_no_thicker_than_the_active_line(qtbot, tmp_path):
     win, _ = melody_window(qtbot, tmp_path)
     active = win._ref_curve.opts["pen"]
     for curve in win._guide_curves:
         pen = curve.opts["pen"]
         assert 120 <= pen.color().alpha() < active.color().alpha()
-        assert pen.width() >= 2 and pen.width() < active.width()
+        assert pen.width() >= 2 and pen.width() <= active.width()     # the active line is 2 px: its Tolerance band is its body (#51)
 
 
 # --- Speed preparation progress ------------------------------------------------------------------------------------

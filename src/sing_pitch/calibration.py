@@ -127,8 +127,10 @@ class CalibrationRun:
             raise
 
     def finish(self) -> Calibration:
-        self._source.stop()
-        self._player.stop()
+        try:
+            self._source.stop()
+        finally:
+            self._player.stop()
         recording = np.concatenate(self._chunks) if self._chunks else np.zeros(0, np.float32)
         # click times on the input clock; the delay found is the Take's loop latency. With device timestamps each click
         # is placed where it was really heard (#49: a block lost during the clicks would otherwise add to the latency);
