@@ -33,7 +33,7 @@ from ..take_engine import (AUTO, FrameScore, LinearClock, NoteTally, PauseFold, 
 from ..take_engine.note_scores import scored_per_note
 from ..take_store import (last_take_id, load_frames, rescore_take, row_notes, row_settings, saved_clock_times,
                           saved_config, saved_latency, saved_octave, saved_reference, saved_row, saved_song_times)
-from .eliding import eliding_combo
+from .eliding import ElidedLabel, eliding_combo
 from .gui_gc import collect_on_the_ui_thread_only
 from .song_axis import SongTimeAxis
 from .timeline import Timeline
@@ -54,6 +54,10 @@ DRAW_STEP_S = 0.01    # the reference line is drawn at this resolution on the vo
 HALF_RANGE = 12      # semitones shown above and below the centre (4 s of a song spans up to ~20)
 NOTE_LABEL_MIN_PX = 14   # note names on the left axis at least this far apart: on a short plot only every 2nd (3rd...)
 SLIDER_MIN_W = 80
+SECTION_NAME_MIN_W = 90                          # the Section name field never shrinks to a stub (#53)
+# First-launch size: on the macOS style the five control rows take about 270 px, so 620 left the plot about 150 px; the
+# minimum size (set by the rows) is not raised for it.
+DEFAULT_SIZE = (1000, 800)
 Y_VOICE_S = 2.0       # the voice's median over this many seconds decides where the vertical range sits
 Y_LOOK_S = 6.0        # a move of the vertical range also looks this many seconds beyond the right half
 Y_EASE = 0.3          # share of the way to the new centre covered per redraw (about 0.3 s for a move)
@@ -134,6 +138,20 @@ def _volume_slider(tip: str) -> QtWidgets.QSlider:
     return slider
 
 
+def stop_text(saved: TakeRecord | None, dropped: TakeRecord | None) -> str:
+    """What Stop says: the Take that stands for the run, and, when the last bit sung was not saved, what became of it."""
+    if dropped is None:
+        return describe(saved)
+    s = dropped.summary
+    what = f"Pass {dropped.pass_index} of {dropped.section_name}" if dropped.pass_index is not None else "The last Take"
+    if saved is None:
+        return "No voiced sound heard. The Take is not saved." if dropped.pass_index is None else \
+            f"{what}: nothing sung, not saved."
+    why = "nothing sung" if s.n_scored == 0 else f"only {s.n_scored * 0.016:.1f} s sung"
+    last = pass_text(saved) if saved.pass_index is not None else describe(saved)
+    return f"{what} not saved: {why}.   |   Last saved: {last}"
+
+
 class MainWindow(QtWidgets.QWidget):
     def __init__(
         self,
@@ -153,7 +171,7 @@ class MainWindow(QtWidgets.QWidget):
         super().__init__()
         collect_on_the_ui_thread_only()       # the worker threads below must never finalise a Qt object (gui_gc.py)
         self.setWindowTitle("sing-pitch")
-        self.resize(1000, 620)
+        self.resize(*DEFAULT_SIZE)
         self._tracker, self._home, self._input_factory = tracker, home or data_dir(), input_factory
         self._drone_factory = drone_factory
         self._drone: DronePlayer | None = None
@@ -248,17 +266,19 @@ class MainWindow(QtWidgets.QWidget):
             shortcut.activated.connect(action)
         self.timeline.section_marked.connect(self._section_marked)
         self.timeline.section_changed.connect(self._section_edited)
-        self.section_box = eliding_combo(12)
+        self.section_box = eliding_combo(8)
         self.section_box.setFocusPolicy(QtCore.Qt.NoFocus)
         self.section_box.setToolTip("Drag across the timeline to mark a Section; drag its edges to adjust it")
         self.section_box.currentIndexChanged.connect(self._section_chosen)
         self.section_name_edit = QtWidgets.QLineEdit()
         self.section_name_edit.setPlaceholderText("Section name")
+        self.section_name_edit.setMinimumWidth(SECTION_NAME_MIN_W)    # the others give way, not this (#53)
         self.section_name_edit.setMaximumWidth(140)
         self.section_name_edit.returnPressed.connect(self.section_name_edit.clearFocus)   # keys go back to the window
         self.save_section_button = QtWidgets.QPushButton("Save")
         self.save_section_button.clicked.connect(self.save_section)
         self._pending_overwrite: tuple[str, float, float] | None = None     # a Save waiting for Overwrite / Cancel
+        self._section_message: str | None = None     # the last thing said about a Section, until the state it described is gone
         self.overwrite_button = QtWidgets.QPushButton("Overwrite")
         self.overwrite_button.clicked.connect(self.overwrite_section)
         self.cancel_overwrite_button = QtWidgets.QPushButton("Cancel")
@@ -268,6 +288,7 @@ class MainWindow(QtWidgets.QWidget):
         self.overwrite_button.hide()
         self.cancel_overwrite_button.hide()
         self.section_name_edit.textChanged.connect(self._forget_overwrite)
+        self.section_name_edit.textChanged.connect(self._forget_section_message)
         self.rename_section_button = QtWidgets.QPushButton("Rename")
         self.rename_section_button.clicked.connect(self.rename_section)
         self.delete_section_button = QtWidgets.QPushButton("Delete")
@@ -299,11 +320,11 @@ class MainWindow(QtWidgets.QWidget):
         self.beats_box.setSuffix(" / bar")
         self.beats_box.setFocusPolicy(QtCore.Qt.NoFocus)
         self.beats_box.setToolTip("Beats per bar: the Count-in plays this many clicks, the first one accented")
-        self.tempo_label = QtWidgets.QLabel("")
+        self.tempo_label = ElidedLabel(takes_the_rest=True)
         self.tempo_label.setStyleSheet("color: #e67e22;")
         for w in (self.between_box, self.bpm_box, self.beats_box):
             (w.currentIndexChanged if w is self.between_box else w.valueChanged).connect(self._between_changed)
-        self.loop_label = QtWidgets.QLabel("")             # "Loop · Pass N · last 92 %" while the Section repeats
+        self.loop_label = ElidedLabel()             # "Loop · Pass N · last 92 %" while the Section repeats
         self.loop_label.setStyleSheet("color: #f1c40f; font-weight: bold;")
         self.clear_button = QtWidgets.QPushButton("Clear")
         self.clear_button.setToolTip("Esc. Remove the mark (or the shown Section) from the timeline and stop looping. "
@@ -323,7 +344,7 @@ class MainWindow(QtWidgets.QWidget):
         self.speed_box.setSuffix(" %")
         self.speed_box.setFocusPolicy(QtCore.Qt.NoFocus)         # so + and - stay shortcuts of the window
         self.speed_box.setToolTip("Speed, pitch unchanged (+ and - change it by 5 %)")
-        self.speed_label = QtWidgets.QLabel("")
+        self.speed_label = ElidedLabel()
         self.speed_70_button, self.speed_85_button, self.speed_100_button = (
             self._preset_button(percent) for percent in SPEED_PRESETS)
         self.octave_box = QtWidgets.QComboBox()
@@ -435,16 +456,19 @@ class MainWindow(QtWidgets.QWidget):
         mix = QtWidgets.QHBoxLayout()
         for w in (self.guide_box, self.guide_slider, QtWidgets.QLabel("Backing"), self.backing_slider,
                   self.pause_button, QtWidgets.QLabel("Speed"), self.speed_box, self.speed_70_button, self.speed_85_button,
-                  self.speed_100_button, self.speed_label):
-            mix.addWidget(w)
-        mix.addStretch(1)
+                  self.speed_100_button, self.speed_label, self.loop_label):
+            mix.addWidget(w)           # the three labels ask for no minimum width: a text never resizes the window (#52)
+        mix.addWidget(self.tempo_label, 1)
+        mix.setSpacing(10)
         sections = QtWidgets.QHBoxLayout()
         for w in (QtWidgets.QLabel("Section"), self.section_box, self.section_name_edit, self.save_section_button,
                   self.rename_section_button, self.delete_section_button, self.clear_button, self.loop_box,
-                  self.between_box, self.bpm_box, self.beats_box, self.tempo_label, self.loop_label):
+                  self.between_box, self.bpm_box, self.beats_box):
             sections.addWidget(w)
+        sections.setSpacing(6)
         sections.addWidget(self.overwrite_button)
         sections.addWidget(self.cancel_overwrite_button)
+        sections.setStretchFactor(self.section_box, 1)       # a wider window shows more of a Section's name
         sections.addStretch(1)
         warn = QtWidgets.QHBoxLayout()                  # how it is scored: Octave, Notes, Tolerance (QA #46: off the mix row)
         for w in (QtWidgets.QLabel("Octave"), self.octave_box, self.notes_box, self.note_length_slider,
@@ -618,6 +642,8 @@ class MainWindow(QtWidgets.QWidget):
         self.key_box.setEnabled(is_key)
         self.drone_box.setEnabled(is_key)
         self.song_box.setEnabled(is_melody)
+        self._forget_section_message()
+        self._show_tempo()
         self._restore_player_settings()
         self._preview_song()
         for w in (self.guide_box, self.guide_slider, self.backing_slider, self.speed_box, self.speed_70_button,
@@ -716,6 +742,7 @@ class MainWindow(QtWidgets.QWidget):
         store.set_mark(start_s, end_s)
         self.timeline.set_section(start_s, end_s)
         self._forget_overwrite()
+        self._forget_section_message()
         self.section_name_edit.setText("")                 # the name belonged to the previous mark
         self._sync_section_controls()
         if self.section_box.currentIndex() != 0:
@@ -738,10 +765,10 @@ class MainWindow(QtWidgets.QWidget):
     def save_section(self) -> None:
         store, span, name = self._sections(), self.timeline.section, self.section_name_edit.text().strip()
         if store is None or span is None:
-            self.summary_label.setText("Mark a Section on the timeline first (drag across it).")
+            self._say_about_section("Mark a Section on the timeline first (drag across it).")
             return
         if not name:
-            self.summary_label.setText("Type a name for the Section to save it.")
+            self._say_about_section("Type a name for the Section to save it.")
             return
         taken = next((s for s in store.saved() if s.name == name), None)
         if taken is not None and self.section_box.currentData() != name:
@@ -758,7 +785,7 @@ class MainWindow(QtWidgets.QWidget):
         self._forget_overwrite()
         self.section_name_edit.clearFocus()          # else L, Space and the arrows keep typing into the field
         self.reload_sections(select=name)
-        self.summary_label.setText(f'Saved Section "{name}".')
+        self._say_about_section(f'Saved Section "{name}".')
 
     def overwrite_section(self) -> None:
         """Overwrite, after Save asked: replace the Section that has this name with the mark that was shown."""
@@ -766,6 +793,17 @@ class MainWindow(QtWidgets.QWidget):
         self._forget_overwrite()
         if pending is not None and store is not None:
             self._save_section(store, pending[0], pending[1:])
+
+    def _say_about_section(self, text: str) -> None:
+        self.summary_label.setText(text)
+        self._section_message = text
+
+    def _forget_section_message(self, *_) -> None:
+        """A Section message is true only until the mark, the name or the Reference changes: then it goes, unless the
+        status line has said something else since."""
+        if self._section_message is not None and self.summary_label.text() == self._section_message:
+            self.summary_label.setText("")
+        self._section_message = None
 
     def _forget_overwrite(self, *_) -> None:
         """Drop the Overwrite question (Cancel, or the mark, name or picker changed under it)."""
@@ -778,25 +816,25 @@ class MainWindow(QtWidgets.QWidget):
     def rename_section(self) -> None:
         store, old, new = self._sections(), self.section_box.currentData(), self.section_name_edit.text().strip()
         if store is None or old is None:
-            self.summary_label.setText("Pick a saved Section to rename.")
+            self._say_about_section("Pick a saved Section to rename.")
             return
         try:
             store.rename(old, new)
         except ValueError as exc:
-            self.summary_label.setText(f"Cannot rename: {exc}")
+            self._say_about_section(f"Cannot rename: {exc}")
             return
         self.section_name_edit.clearFocus()
         self.reload_sections(select=new)
-        self.summary_label.setText(f'Renamed Section "{old}" to "{new}".')
+        self._say_about_section(f'Renamed Section "{old}" to "{new}".')
 
     def delete_section(self) -> None:
         store, name = self._sections(), self.section_box.currentData()
         if store is None or name is None:
-            self.summary_label.setText("Pick a saved Section to delete.")
+            self._say_about_section("Pick a saved Section to delete.")
             return
         store.delete(name)
         self.reload_sections()
-        self.summary_label.setText(f'Deleted Section "{name}".')
+        self._say_about_section(f'Deleted Section "{name}".')
 
     def clear_section(self) -> None:
         """Clear / Esc: no mark and no loop. The unsaved mark is forgotten and nothing is shown on the timeline; a saved
@@ -804,6 +842,7 @@ class MainWindow(QtWidgets.QWidget):
         if not self.clear_button.isEnabled():
             return
         self._set_loop_box(False)
+        self._forget_section_message()
         store = self._sections()
         if store is not None:
             store.set_mark(None)
@@ -869,7 +908,9 @@ class MainWindow(QtWidgets.QWidget):
     def _show_tempo(self) -> None:
         song_id = self._speed_song()
         note, self._bpm_note = self._bpm_note, ""    # what the BPM box just did with a typed value: said once
-        if self.between_box.currentText() != "Count-in" or song_id is None or self.bpm_box.value() > 0:
+        if self.reference_box.currentText() != "Melody":      # the Count-in is Melody's: its note goes with it
+            self.tempo_label.setText("")
+        elif self.between_box.currentText() != "Count-in" or song_id is None or self.bpm_box.value() > 0:
             self.tempo_label.setText(note if self.between_box.currentText() == "Count-in" else "")
         elif self._tempo_finder.busy(song_id):
             self.tempo_label.setText("finding the tempo…")
@@ -893,7 +934,7 @@ class MainWindow(QtWidgets.QWidget):
     def _loop_toggled(self, on: bool) -> None:
         if on and self.timeline.section is None:
             self._set_loop_box(False)
-            self.summary_label.setText("Mark a Section on the timeline first (drag across it), then loop it.")
+            self._say_about_section("Mark a Section on the timeline first (drag across it), then loop it.")
             return
         self._last_pass_pct = None
         self._remember_player_settings()
@@ -1523,8 +1564,10 @@ class MainWindow(QtWidgets.QWidget):
         except Exception as exc:        # the worker thread crashed: the Take is lost, say why
             record, error = None, str(exc)    # the text, not exc: a local holding it is a cycle via its traceback
         self._backing = None
+        dropped = getattr(self._runner, "dropped", None)
         self._runner = None
         self._show_loop()
+        self.pause_button.setText("Pause")
         self.pause_button.setEnabled(False)
         self.button.setText("Start")
         self.device_box.setEnabled(True)
@@ -1535,7 +1578,8 @@ class MainWindow(QtWidgets.QWidget):
         self.tolerance_slider.setEnabled(True)
         self._reference_changed()
         self.replay_button.setEnabled(True)
-        self.summary_label.setText(describe(record) if record else f"The Take failed: {error}")
+        self.summary_label.setText(stop_text(None if record is dropped else record, dropped) if record
+                                   else f"The Take failed: {error}")
 
     def ingest(self, scores: list[FrameScore]) -> None:
         fold = self._fold()

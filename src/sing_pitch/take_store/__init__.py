@@ -240,7 +240,8 @@ def _rows(home: Path) -> list[dict]:
 
 
 def last_take_id(home: Path) -> str | None:
-    rows = _rows(home)
+    """The newest Take that has something to replay: a Take with nothing scored (saved by older versions) is skipped."""
+    rows = [r for r in _rows(home) if r.get("pct_in_tune")]
     return rows[-1]["id"] if rows else None
 
 
