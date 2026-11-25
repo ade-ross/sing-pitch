@@ -1795,7 +1795,7 @@ class MainWindow(QtWidgets.QWidget):
         """Voice time -> song time for drawing: the running Take's clock (it knows every jump and pause), the replayed
         Take's own song times, else song time + latency."""
         if self._runner is not None and self._runner.song_clock is not None:
-            return self._runner.song_clock
+            return self._runner.draw_clock               # on the plot's axis (LiveRunner.drain, #63)
         return self._replay_clock or LinearClock(self._melody_latency)
 
     def _fold(self, clock: SongClock | None = None) -> PauseFold:
