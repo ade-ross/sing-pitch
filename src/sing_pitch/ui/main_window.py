@@ -4,6 +4,7 @@ from __future__ import annotations
 from collections import deque
 import math
 import time
+import weakref
 from pathlib import Path
 from typing import Callable
 
@@ -140,13 +141,60 @@ def _volume_slider(tip: str) -> QtWidgets.QSlider:
     return slider
 
 
-class _SpaceIsNotText(QtCore.QObject):
-    """Event filter for a number box: a Space typed there is not text for it, so the window's Space shortcut gets it."""
+PAUSED_TEXT = "Paused. Press Space to go on."
+_PLAYING_TEXTS = ("Singing...", "Replaying Take")
+FIELD_HINT = "Typing in a text field: Space types a space here. Press Enter or Esc, then Space pauses the song."
+FIELD_FOCUS_STYLE = "background-color: #5a3d12;"
+
+
+def _text_field_of(widget) -> QtWidgets.QWidget | None:
+    """The text field (a line edit, a number box) this widget is or sits in; None for anything else."""
+    while widget is not None:
+        if isinstance(widget, (QtWidgets.QLineEdit, QtWidgets.QAbstractSpinBox)):
+            parent = widget.parentWidget()
+            return parent if isinstance(parent, QtWidgets.QAbstractSpinBox) else widget
+        widget = widget.parentWidget()
+    return None
+
+
+class _FocusKeeper(QtCore.QObject):
+    """Keeps keyboard focus from being parked in a field that would swallow Space or the arrows (#64). Installed on the
+    application, it acts only for events inside its window:
+    - a click anywhere else (plot, Timeline, empty area, another control) takes the focus out of a text field first;
+    - Esc in a text field takes the focus out of it (and does not also Clear the Section);
+    - in a number box Space and Left/Right are not text, so the window's shortcuts get them;
+    - a text field gaining or losing focus tells the window (during a Take it says what Space will do).
+    Holds the window weakly: it is a child of the window, which must never be kept alive by it."""
+
+    def __init__(self, window: QtWidgets.QWidget):
+        super().__init__(window)
+        self._window = weakref.ref(window)
 
     def eventFilter(self, obj, event) -> bool:
-        if event.type() == QtCore.QEvent.ShortcutOverride and event.key() == QtCore.Qt.Key_Space:
-            event.ignore()
-            return True
+        window = self._window()
+        if window is None or not isinstance(obj, QtWidgets.QWidget) or obj.window() is not window:
+            return False
+        kind = event.type()
+        if kind == QtCore.QEvent.MouseButtonPress:
+            field = _text_field_of(QtWidgets.QApplication.focusWidget())
+            if field is not None and _text_field_of(obj) is not field:
+                field.clearFocus()
+        elif kind in (QtCore.QEvent.ShortcutOverride, QtCore.QEvent.KeyPress):
+            field, key = _text_field_of(obj), event.key()
+            if field is None:
+                return False
+            if isinstance(field, QtWidgets.QAbstractSpinBox) and kind == QtCore.QEvent.ShortcutOverride and key in (
+                    QtCore.Qt.Key_Space, QtCore.Qt.Key_Left, QtCore.Qt.Key_Right):
+                event.ignore()
+                return True                      # the shortcut, not the box, takes it
+            if key == QtCore.Qt.Key_Escape:
+                if kind == QtCore.QEvent.ShortcutOverride:
+                    event.accept()               # not the Clear shortcut: Esc here means "back to the window"
+                else:
+                    field.clearFocus()
+                return True
+        elif kind in (QtCore.QEvent.FocusIn, QtCore.QEvent.FocusOut) and obj is _text_field_of(obj):
+            window.field_focus_changed(obj, kind == QtCore.QEvent.FocusIn)
         return False
 
 
@@ -215,6 +263,8 @@ class MainWindow(QtWidgets.QWidget):
         self._melody: Melody | None = None           # drawn beside the live line during Melody Takes and replays
         self._melody_latency = 0.0
         self._replay_clock: SongClock | None = None  # the replayed Take's own song times, for drawing the reference
+        self._unpaused_text = "Singing..."           # what the status line said before the pause text replaced it
+        self._hint_under = ""                        # ... and before the text-field hint did
         self._replay_paused_at: float | None = None  # monotonic time a replay was paused at (None = running)
         self._runner: LiveRunner | None = None
         self._replay: Replay | None = None
@@ -329,7 +379,6 @@ class MainWindow(QtWidgets.QWidget):
         self.bpm_box.setToolTip("The song's tempo for the Count-in, detected at import; type your own if it is wrong "
                                 "(30–300, remembered for this song); 0 or empty goes back to the detected tempo")
         self.bpm_box.editingFinished.connect(self.bpm_box.clearFocus)    # keys go back to the window
-        self.bpm_box.installEventFilter(_SpaceIsNotText(self.bpm_box))   # Space pauses even from this box
         self.beats_box = QtWidgets.QSpinBox()
         self.beats_box.setRange(*player_settings.BEATS_PER_BAR_RANGE)
         self.beats_box.setValue(4)
@@ -507,6 +556,8 @@ class MainWindow(QtWidgets.QWidget):
         layout.addWidget(self.timeline)
         layout.addWidget(self.summary_label)
 
+        self._focus_keeper = _FocusKeeper(self)
+        QtWidgets.QApplication.instance().installEventFilter(self._focus_keeper)
         self._timer = QtCore.QTimer(self)
         self._timer.setTimerType(QtCore.Qt.PreciseTimer)
         self._timer.timeout.connect(self.tick)
@@ -1028,10 +1079,36 @@ class MainWindow(QtWidgets.QWidget):
         self._show_pause()
 
     def _show_pause(self) -> None:
-        """The Pause button says what the player is doing (also when something else changed it)."""
-        text = "Play" if self._paused else "Pause"
+        """The Pause button and the status line say what the player is doing (also when something else changed it)."""
+        paused = self._paused
+        text = "Play" if paused else "Pause"
         if self.pause_button.text() != text:
             self.pause_button.setText(text)
+        shown = self.summary_label.text()
+        if paused and shown.startswith(_PLAYING_TEXTS):
+            self._unpaused_text = shown
+            self.summary_label.setText(PAUSED_TEXT)
+        elif not paused and shown == PAUSED_TEXT:
+            self.summary_label.setText(self._unpaused_text)
+
+    def _leave_text_fields(self) -> None:
+        """Keyboard focus out of any text field: from here on Space and the arrows belong to the song."""
+        field = _text_field_of(QtWidgets.QApplication.focusWidget())
+        if field is not None and field.window() is self:
+            field.clearFocus()
+
+    def field_focus_changed(self, field: QtWidgets.QWidget, focused: bool) -> None:
+        """A text field gained or lost keyboard focus. During a Take or replay, say what Space does there (it types)."""
+        if focused and (self._runner is not None or self._replay is not None):
+            field.setStyleSheet(FIELD_FOCUS_STYLE)
+            shown = self.summary_label.text()
+            if shown != FIELD_HINT:
+                self._hint_under = shown
+                self.summary_label.setText(FIELD_HINT)
+        elif not focused:
+            field.setStyleSheet("")
+            if self.summary_label.text() == FIELD_HINT:
+                self.summary_label.setText(self._hint_under)
 
     def _toggle_replay_pause(self) -> None:
         now = time.monotonic()
@@ -1514,6 +1591,7 @@ class MainWindow(QtWidgets.QWidget):
         if self.history_window is None:
             self.history_window = HistoryView(self._home)
             self.history_window.replay_requested.connect(self.replay_take)       # a bound method: no lambda
+            self.history_window.pause_requested.connect(self.toggle_pause)
         else:
             self.history_window.reload()
         self.history_window.show()
@@ -1628,6 +1706,7 @@ class MainWindow(QtWidgets.QWidget):
             self.summary_label.setText(f"Could not open the input or the output: {exc}")
             return
         self._backing = backing
+        self._leave_text_fields()
         self._last_pass_pct = None
         self._show_loop()
         self._show_melody(reference, latency, self._octave_setting().k)

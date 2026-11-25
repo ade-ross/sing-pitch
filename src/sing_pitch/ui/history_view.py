@@ -4,7 +4,7 @@ from __future__ import annotations
 from pathlib import Path
 
 import pyqtgraph as pg
-from PySide6 import QtCore, QtWidgets
+from PySide6 import QtCore, QtGui, QtWidgets
 
 from ..config import data_dir
 from ..history import WHOLE_SONG, History, Series, load_history
@@ -28,6 +28,7 @@ class HistoryView(QtWidgets.QWidget):
     Replay button on the chosen row, or a double-click on it); the main window does the replaying."""
 
     replay_requested = QtCore.Signal(str)
+    pause_requested = QtCore.Signal()      # Space: the main window pauses or resumes the song (it keeps no Take of its own)
 
     def __init__(self, home: Path | None = None):
         super().__init__()
@@ -117,6 +118,10 @@ class HistoryView(QtWidgets.QWidget):
         for box in self._boxes():
             box.currentIndexChanged.connect(self._apply_filters)
         self._table_seen: tuple[int, int] | None = None       # takes.csv as the window last read it (mtime, size)
+        space = QtGui.QShortcut(QtGui.QKeySequence(QtCore.Qt.Key_Space), self)     # bound signal: no lambda over self
+        space.setContext(QtCore.Qt.WindowShortcut)
+        space.setAutoRepeat(False)
+        space.activated.connect(self.pause_requested)
         self._watch = QtCore.QTimer(self)                     # an open window follows the Takes being saved (#55)
         self._watch.setInterval(WATCH_MS)
         self._watch.timeout.connect(self._reload_if_changed)
