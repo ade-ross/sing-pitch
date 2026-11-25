@@ -63,9 +63,10 @@ UNSCORED_COLOUR = "#8a8a8a"   # sung where the Reference has nothing reliable: s
 BRUSH = {b: pg.mkBrush(c) for b, c in BAND_COLOUR.items()}
 BRUSH[None] = pg.mkBrush(UNSCORED_COLOUR)
 UNSCORED_SPAN_BRUSH = pg.mkBrush(138, 138, 138, 70)   # Unscored stretch of the Melody, greyed on the plot
-TOLERANCE_BAND_BRUSH = pg.mkBrush(93, 173, 226, 70)   # the Tolerance around the blue line: the same blue, see-through
-REFERENCE_PEN = pg.mkPen("#5dade2", width=4)
-VERDICT_PEN = {b: pg.mkPen(c, width=4) for b, c in BAND_COLOUR.items()}   # Notes mode: a bar whose note has its verdict
+TOLERANCE_BAND_ALPHA = ((25, 150), (100, 80))        # fill opacity (0-255) at the Tolerance in cents: a wide band is fainter,
+                                                    # so +-100 is a halo and not a ribbon, while +-25 still shows by its fill
+REFERENCE_PEN = pg.mkPen("#5dade2", width=2)     # thin: the Tolerance band around it gives the line its body
+VERDICT_PEN = {b: pg.mkPen(c, width=2) for b, c in BAND_COLOUR.items()}   # Notes mode: a bar whose note has its verdict
 GUIDE_PEN = pg.mkPen(93, 173, 226, 150, width=2)    # the Reference an octave above and below: clear, but fainter and thinner than the blue line
 NOTE_LABEL_COLOR = (235, 245, 255)                  # Notes mode: the note name over each bar
 VERDICT_ERAS = 4                                    # Notes mode: the Takes (Passes) before whose verdicts are still drawn
@@ -408,8 +409,7 @@ class MainWindow(QtWidgets.QWidget):
         self._unscored.setZValue(-5)
         plot.addItem(self._unscored)
         self._tolerance_band = QtWidgets.QGraphicsPathItem()    # one path for the whole band, under the lines and dots
-        self._tolerance_band.setPen(pg.mkPen(93, 173, 226, 120, width=1))
-        self._tolerance_band.setBrush(TOLERANCE_BAND_BRUSH)
+        self._tolerance_band.setPen(QtGui.QPen(QtCore.Qt.NoPen))
         self._tolerance_band.setZValue(-4)
         plot.addItem(self._tolerance_band, ignoreBounds=True)
         self._guide_curves = [plot.plot(pen=GUIDE_PEN, connect="finite") for _ in (12, -12)]   # Guide lines
@@ -1776,7 +1776,11 @@ class MainWindow(QtWidgets.QWidget):
         path = QtGui.QPainterPath()
         if self._band_line is not None:
             x, y = self._band_line
-            half = (self.tolerance_slider.value() if self._replay_tolerance is None else self._replay_tolerance) / 100
+            cents = self.tolerance_slider.value() if self._replay_tolerance is None else self._replay_tolerance
+            half = cents / 100
+            (c0, a0), (c1, a1) = TOLERANCE_BAND_ALPHA
+            alpha = int(np.interp(cents, (c0, c1), (a0, a1)))
+            self._tolerance_band.setBrush(pg.mkBrush(93, 173, 226, alpha))
             edges = np.flatnonzero(np.diff(np.concatenate([[0], np.isfinite(y).astype(np.int8), [0]])))
             xs, ys, gap = [], [], np.array([np.nan])
             for a, b in zip(edges[::2], edges[1::2]):
