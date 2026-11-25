@@ -403,7 +403,8 @@ class Hunt:
                (6, "a_seek"), (3, "a_arrow"), (4, "a_mark"), (2, "a_save_section"), (3, "a_choose_section"),
                (5, "a_loop"), (3, "a_between"), (4, "a_speed_preset"), (3, "a_speed_key"), (3, "a_guide"),
                (4, "a_resize"), (3, "a_replay"), (2, "a_replay_from_history"), (1, "a_refresh"), (1, "a_calibrate"),
-               (1, "a_history"), (3, "a_storm"), (2, "a_gain")]
+               (1, "a_history"), (3, "a_storm"), (2, "a_gain"),
+               (3, "a_wait"), (2, "a_hold")]
 
     # --- the whole length of every pause ------------------------------------------------------------------------
     def _sample(self) -> None:
@@ -720,7 +721,7 @@ class Hunt:
     def run(self, steps: int, script: list[str] | None = None) -> None:
         """steps random actions, or the given list of action names; then the close, then the scans over the whole run."""
         try:
-            for name in script if script is not None else [None] * steps:
+            for name in script if script is not None else ["a_start"] + [None] * (steps - 1):
                 self.step(name)
             self._close("end of run")
             self.check_close()
