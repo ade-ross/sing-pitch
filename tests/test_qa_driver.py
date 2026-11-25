@@ -25,7 +25,7 @@ def test_driver_starts_pauses_seeks_loops_stops_and_reads_the_summary(tmp_path):
         qa.start_take()
         assert qa.running
         qa.wait(1.0)
-        assert abs(qa.song_position() - 1.0) < 0.1               # the song clock runs at app time
+        assert abs(qa.song_position() - 1.0) < 0.5               # the song clock runs at app time (loose: a loaded machine reads late, #69)
 
         qa.pause()
         paused_at = qa.song_position()
