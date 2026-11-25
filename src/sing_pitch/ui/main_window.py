@@ -47,7 +47,8 @@ from .tempo_find import TempoFinder
 PAST_S = 4.0          # the plot is centred on now: this much of the voice and the Reference behind the now-line...
 FUTURE_S = 4.0        # ...and this much of the Reference ahead of it
 TICK_MS = 33          # ~30 Hz redraw
-PLAYHEAD_HOLD_S = 0.15  # after a click on the Timeline the playhead stays there this long past the latency (heard)
+PLAYHEAD_HOLD_S = 1.0   # after a click on the Timeline the playhead stays on it until the jump is heard, at most this
+PLAYHEAD_NEAR_S = 0.05  # ...heard: the song under the now-line within this before the target (or up to 1 s after it)
 SPEED_MIN, SPEED_MAX, SPEED_STEP = 50, 120, 5     # Speed in percent of the original
 REFERENCE_TEXT = {"nearest": "Nearest note", "key": "Key", "melody": "Melody"}    # reference.kind -> the box's text
 SPEED_PRESETS = (70, 85, 100)    # the buttons beside the Speed box
@@ -705,8 +706,7 @@ class MainWindow(QtWidgets.QWidget):
         if not inside:                                 # Pass starts there
             self._set_loop_box(False)
         self.timeline.set_playhead(song_s)
-        latency = getattr(self._runner, "_latency_s", 0.0) if self._runner is not None else 0.0
-        self._playhead_hold = (float(song_s), time.monotonic() + latency + PLAYHEAD_HOLD_S)
+        self._playhead_hold = (float(song_s), time.monotonic() + PLAYHEAD_HOLD_S)
         self._show_loop()
 
     # --- Sections and the loop ---------------------------------------------------------------------------------
@@ -2004,12 +2004,14 @@ class MainWindow(QtWidgets.QWidget):
     def _playhead_heard(self, now: float, fold: PauseFold) -> None:
         """The Timeline playhead on the song heard, the one under the now-line (not the rendered position, ahead by the
         output latency). Paused, that is where the player stands, so both stand still on one song time. Right after a
-        click on the Timeline it stays on the click until the jump is heard (no step back and forth)."""
+        click on the Timeline (or an arrow key) it stays on the target until the song heard gets there (at most
+        PLAYHEAD_HOLD_S), so it does not step back and forth."""
         target, until = self._playhead_hold
-        if time.monotonic() < until:
-            self.timeline.set_playhead(target)
-            return
         song = float(self._song_times(np.array([now]), fold)[0])
+        if until and time.monotonic() < until and not target - PLAYHEAD_NEAR_S <= song <= target + 1.0:
+            self.timeline.set_playhead(target)       # the jump is not heard yet
+            return
+        self._playhead_hold = (0.0, 0.0)
         if np.isfinite(song):
             self.timeline.set_playhead(song)
 
