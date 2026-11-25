@@ -715,7 +715,13 @@ class MainWindow(QtWidgets.QWidget):
         octave_k = self._octave_setting().k
         self._show_melody(melody, 0.0, octave_k)
         span = self.timeline.section
-        self._preview_clock = LinearClock(-(span[0] if span is not None else 0.0))
+        start = span[0] if span is not None else 0.0
+        if span is None:                                # a song that is silent for its first seconds: show where it sings
+            t, midi = melody.midi_line()
+            sung = np.flatnonzero(np.isfinite(midi))
+            if len(sung) and not (np.isfinite(midi[(t >= -PAST_S) & (t <= FUTURE_S)])).any():
+                start = max(0.0, float(t[sung[0]]) - 1.0)
+        self._preview_clock = LinearClock(-start)
         self._previewing, self._idle_octave = True, octave_k
         self._verdicts, self._verdict_eras, self._note_tally, self._pending_cuts = {}, [], None, []
         self._t.clear(), self._midi.clear(), self._band.clear(), self._out.clear(), self._oct.clear()
@@ -724,6 +730,9 @@ class MainWindow(QtWidgets.QWidget):
         self._dots.setData([], [])
         self._set_now(0.0)
         self._draw_melody(0.0)
+        axis = self._plot.getAxis("bottom")
+        axis.picture = None                             # the x range is the same: the song times on it are not
+        axis.update()
         seen = self._band_line[1] if self._band_line is not None else np.empty(0)
         if np.isfinite(seen).any():
             self._set_y(float(np.nanmedian(seen)))      # where the previewed stretch is, shown as the Take would

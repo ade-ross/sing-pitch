@@ -152,3 +152,12 @@ def test_the_preview_costs_no_timer_and_a_redraw_is_cheap(qtbot, tmp_path):
         times.append(time.perf_counter() - t0)
     assert np.median(times) < 0.05
     assert not win._timer.isActive()
+
+
+def test_a_song_silent_at_its_start_is_previewed_where_it_first_sings(qtbot, tmp_path):
+    line = reference_line([(-900, 6.0), (-500, 1.0)])
+    line = with_confidence(line, 0.0, 6.0, 0.05)                  # the first 6 s are unreliable (silent in the song)
+    win = song_window(qtbot, tmp_path, line, seconds=8.0)
+    assert np.isfinite(line_of(win)[1]).any() and band_runs(win)
+    assert 5.0 <= win._song_times(np.array([0.0]))[0] <= 6.2      # a second before the first note
+    assert_band_is(win, 25)
