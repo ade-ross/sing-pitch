@@ -37,3 +37,21 @@ def test_in_a_loop_the_speed_label_says_the_new_speed_comes_from_the_next_pass(t
         qa.wait_until(lambda: qa.text("speed_label") == "", timeout_s=30)      # the next Pass has begun at 85 %
         assert round(100 * qa.window._backing.speed_playing) == 85
         qa.stop_take()
+
+
+def test_a_jumped_message_that_expires_while_paused_leaves_paused_not_singing(tmp_path):
+    """Merge of #70 (Jumped message expires to Singing...) and #72 (Paused text)."""
+    build_song(tmp_path)
+    with QA(tmp_path, mic="echo", time_scale=4.0) as qa:
+        qa.set("reference_box", "Melody")
+        qa.start_take(at_s=2)
+        qa.wait(0.5)
+        win = qa.window
+        win._jumped_timer.setInterval(100)
+        win._say_jumped("Jumped. Take saved: something")
+        qa.pause()
+        assert qa.summary() == "Jumped. Take saved: something"
+        qa.wait_until(lambda: qa.summary() == PAUSED_TEXT, timeout_s=10)
+        qa.pause()
+        qa.wait_until(lambda: qa.summary().startswith("Singing"), timeout_s=10)
+        qa.stop_take()

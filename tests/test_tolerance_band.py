@@ -163,3 +163,26 @@ def test_a_replay_shows_the_tolerance_its_take_was_saved_with_whatever_the_slide
     win.toggle_replay()
     win.tolerance_slider.setValue(80)
     assert_band_is(win, 80)                                     # the replay is over: the slider's again
+
+
+def test_the_band_left_on_the_plot_after_a_replay_is_his_own_tolerance_not_the_takes(qtbot, tmp_path):
+    """#70 shows the Take's value on the slider during a replay and gives his back after; the band that stays on the
+    plot when the replay stops (#71) must be his value too, with no slider touch needed."""
+    library_song(tmp_path, reference_line(NOTES), seconds=2.0)
+    s = Settings.load(tmp_path)
+    s.set_latency("WF-1000XM5", 0.0)
+    s.save()
+    audio = np.concatenate([harmonic(hz_at(c), d) for c, d in NOTES] + [quiet(0.4)])
+    win = window(qtbot, tmp_path, audio)
+    win.reference_box.setCurrentText("Melody")
+    win.tolerance_slider.setValue(50)
+    win.toggle()
+    qtbot.waitUntil(lambda: len(win._t) > 20, timeout=3000)
+    win.toggle()                                                # a Take saved at +-50
+    win.tolerance_slider.setValue(10)                           # his own value now
+    win.toggle_replay()
+    qtbot.waitUntil(lambda: len(win._t) > 20, timeout=4000)
+    win.tick()
+    win.toggle_replay()                                         # replay stopped, the plot stays
+    assert win.tolerance_slider.value() == 10
+    assert_band_is(win, 10)
