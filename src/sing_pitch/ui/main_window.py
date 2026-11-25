@@ -234,6 +234,11 @@ class MainWindow(QtWidgets.QWidget):
         self._y_ticks_from: tuple[int, int] | None = None
         self._ahead = np.empty(0)                    # MIDI of the Reference coming in the right half, as drawn
         self._band_line: tuple[np.ndarray, np.ndarray] | None = None   # (x, MIDI) the Tolerance band is drawn around
+        self._idle_melody: Melody | None = None      # the Melody the controls ask for (song, Notes): what the preview shows
+        self._previewing = False                     # the plot shows the Melody preview (no Take, no replay)
+        self._preview_clock: LinearClock | None = None   # the preview's: song time = view time + where Start would begin
+        self._idle_octave = 0                        # the Octave shift the preview is drawn at (no frames to say)
+        self._keep_plot = False                      # Stop and the end of a replay leave the plot as it is
         self._replay_tolerance: float | None = None  # a replay's: the Tolerance its Take was saved with (else the slider's)
         self._note_tally: NoteTally | None = None   # Notes mode per note: the running Take's (or replay's) notes
         self._verdicts: dict[int, Band] = {}        # ...and the verdict of each note that has ended
@@ -370,6 +375,7 @@ class MainWindow(QtWidgets.QWidget):
         self.octave_box.setToolTip("Octave shift: Auto picks the octave you sing in for each Phrase; a number pins it "
                                    "for the whole Take. Faint lines show the melody one octave above and below.")
         self.octave_box.currentIndexChanged.connect(self._remember_player_settings)
+        self.octave_box.currentIndexChanged.connect(self._show_preview)
         self.notes_box = QtWidgets.QCheckBox("Notes")
         self.notes_box.setFocusPolicy(QtCore.Qt.NoFocus)
         self.notes_box.setToolTip("Notes mode: show and score the melody as flat notes on exact semitones")
@@ -575,6 +581,8 @@ class MainWindow(QtWidgets.QWidget):
         self._settings.tolerance_cents = cents
         self._settings.save()
         self._draw_band()
+        if not self._previewing:
+            self._show_preview()                       # idle: the Tolerance has a Melody to show itself on
 
     def _score_config(self) -> ScoreConfig:
         """How the next Take is scored: the Tolerance set (and the default Timing window)."""
@@ -688,7 +696,37 @@ class MainWindow(QtWidgets.QWidget):
                 melody = None
         self.timeline.set_melody(melody)
         self.timeline.setVisible(melody is not None)
+        self._idle_melody = melody
         self.reload_sections()
+        self._show_preview()
+
+    def _show_preview(self, *_) -> None:
+        """Idle with Melody chosen: the plot shows the chosen song's reference (line, Guide lines, Unscored stretches,
+        Notes bars) around where Start would begin, centred as in a Take, with the Tolerance band on it. No voice, no
+        scoring, no timer: it is drawn when a control that shapes it is touched, with _draw_melody and _draw_band.
+        Outside Melody a preview is taken down. Stop and the end of a replay leave the plot as it was (_keep_plot)."""
+        if self._keep_plot or self._runner is not None or self._replay is not None or getattr(self, "_plot", None) is None:
+            return
+        melody = self._idle_melody if self.reference_box.currentText() == "Melody" else None
+        if melody is None:
+            if self._previewing:
+                self._show_melody(NearestNote(), 0.0)
+            return
+        octave_k = self._octave_setting().k
+        self._show_melody(melody, 0.0, octave_k)
+        span = self.timeline.section
+        self._preview_clock = LinearClock(-(span[0] if span is not None else 0.0))
+        self._previewing, self._idle_octave = True, octave_k
+        self._verdicts, self._verdict_eras, self._note_tally, self._pending_cuts = {}, [], None, []
+        self._t.clear(), self._midi.clear(), self._band.clear(), self._out.clear(), self._oct.clear()
+        self._oct_known = False
+        self._curve.setData([], [])
+        self._dots.setData([], [])
+        self._set_now(0.0)
+        self._draw_melody(0.0)
+        seen = self._band_line[1] if self._band_line is not None else np.empty(0)
+        if np.isfinite(seen).any():
+            self._set_y(float(np.nanmedian(seen)))      # where the previewed stretch is, shown as the Take would
 
     def seek(self, song_s: float) -> None:
         """Jump the running Melody Take's song to song_s (a click on the Timeline). A jump closes the Take. Inside a
@@ -742,6 +780,7 @@ class MainWindow(QtWidgets.QWidget):
         self._sync_section_controls()
         self._remember_player_settings()
         self._apply_loop()
+        self._show_preview()
 
     def _sync_section_controls(self) -> None:
         """Grey what has nothing to act on: Save needs a Section on the timeline, Rename and Delete a saved one, Loop a
@@ -770,6 +809,7 @@ class MainWindow(QtWidgets.QWidget):
             self.section_box.setCurrentIndex(0)            # shows the mark and re-applies the loop
         else:
             self._apply_loop()
+            self._show_preview()
 
     def _section_edited(self, start_s: float, end_s: float) -> None:
         """Edges moved: a saved Section keeps its name and takes the new span, otherwise the mark does."""
@@ -782,6 +822,7 @@ class MainWindow(QtWidgets.QWidget):
         else:
             store.save(name, start_s, end_s)
         self._apply_loop()
+        self._show_preview()
 
     def save_section(self) -> None:
         store, span, name = self._sections(), self.timeline.section, self.section_name_edit.text().strip()
@@ -1504,7 +1545,9 @@ class MainWindow(QtWidgets.QWidget):
         self.button.setEnabled(True)
         for w in (self.notes_box, self.note_length_slider):
             w.setEnabled(self.reference_box.currentText() == "Melody")
+        self._keep_plot = True
         self._preview_song()                                      # the Timeline as the controls now want it
+        self._keep_plot = False
         note = "Replay finished." if finished else "Replay stopped."
         self.summary_label.setText(f"{numbers}   |   {note}" if numbers else note)
 
@@ -1577,6 +1620,7 @@ class MainWindow(QtWidgets.QWidget):
             self.summary_label.setText(f"Could not start: {exc}")
 
     def _show_melody(self, reference: Reference, latency_s: float, octave_k: int = 0) -> None:
+        self._previewing, self._preview_clock, self._idle_octave = False, None, 0     # a preview sets these after
         self._melody = reference if reference.kind == "melody" else None
         self._melody_latency = latency_s
         self._ahead = np.empty(0)
@@ -1679,7 +1723,9 @@ class MainWindow(QtWidgets.QWidget):
         self.reference_box.setEnabled(True)
         self.calibrate_button.setEnabled(True)
         self.tolerance_slider.setEnabled(True)
+        self._keep_plot = True                 # the Take just sung stays on the plot until a control is touched
         self._reference_changed()
+        self._keep_plot = False
         self.replay_button.setEnabled(True)
         self.summary_label.setText(stop_text(None if record is dropped else record, dropped) if record
                                    else f"The Take failed: {error}")
@@ -1796,7 +1842,7 @@ class MainWindow(QtWidgets.QWidget):
         Take's own song times, else song time + latency."""
         if self._runner is not None and self._runner.song_clock is not None:
             return self._runner.song_clock
-        return self._replay_clock or LinearClock(self._melody_latency)
+        return self._replay_clock or self._preview_clock or LinearClock(self._melody_latency)
 
     def _fold(self, clock: SongClock | None = None) -> PauseFold:
         """Voice time <-> the plot's view time: the draw clock's pauses folded away, so the plot stands still while the
@@ -1819,7 +1865,7 @@ class MainWindow(QtWidgets.QWidget):
         """The Octave shift in force at each view time x: that of the latest frame at or before it (the first frame's
         before them, the last frame's beyond them)."""
         if not self._t:
-            return np.zeros(len(x))
+            return np.full(len(x), float(self._idle_octave))
         t = (fold or self._fold()).to_view(np.fromiter(self._t, float))
         octs = np.fromiter(self._oct, float)
         return octs[np.clip(np.searchsorted(t, x, side="right") - 1, 0, len(t) - 1)]
