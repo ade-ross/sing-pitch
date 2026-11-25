@@ -23,6 +23,9 @@ class Settings:
     last_reference: str | None = None       # the Reference and song he left the window on: it opens on them again
     last_song: str | None = None
     tolerance_cents: int = DEFAULT_TOLERANCE_CENTS   # the Tolerance he set: how far off still counts as in tune
+    latency_on_clocks: list[str] = field(default_factory=list)   # outputs whose latency was measured on the device
+    # clocks (#62): the DAC-to-ADC loop, the same for every Take. A latency stored before (or without timestamps) also
+    # holds the render frontier of its own calibration run, a random 0-21 ms: still used as it was, but stale
 
     @classmethod
     def load(cls, home: Path) -> Settings:
@@ -31,7 +34,8 @@ class Settings:
             raw = json.loads(path.read_text())
             return cls(Path(home), {k: float(v) for k, v in raw.get("latency_s", {}).items()},
                        raw.get("last_calibrated"), list(raw.get("headphones", [])), raw.get("output_device"),
-                       raw.get("last_reference"), raw.get("last_song"), allowed_tolerance(raw.get("tolerance_cents")))
+                       raw.get("last_reference"), raw.get("last_song"), allowed_tolerance(raw.get("tolerance_cents")),
+                       [str(o) for o in raw.get("latency_on_clocks", [])])
         except (OSError, ValueError, AttributeError, TypeError):
             return cls(Path(home))
 
@@ -39,7 +43,7 @@ class Settings:
         self.home.mkdir(parents=True, exist_ok=True)
         data = dict(latency_s=self.latency_s, last_calibrated=self.last_calibrated, headphones=self.headphones,
                     output_device=self.output_device, last_reference=self.last_reference, last_song=self.last_song,
-                    tolerance_cents=self.tolerance_cents)
+                    tolerance_cents=self.tolerance_cents, latency_on_clocks=self.latency_on_clocks)
         (self.home / "settings.json").write_text(json.dumps(data, indent=2) + "\n")
 
     def is_calibrated(self, output: str | None) -> bool:
@@ -54,10 +58,31 @@ class Settings:
             return self.latency_s[self.last_calibrated]
         return DEFAULT_LATENCY_S
 
-    def set_latency(self, output: str | None, latency_s: float) -> None:
+    def set_latency(self, output: str | None, latency_s: float, on_clocks: bool = True) -> None:
+        """on_clocks: measured on the device timestamps (CalibrationRun, see Calibration.on_clocks)."""
         output = output or DEFAULT_OUTPUT
         self.latency_s[output] = round(float(latency_s), 4)
         self.last_calibrated = output
+        if on_clocks and output not in self.latency_on_clocks:
+            self.latency_on_clocks.append(output)
+        elif not on_clocks and output in self.latency_on_clocks:
+            self.latency_on_clocks.remove(output)
+
+    def _latency_key(self, output: str | None) -> str | None:
+        output = output or DEFAULT_OUTPUT
+        if output in self.latency_s:
+            return output
+        return self.last_calibrated if self.last_calibrated in self.latency_s else None
+
+    def is_loop_latency(self, output: str | None) -> bool:
+        """The latency latency_for gives was measured on the device clocks (the DAC-to-ADC loop, #62)."""
+        return self._latency_key(output) in self.latency_on_clocks
+
+    def needs_recalibration(self, output: str | None) -> bool:
+        """This output has a latency, measured before #62 (or without timestamps): it works as it did, with that
+        calibration's random 0-21 ms in it; a new calibration removes it."""
+        key = output or DEFAULT_OUTPUT
+        return key in self.latency_s and key not in self.latency_on_clocks
 
     def confirm_headphones(self, output: str) -> None:
         if output not in self.headphones:
