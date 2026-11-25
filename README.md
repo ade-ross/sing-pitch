@@ -192,3 +192,7 @@ QT_QPA_PLATFORM=offscreen uv run sing-pitch --smoke    # starts and closes the w
 Melody extraction uses [RMVPE](https://github.com/Dream-High/RMVPE) (through `rmvpe-onnx`), voice separation uses
 [audio-separator](https://github.com/nomadkaraoke/python-audio-separator), and the live pitch of your voice comes from
 [SwiftF0](https://github.com/lars76/swift-f0).
+
+## License
+
+MIT: see [`LICENSE`](LICENSE). You may use, copy and change the code, as long as the copyright notice stays in.
