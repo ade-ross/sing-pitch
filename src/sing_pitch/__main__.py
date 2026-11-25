@@ -32,10 +32,17 @@ def main(argv: list[str] | None = None) -> int:
         print(f"test mode: mic {flags.fake_mic or 'real'}, output {'fake' if flags.fake_output else 'real'}{delay}")
     window = MainWindow(SwiftF0Tracker(), **kwargs)
     window.show()
+    stall = None
+    if hub is not None and hub.faults.ui_stall_every_s is not None:
+        from .testmode import UiStall
+
+        stall = UiStall(hub, hub.faults)
     if "--smoke" in argv:
         # headless check: build the window, tracker and device list, then quit
         QtCore.QTimer.singleShot(300, app.quit)
     code = app.exec()
+    if stall is not None:
+        stall.stop()
     if hub is not None:
         hub.close()
         if flags.record_output:

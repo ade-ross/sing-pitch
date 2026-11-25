@@ -176,6 +176,19 @@ class SongTimeLog:
             return None
         return (song0 + (frame - self._start[i]) * self._rate[i]) / self.sample_rate
 
+    def song_times(self, output_s: np.ndarray) -> np.ndarray:
+        """song_time() over an array of output times in one pass (NaN = paused): what the plot draws every tick."""
+        output_s = np.asarray(output_s, dtype=np.float64)
+        n = len(self._start)
+        if n == 0:
+            return np.full(output_s.shape, np.nan)
+        start = np.array(self._start[:n], dtype=np.float64)
+        song0 = np.array([np.nan if s is None else s for s in self._song0[:n]], dtype=np.float64)
+        rate = np.array(self._rate[:n], dtype=np.float64)
+        frame = output_s * self.sample_rate
+        i = np.maximum(np.searchsorted(start, frame, side="right") - 1, 0)
+        return (song0[i] + (frame - start[i]) * rate[i]) / self.sample_rate
+
 
 class Transport:
     """Backing (+ optional Guide vocal) as stereo float32 arrays already at `sample_rate`. Starts playing at the
