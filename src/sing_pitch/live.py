@@ -75,6 +75,13 @@ class Playback(Protocol):
 
     def stop(self) -> None: ...
 
+    def play(self) -> None: ...
+
+    def pause(self) -> None: ...
+
+    @property
+    def paused(self) -> bool: ...     # the one answer to "is the song paused" (the Transport's)
+
     on_event: object             # settable: called from the audio thread with each TransportEvent
 
     # Optional, read once at start() (a player without them counts as Guide vocal off, Speed 100):
@@ -375,11 +382,19 @@ class LiveRunner:
         return error
 
     def stop(self) -> TakeRecord:
-        self._source.stop()
-        if self._backing is not None:
-            self._backing.stop()
-        self._chunks.put(None)
-        self._thread.join()
+        """End the Take. The Backing is stopped whatever the microphone does: an input that fails to stop must never
+        leave the song playing into the headphones. Its failure is not worth the Take: the audio is already here."""
+        try:
+            self._source.stop()
+        except Exception:
+            pass
+        finally:
+            try:
+                if self._backing is not None:
+                    self._backing.stop()
+            finally:
+                self._chunks.put(None)
+                self._thread.join()
         if self._error is not None:
             raise self._pop_error()
         record = self._with_settings(self._take.finish())
