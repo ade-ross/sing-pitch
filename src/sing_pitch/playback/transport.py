@@ -176,6 +176,19 @@ class SongTimeLog:
             return None
         return (song0 + (frame - self._start[i]) * self._rate[i]) / self.sample_rate
 
+    def song_times(self, output_s: np.ndarray) -> np.ndarray:
+        """song_time() over an array of output times in one pass (NaN = paused): what the plot draws every tick."""
+        output_s = np.asarray(output_s, dtype=np.float64)
+        n = len(self._start)
+        if n == 0:
+            return np.full(output_s.shape, np.nan)
+        start = np.array(self._start[:n], dtype=np.float64)
+        song0 = np.array([np.nan if s is None else s for s in self._song0[:n]], dtype=np.float64)
+        rate = np.array(self._rate[:n], dtype=np.float64)
+        frame = output_s * self.sample_rate
+        i = np.maximum(np.searchsorted(start, frame, side="right") - 1, 0)
+        return (song0[i] + (frame - start[i]) * rate[i]) / self.sample_rate
+
 
 class Transport:
     """Backing (+ optional Guide vocal) as stereo float32 arrays already at `sample_rate`. Starts playing at the
@@ -253,8 +266,9 @@ class Transport:
 
     @staticmethod
     def _same_section(a: Loop | None, b: Loop | None) -> bool:
-        """Both loop the same Section: only what plays between Passes may differ."""
-        return a is not None and b is not None and (a.start_s, a.end_s, a.name) == (b.start_s, b.end_s, b.name)
+        """Both loop the same stretch of song: what plays between Passes and the name (saving the unsaved mark only
+        names it) may differ, and apply from the next Pass."""
+        return a is not None and b is not None and (a.start_s, a.end_s) == (b.start_s, b.end_s)
 
     def _fit_loop(self, loop: Loop) -> Loop | None:
         """The loop clamped to the song and at least MIN_LOOP_S long (the whole song if it is shorter); None for a
@@ -284,6 +298,12 @@ class Transport:
     @property
     def playing(self) -> bool:
         return self._want_playing
+
+    @property
+    def paused(self) -> bool:
+        """Pause was asked for (and play not since): from the next block the song is silent and stands still. The one
+        answer to "is the song paused": the window, the Pause button and the plot all read it, none keeps its own."""
+        return not self._want_playing
 
     @property
     def position_s(self) -> float:

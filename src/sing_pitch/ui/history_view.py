@@ -4,10 +4,11 @@ from __future__ import annotations
 from pathlib import Path
 
 import pyqtgraph as pg
-from PySide6 import QtCore, QtWidgets
+from PySide6 import QtCore, QtGui, QtWidgets
 
 from ..config import data_dir
 from ..history import WHOLE_SONG, History, Series, load_history
+from ..take_store import summary_path
 from .eliding import eliding_combo
 
 REFERENCE_LABEL = {"nearest": "Nearest note", "key": "Key", "melody": "Melody"}
@@ -18,7 +19,8 @@ EMPTY_TEXT = "No Takes yet. Sing a Take and it will show up here."
 EMPTY_FILTER_TEXT = "No scored Takes match this filter."
 
 
-TABLE_HEADERS = ("When", "Reference", "Song", "Speed", "In tune", "Median cents off")
+TABLE_HEADERS = ("When", "Reference", "Song", "Section", "Pass", "Speed", "In tune", "Median cents off")
+WATCH_MS = 1000          # how often an open window looks for a newly saved Take
 
 
 class HistoryView(QtWidgets.QWidget):
@@ -26,6 +28,7 @@ class HistoryView(QtWidgets.QWidget):
     Replay button on the chosen row, or a double-click on it); the main window does the replaying."""
 
     replay_requested = QtCore.Signal(str)
+    pause_requested = QtCore.Signal()      # Space: the main window pauses or resumes the song (it keeps no Take of its own)
 
     def __init__(self, home: Path | None = None):
         super().__init__()
@@ -114,7 +117,35 @@ class HistoryView(QtWidgets.QWidget):
         self.takes_table.cellDoubleClicked.connect(self._replay_row)
         for box in self._boxes():
             box.currentIndexChanged.connect(self._apply_filters)
+        self._table_seen: tuple[int, int] | None = None       # takes.csv as the window last read it (mtime, size)
+        space = QtGui.QShortcut(QtGui.QKeySequence(QtCore.Qt.Key_Space), self)     # bound signal: no lambda over self
+        space.setContext(QtCore.Qt.WindowShortcut)
+        space.setAutoRepeat(False)
+        space.activated.connect(self.pause_requested)
+        self._watch = QtCore.QTimer(self)                     # an open window follows the Takes being saved (#55)
+        self._watch.setInterval(WATCH_MS)
+        self._watch.timeout.connect(self._reload_if_changed)
         self.reload()
+
+    def showEvent(self, event) -> None:
+        super().showEvent(event)
+        self._reload_if_changed()
+        self._watch.start()
+
+    def hideEvent(self, event) -> None:
+        self._watch.stop()
+        super().hideEvent(event)
+
+    def _table_state(self) -> tuple[int, int] | None:
+        try:
+            stat = summary_path(self._home).stat()
+        except OSError:
+            return None
+        return stat.st_mtime_ns, stat.st_size
+
+    def _reload_if_changed(self) -> None:
+        if self._table_state() != self._table_seen:
+            self.reload()
 
     def _boxes(self) -> tuple[QtWidgets.QComboBox, ...]:
         return (self.reference_box, self.song_box, self.guide_box, self.speed_box, self.section_box, self.notes_box,
@@ -122,6 +153,7 @@ class HistoryView(QtWidgets.QWidget):
 
     def reload(self) -> None:
         """Re-read the summary table and rebuild the filter boxes, keeping the current choice when it still exists."""
+        self._table_seen = self._table_state()               # before reading: a Take saved meanwhile is read next time
         self.history: History = load_history(self._home)
         h = self.history
         choices = (   # (box, items as (label, value), enabled)
@@ -174,17 +206,27 @@ class HistoryView(QtWidgets.QWidget):
 
     def _fill_table(self, series: Series) -> None:
         points = [p for p in reversed(series.points) if p.take_id]
+        chosen = self._chosen_take_id()                      # a reload keeps the row that was chosen
         self.takes_table.setRowCount(len(points))
         for r, p in enumerate(points):
-            cells = (p.started_at.strftime("%Y-%m-%d %H:%M"), REFERENCE_LABEL.get(p.reference, p.reference),
-                     p.song or "", f"{p.speed_pct} %", f"{p.pct_in_tune:.0f} %", f"{p.median_abs_cents:.0f}")
+            cells = (p.started_at.strftime("%Y-%m-%d %H:%M:%S"), REFERENCE_LABEL.get(p.reference, p.reference),
+                     p.song or "", p.section or "", "" if p.pass_index is None else str(p.pass_index),
+                     f"{p.speed_pct} %", f"{p.pct_in_tune:.0f} %", f"{p.median_abs_cents:.0f}")
             for c, text in enumerate(cells):
                 item = QtWidgets.QTableWidgetItem(text)
                 if c == 0:
                     item.setData(QtCore.Qt.UserRole, p.take_id)
                 self.takes_table.setItem(r, c, item)
         self.status_label.setText("")
+        for r, p in enumerate(points):
+            if chosen is not None and p.take_id == chosen:
+                self.takes_table.selectRow(r)
         self._row_chosen()
+
+    def _chosen_take_id(self) -> str | None:
+        rows = self.takes_table.selectionModel().selectedRows()
+        item = self.takes_table.item(rows[0].row(), 0) if rows else None
+        return None if item is None else item.data(QtCore.Qt.UserRole)
 
     def _row_chosen(self) -> None:
         self.replay_button.setEnabled(bool(self.takes_table.selectionModel().selectedRows()))

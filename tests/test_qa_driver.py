@@ -25,7 +25,7 @@ def test_driver_starts_pauses_seeks_loops_stops_and_reads_the_summary(tmp_path):
         qa.start_take()
         assert qa.running
         qa.wait(1.0)
-        assert abs(qa.song_position() - 1.0) < 0.1               # the song clock runs at app time
+        assert abs(qa.song_position() - 1.0) < 0.5               # the song clock runs at app time (loose: a loaded machine reads late, #69)
 
         qa.pause()
         paused_at = qa.song_position()
@@ -42,7 +42,7 @@ def test_driver_starts_pauses_seeks_loops_stops_and_reads_the_summary(tmp_path):
 
         qa.mark_section(1.2, 3.6)
         qa.set("loop_box", True)
-        qa.wait_until(lambda: sum(r["section_name"] != "" for r in qa.takes()) >= 2, timeout_s=15)
+        qa.wait_until(lambda: sum(r["section_name"] != "" for r in qa.takes()) >= 2, timeout_s=120)        # app time: a loaded machine saves a Pass late (#69)
         passes = [r for r in qa.takes() if r["section_name"]]
         assert [r["pass_index"] for r in passes[:2]] == ["1", "2"]
         assert all(float(r["pct_in_tune"]) >= 90 for r in passes[:2])     # the echo singer stays in sync

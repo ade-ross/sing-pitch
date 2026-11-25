@@ -117,6 +117,16 @@ he does not play guitar while using it.
     cents, Larrouy-Maestri group, abstracts only). Simone sets the Tolerance with a slider (±10 to ±100 cents, 5-cent
     steps; #41). It applies to every Reference, is remembered in settings.json, is locked during a Take and is saved
     with each Take (`tolerance_cents`); the summary, the History legend and a History filter show it.
+    The plot shows it (#51) as a translucent band of ± the Tolerance in the Melody's blue around the Melody line at the
+    active Octave shift (around the bars in Notes mode), drawn as one path under the line and the voice dots. It breaks
+    where the line breaks (Unscored stretches, the gaps between bars), has none on the Guide lines, follows the slider
+    at once (also after a Take has stopped) and, in a replay, is the Tolerance the replayed Take was saved with.
+    **Melody preview:** with Reference = Melody, a song chosen and no Take or replay running, the plot shows the reference
+    (line, Guide lines, Unscored stretches, Notes bars) centred on where Start would begin (the chosen Section's start, else
+    the song start, else a second before the first sung note when the song opens in silence), at the Octave setting (Auto =
+    shift 0), with the band on it. It is redrawn when the Tolerance, Octave, Notes, Minimum note length, song, Reference or
+    Section changes; it has no voice, no scoring and no timer. Stop and the end of a replay leave the plot as it was until
+    one of those is touched. The Timeline ignores clicks while stopped, as before.
   - **Timing window (Melody, QA #44):** each Phrase gets one timing shift, how late (+) or early (−) the voice is,
     searched from −100 to +100 ms in 10 ms steps. It is chosen together with the Phrase's Octave shift, in one search:
     the pair (k, shift) whose Reference, the line at song time − shift plus 12 k, gives the smallest median absolute

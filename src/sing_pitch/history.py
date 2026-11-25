@@ -24,6 +24,7 @@ class HistoryPoint:
     note_mode: str = "off"            # "on" = scored against the Notes-mode bars; rows saved before the column: off
     take_id: str = ""                 # the Take's id in the summary table (what a replay asks for)
     tolerance_cents: float = 25.0     # the Tolerance it was scored with; rows saved before the column: 25
+    pass_index: int | None = None     # the Pass number of a looped Section's Take (None = not a Pass)
 
 
 @dataclass(frozen=True)
@@ -107,6 +108,7 @@ def load_history(home: Path) -> History:
                     median_abs_cents=float(r["median_abs_cents"]),
                     guide_vocal=guide, speed_pct=speed, section=(r.get("section_name") or None),
                     note_mode=row_notes(r)[0], take_id=r.get("id") or "", tolerance_cents=row_config(r).green_cents,
+                    pass_index=int(r["pass_index"]) if r.get("pass_index") else None,
                 ))
             except (KeyError, TypeError, ValueError):
                 continue

@@ -264,3 +264,22 @@ def test_a_seek_inside_a_loop_asked_for_in_the_same_block_starts_its_pass_1_ther
     assert tr.seek(3.5) is False                                  # no loop asked for any more: the seek ends it
     tr.render(100)
     assert tr.loop is None
+
+
+def test_naming_the_looping_section_does_not_restart_the_loop_the_next_pass_carries_the_name():
+    """Saving the unsaved mark that is looping only gives it a name: the song goes on where it is (paused or not),
+    the Pass playing keeps its number and the next Pass is tagged with the name."""
+    tr = Transport(ramp_song(10000), sample_rate=SR)
+    tr.set_loop(Loop(2.0, 4.0))
+    for _ in range(12):
+        tr.render(100)                                           # Pass 1, at 1.2 s... into the Section
+    here = tr.position_s
+    tr.pause()
+    tr.set_loop(Loop(2.0, 4.0, "Chorus"))
+    block = tr.render(100)
+    assert [e.kind for e in block.events] == ["paused"] and tr.position_s == here and tr.pass_index == 1
+    tr.play()
+    started = []
+    for _ in range(40):
+        started += [e for e in tr.render(100).events if e.kind == "pass_started"]
+    assert started[0].pass_index == 2 and started[0].loop.name == "Chorus"

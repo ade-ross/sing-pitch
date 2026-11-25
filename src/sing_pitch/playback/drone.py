@@ -101,5 +101,15 @@ class DronePlayer:
         deadline = time.monotonic() + 2 * RELEASE_S      # let the callback play the fade-out
         while drone.sounding and time.monotonic() < deadline:
             time.sleep(0.005)
-        stream.stop()
-        stream.close()
+        try:
+            stream.stop()
+        except Exception:               # as BackingPlayer.stop: a stream that will not stop is aborted and closed
+            try:
+                stream.abort()
+            except Exception:
+                pass
+        finally:
+            try:
+                stream.close()
+            except Exception:
+                pass

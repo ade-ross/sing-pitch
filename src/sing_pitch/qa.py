@@ -19,7 +19,7 @@ import time
 from pathlib import Path
 from typing import Callable
 
-from .testmode import ECHO, FakeMicFactory, Flags, build
+from .testmode import ECHO, FakeMicFactory, Flags, UiStall, build
 
 DEFAULT_TIMEOUT_S = 30.0
 
@@ -39,7 +39,7 @@ class QA:
 
     def __init__(self, home: Path, mic: str | Path | None = ECHO, latency_s: float | None = None,
                  mic_offset_s: float = 0.0, loop_mic: bool = False, record_output: str | Path | None = None,
-                 time_scale: float = 1.0, tracker=None, size: tuple[int, int] = (1200, 700)):
+                 time_scale: float = 1.0, tracker=None, size: tuple[int, int] = (1200, 700), faults=None):
         self._app = _app()
         from .pitch.swiftf0 import SwiftF0Tracker
         from .ui import MainWindow
@@ -47,9 +47,10 @@ class QA:
         self.home = Path(home)
         flags = Flags(fake_mic=None if mic is None else str(mic), fake_mic_offset=mic_offset_s, fake_mic_loop=loop_mic,
                       fake_latency=latency_s, fake_output=True,
-                      record_output=None if record_output is None else str(record_output))
+                      record_output=None if record_output is None else str(record_output), fake_faults=faults)
         self._record_output = record_output
         self.hub, self.mic, kwargs = build(flags, self.home, time_scale)
+        self._stall = UiStall(self.hub, self.hub.faults) if self.hub.faults.ui_stall_every_s is not None else None
         self.window = MainWindow(tracker or SwiftF0Tracker(), home=self.home, **kwargs)
         self.window.resize(*size)
         self.window.show()
@@ -62,6 +63,8 @@ class QA:
             return
         if self.running:
             self.stop_take()
+        if self._stall is not None:
+            self._stall.stop()
         self.window.close()
         self.window.deleteLater()
         self.window = None
@@ -223,6 +226,42 @@ class QA:
         ref_x, ref_midi = xy(w._ref_curve)
         return dict(voice_t=voice_t, voice_midi=voice_midi, reference_x=ref_x, reference_midi=ref_midi,
                     now=w._now_line.value(), x_range=tuple(w._plot.viewRange()[0]))
+
+    def display_error_s(self) -> float | None:
+        """Song time the window puts under the centre line minus the song time heard at that same moment (#49). The
+        window redraws first; then the now-line is worked out once more, exactly as a redraw does, between two reads of
+        the hub clock, so the time a redraw takes is not counted (at time_scale 4 a 10 ms redraw is 40 ms of app time).
+        The truth is the fake output's own record of which frame it played when (FakeOutputStream.played); heard =
+        played one output latency ago (the configured latency minus the mic's own, as the window assumes). None without
+        a Melody Take or before the song is heard."""
+        import numpy as np
+
+        w = self.window
+        runner, backing = w._runner, w._backing
+        if runner is None or backing is None or w._melody is None:
+            return None
+        w.tick()
+        if not w._t:                              # nothing tracked yet: the window draws no now-line either
+            return None
+        fold = w._fold()
+        before = self.hub.now()
+        now = fold.to_view(w._now_voice())
+        after = self.hub.now()
+        drawn = float(w._song_times(np.array([now]), fold)[0])
+        out_latency = runner._latency_s - getattr(runner._source, "latency_s", 0.0)
+        frame = self.hub.output_frame_at((before + after) / 2 - out_latency)
+        song = None if frame is None else backing.song_log.song_time(frame / self.hub.sample_rate)
+        return None if song is None or not np.isfinite(drawn) else drawn - song
+
+    def glitches(self) -> dict:
+        """Audio glitches of the running Take as the window's clocks saw them: lost output blocks and mic chunks
+        (counts and seconds), and the steps the fake hardware actually lost."""
+        w = self.window
+        out = getattr(w._backing, "output_times", None)
+        inp = getattr(getattr(w._runner, "_source", None), "times", None)
+        return dict(out=None if out is None else (out.glitches, out.lost_s),
+                    inp=None if inp is None else (inp.glitches, inp.lost_s),
+                    lost_out_steps=self.hub.lost_out_steps, lost_in_steps=self.hub.lost_in_steps)
 
     def screenshot(self, path: str | Path) -> Path:
         self._app.processEvents()

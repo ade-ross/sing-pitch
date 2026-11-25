@@ -81,6 +81,10 @@ class Player(FakeBacking):
     def position_s(self):
         return self.song_frames / SR
 
+    @property
+    def paused(self):
+        return not self.playing
+
     def pause(self):
         self.playing = False
 
