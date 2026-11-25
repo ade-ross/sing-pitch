@@ -71,15 +71,18 @@ class StreamTimeline:
     - Within the tolerance: nothing changes (jitter, or drift too small to matter yet).
     - Later than the model by more: a tentative anchor at once (a lost block must show before the next one), which the
       next block confirms (it agrees with the new anchor within the tolerance and not with the old model) or retracts
-      (the stamp was a spike, counted in `spikes`). A confirmed jump of more than max(GLITCH_S, tolerance) is
-      lost audio: `glitches`, its length in `lost_s`; smaller ones are drift.
+      (the stamp was a spike, counted in `spikes`). A confirmed jump of more than max(GLITCH_S, 2 x tolerance)
+      is lost audio: `glitches`, its length in `lost_s`; smaller ones are drift (a drift step is about one tolerance).
     - Earlier than the model by more: never lost audio. It must repeat in the next block (a lasting step: the reported
       latency changed, e.g. a Bluetooth renegotiation, or drift) before an anchor is made; one alone is a spike. A
-      confirmed backward step beyond max(GLITCH_S, tolerance) is counted in `steps_back` / `steps_back_s`. The anchor's
-      host time is kept after the previous anchor's (a step back larger than the time since it would otherwise fold
+      confirmed backward step beyond max(GLITCH_S, 2 x tolerance) is counted in `steps_back` / `steps_back_s`. The
+      anchor's host time is kept after the previous anchor's (a step back larger than the time since it would otherwise fold
       host time back on itself): the frames reported as played twice are mapped to the newer ones.
-    So jitter alone adds no anchors, a spike at most one tentative one that is taken back, and anchors grow only with
-    real lasting steps. Lookups search preallocated arrays (no copy per call), so a paint costs the same after an hour.
+    - An anchor stands on one stamp, so with jitter it may sit off by up to the tolerance: when a whole window of
+      residuals against it has a median off by more than BIAS_S, it is re-anchored on that median (`corrections`;
+      this also follows slow drift, about one anchor per window when the clocks drift 50 ppm or more).
+    So jitter alone adds next to no anchors, a spike at most one tentative one that is taken back, and anchors grow only
+    with real lasting steps and drift (at most one per window). Lookups search preallocated arrays (no copy per call), so a paint costs the same after an hour.
 
     One audio thread adds, any thread reads: an entry is written before the count that publishes it, and readers read
     the count first."""
@@ -87,7 +90,9 @@ class StreamTimeline:
     TOLERANCE_S = 0.0005       # the tolerance never goes below this
     JITTER_K = 5.0             # ...and is this many sigmas of the measured jitter above it
     JITTER_WINDOW = 256        # blocks the jitter is measured over
-    GLITCH_S = 0.002           # a confirmed jump beyond max(this, tolerance) is lost audio (or a latency step back)
+    GLITCH_S = 0.002           # a confirmed jump beyond max(this, 2 x tolerance) is lost audio (or a step back)
+    BIAS_S = 0.00025           # a full window whose median residual is off by more than this (or 5 standard errors of
+                               # that median, if more) re-anchors on the median
     HIST_STEP_S = 20e-6        # |residual| histogram for the health record: 20 us bins up to 100 ms
     HIST_BINS = 5000
 
@@ -100,6 +105,8 @@ class StreamTimeline:
         self._pending: tuple[float, float, float] | None = None    # a backward step waiting for its repeat
         self._res = np.zeros(self.JITTER_WINDOW)
         self._res_n = 0
+        self._since = 0             # blocks since the last anchor
+        self.corrections = 0        # re-anchorings on a window's median (bias of a noisy anchor, slow drift)
         self._sigma = 0.0
         self.hist = np.zeros(self.HIST_BINS + 1, np.int64)
         self.glitches = 0
@@ -135,6 +142,7 @@ class StreamTimeline:
             host_s = self._h[n - 1] + 1e-6
         self._s[n], self._h[n] = stream_s, host_s
         self._n = n + 1
+        self._since = 0
 
     def _residual(self, r: float) -> None:
         self._res[self._res_n % self.JITTER_WINDOW] = r
@@ -164,7 +172,7 @@ class StreamTimeline:
             step, self._tentative = self._tentative, None
             if abs(jump) <= tol < abs(jump + step):   # confirmed: it fits the new anchor and not the old model
                 self._residual(jump)
-                if step > max(self.GLITCH_S, tol):
+                if step > max(self.GLITCH_S, 2 * tol):
                     self.glitches += 1
                     self.lost_s += step
                 return
@@ -176,6 +184,12 @@ class StreamTimeline:
             if self._pending is not None:         # a step back that did not last
                 self.spikes += 1
                 self._pending = None
+            self._since += 1
+            if self._since >= self.JITTER_WINDOW:     # every residual of the window is against this anchor
+                med = float(np.median(self._res))
+                if abs(med) > max(self.BIAS_S, 5 * 1.2533 * self._sigma / np.sqrt(self.JITTER_WINDOW)):
+                    self._append(stream_s, host_s - jump + med)
+                    self.corrections += 1
             return
         if jump > 0:                              # later than the model: tentative at once
             self._pending = None
@@ -185,7 +199,7 @@ class StreamTimeline:
         pending, self._pending = self._pending, None
         if pending is not None and abs(jump - pending[2]) <= tol:    # a step back that lasts
             self._append(pending[0], pending[1])
-            if -pending[2] > max(self.GLITCH_S, tol):
+            if -pending[2] > max(self.GLITCH_S, 2 * tol):
                 self.steps_back += 1
                 self.steps_back_s += -pending[2]
             return
@@ -240,7 +254,8 @@ class StreamTimeline:
         return dict(blocks=self.blocks, anchors=self._n, glitches=self.glitches, lost_s=round(self.lost_s, 4),
                     steps_back=self.steps_back, steps_back_s=round(self.steps_back_s, 4), spikes=self.spikes,
                     flagged=self.flagged, jitter_p50_us=None if p50 is None else round(1e6 * p50),
-                    jitter_p99_us=None if p99 is None else round(1e6 * p99), frames_min=self.frames_min,
+                    jitter_p99_us=None if p99 is None else round(1e6 * p99), corrections=self.corrections,
+                    frames_min=self.frames_min,
                     frames_max=self.frames_max)
 
 

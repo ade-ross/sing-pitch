@@ -61,11 +61,13 @@ class Faults:
       underflow or deadline: a lost step does not move blocks already stamped.
     - mic_late_ms: the mic's first chunks reach the app this late, in one burst (a first callback held up at Start);
       their stamps stay true.
+    - mic_phase: each mic start hears its first chunk 0-3 hub steps (0-16 ms) after it opens, at random: with
+      render_ahead, a different phase of the output's blocks every Take, as two real devices have.
     - jitter_out_us, jitter_in_us: Gaussian noise (SD) on the reported DAC / ADC stamps only; the audio is on time.
     - latency_step_at_s, latency_step_ms: from that many seconds after the output started, its reported DAC stamps are
       this much later (negative: earlier), the audio unchanged: a reported latency that changes (e.g. Bluetooth).
     Spec string for --fake-faults and QA(faults=...): "underflow=EVERY_S:MS,overflow=EVERY_S:MS,drift=PPM,
-    deadline=OUT_MS:IN_MS,ui_stall=EVERY_S:MS[:sleep],render=AHEAD_MS,mic_late=MS,jitter=OUT_US:IN_US,
+    deadline=OUT_MS:IN_MS,ui_stall=EVERY_S:MS[:sleep],render=AHEAD_MS,mic_late=MS,mic_phase=1,jitter=OUT_US:IN_US,
     latency_step=AT_S:MS", any subset."""
 
     underflow_every_s: float | None = None
@@ -80,6 +82,7 @@ class Faults:
     ui_stall_gil: bool = True
     render_ahead_ms: float | None = None
     mic_late_ms: float = 0.0
+    mic_phase: bool = False
     jitter_out_us: float = 0.0
     jitter_in_us: float = 0.0
     latency_step_at_s: float | None = None
@@ -103,6 +106,8 @@ class Faults:
                     kw["deadline_in_ms"] = float(args[1]) if len(args) > 1 else float(args[0])
                 elif name == "render":
                     kw["render_ahead_ms"] = float(args[0])
+                elif name == "mic_phase":
+                    kw["mic_phase"] = value not in ("0", "false", "no")
                 elif name == "mic_late":
                     kw["mic_late_ms"] = float(args[0])
                 elif name == "jitter":
@@ -262,6 +267,7 @@ class FakeMic:
         self._delivered = 0       # samples handed to on_chunk since start()
         self._late_until: int | None = None     # mic_late: hub frame the first chunks are held back until
         self._held: list = []
+        self._opens_at = 0
         self.times = StreamTimeline(hub)    # hub time each delivered sample was heard at (like an ADC timestamp)
 
     def start(self, on_chunk: Callable[[np.ndarray], None]) -> None:
@@ -269,14 +275,18 @@ class FakeMic:
 
         self._on_chunk = on_chunk
         self._delivered, self.times = 0, StreamTimeline(self._hub)
-        self._late_until, self._held = None, []
+        self._late_until, self._held, self._opens_at = None, [], 0
         self._hub._add_input(self)
 
     def _deliver(self, frame: int, chunk: np.ndarray) -> None:
         """Hand the chunk heard from hub frame `frame` on to the app (hub thread); while mic_late holds the first
         chunks back, keep them and hand them all over at once when it ends."""
         if self._late_until is None:
-            self._late_until = frame + round(self._hub.faults.mic_late_ms / 1000 * self.sample_rate)
+            skip = int(self._hub._rng.integers(0, 4)) * self._hub.step if self._hub.faults.mic_phase else 0
+            self._opens_at = frame + skip
+            self._late_until = frame + skip + round(self._hub.faults.mic_late_ms / 1000 * self.sample_rate)
+        if frame < self._opens_at:
+            return
         if frame < self._late_until:
             self._held.append((frame, chunk))
             return

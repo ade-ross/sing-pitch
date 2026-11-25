@@ -4,6 +4,7 @@ from __future__ import annotations
 from collections import deque
 import math
 import time
+from time import perf_counter
 from pathlib import Path
 from typing import Callable
 
@@ -2016,10 +2017,10 @@ class MainWindow(QtWidgets.QWidget):
         """Tick duration and window size changes for the audio health record (audio_health.py)."""
         if self._runner is None:
             return
-        self._health_ui.tick(time.perf_counter() - started, (self.width(), self.height()))
+        self._health_ui.tick(perf_counter() - started, (self.width(), self.height()))
 
     def tick(self, drain_only: bool = False) -> None:
-        tick_started = time.perf_counter()
+        tick_started = perf_counter()
         if self._runner is not None:
             try:
                 scores = self._runner.drain()

@@ -202,6 +202,7 @@ class LiveRunner:
         self._error: Exception | None = None      # what killed the worker, if anything
         self._run_started = datetime.now()        # wall clock at input time 0: a cut's Take starts at this + its time
         self._received = 0                        # mic samples delivered so far (audio thread writes, UI reads)
+        self._heard = -math.inf                   # the largest heard_t given out
 
     def start(self) -> None:
         """Open the Backing and the input, then start the worker: a Start that fails leaves no thread behind."""
@@ -213,6 +214,7 @@ class LiveRunner:
         self._guide = [(-math.inf, getattr(self._backing, "current_gains", (1.0, 0.0))[1])]
         self._run_started = datetime.now()
         self._received = 0
+        self._heard = -math.inf
         self._take = LiveTake(self._tracker, self._reference, self._source.sample_rate, started_at=self._run_started,
                               octave=self._octave, config=self._config)
         if self._backing is None:
@@ -384,9 +386,10 @@ class LiveRunner:
         newest frame."""
         clock = self.song_clock
         now = clock.plot_now() if isinstance(clock, LogClock) else None
-        if now is not None:
-            return now
-        return self._received / self._source.sample_rate + getattr(self._source, "latency_s", 0.0)
+        if now is None:
+            now = self._received / self._source.sample_rate + getattr(self._source, "latency_s", 0.0)
+        self._heard = max(self._heard, now)       # never back, also when the clock switches from counting to stamps
+        return self._heard
 
     @property
     def draw_clock(self) -> SongClock | None:
