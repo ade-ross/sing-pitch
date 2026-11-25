@@ -1,4 +1,4 @@
-"""Melody seam: what the reference says at frames the smoothing filled, and where the 0.12 s thresholds fall."""
+"""Melody seam: what the reference says at frames the smoothing filled, and where the thresholds fall (gaps bridged under 0.3 s, blips dropped under 0.12 s)."""
 import numpy as np
 import pytest
 from frames import hz_at
@@ -50,8 +50,10 @@ def test_unreliable_frames_at_the_edge_of_the_line_hold_the_nearest_reliable_pit
     assert midi[:10] == pytest.approx([A4_MIDI] * 10, abs=0.01)
 
 
-@pytest.mark.parametrize("frames, filled", [(11, True), (12, False), (13, False)])
-def test_a_dip_of_exactly_120_ms_is_a_stretch_and_a_shorter_one_is_not(frames, filled):
+@pytest.mark.parametrize("frames, filled", [(12, True), (20, True), (29, True), (30, False), (31, False)])
+def test_a_dip_of_exactly_300_ms_is_a_stretch_and_a_shorter_one_is_not(frames, filled):
+    """An s, t or breath inside a word has no pitch (RMVPE confidence ~0 on TULIP's 0.12-0.3 s gaps, their energy
+    centred near 7 kHz against 2.9 kHz for sung frames): bridged, so a phrase is not striped grey (2026-11-25)."""
     line, _ = line_with_gap(frames, 440.0, second_cents=0.0)
     mask = scored_mask(line)
     gap = mask[50 : 50 + frames]
@@ -65,3 +67,21 @@ def test_a_reliable_run_of_exactly_120_ms_is_scored_and_a_shorter_one_is_a_blip(
     conf[40 : 40 + frames] = 0.9
     mask = scored_mask(ReferenceLine(base.t, base.hz, conf))
     assert bool(mask[40 : 40 + frames].all()) is kept
+
+
+def test_consonant_gaps_inside_a_phrase_leave_no_unscored_stretch_but_a_breath_between_phrases_does():
+    """A phrase of four notes split by 0.15, 0.2 and 0.25 s consonants, then a 0.45 s breath, then one more note."""
+    notes, gaps = [(0.0, 0.4), (200.0, 0.4), (400.0, 0.4), (200.0, 0.4), (0.0, 0.5)], [15, 20, 25, 45]
+    parts = [reference_line([n]) for n in notes]
+    t, hz, conf, now = [], [], [], 0.0
+    for k, part in enumerate(parts):
+        t.append(now + part.t), hz.append(part.hz), conf.append(part.confidence)
+        now += float(part.t[-1]) + REF_HOP
+        if k < len(gaps):
+            g = gaps[k]
+            t.append(now + REF_HOP * np.arange(g)), hz.append(np.zeros(g)), conf.append(np.full(g, 0.02))
+            now += REF_HOP * g
+    line = ReferenceLine(*(np.concatenate(x).astype(np.float32) for x in (t, hz, conf)))
+    spans = Melody(line, "x").unscored_spans()
+    assert len(spans) == 1
+    assert spans[0][1] - spans[0][0] == pytest.approx(0.45, abs=REF_HOP)

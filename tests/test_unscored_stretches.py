@@ -39,11 +39,18 @@ def test_a_dip_of_a_few_frames_inside_a_sung_note_does_not_flicker_to_unscored()
     assert all(s.band is not None for s in scores if 0.2 < s.t < 2.8)
 
 
-def test_a_dip_that_lasts_a_quarter_second_is_an_unscored_stretch():
+def test_a_quarter_second_dip_is_bridged_and_scored():
+    """An s, t or breath inside a phrase (up to 0.3 s): bridged and scored, Simone's choice of 2026-11-25."""
     line = with_confidence(reference_line([(-900, 3.0)]), 1.5, 1.75, 0.05)
     scores = replay_scores(voice_following([(-900, 3.0)], 0.0), Melody(line, "x"))
-    assert all(s.band is None for s in scores if 1.55 < s.t < 1.70)
-    assert all(s.band is not None for s in scores if 0.2 < s.t < 1.4 or 1.9 < s.t < 2.8)
+    assert all(s.band is not None for s in scores if 0.2 < s.t < 2.8)
+
+
+def test_a_dip_that_lasts_0_4_seconds_is_an_unscored_stretch():
+    line = with_confidence(reference_line([(-900, 3.0)]), 1.5, 1.9, 0.05)
+    scores = replay_scores(voice_following([(-900, 3.0)], 0.0), Melody(line, "x"))
+    assert all(s.band is None for s in scores if 1.55 < s.t < 1.85)
+    assert all(s.band is not None for s in scores if 0.2 < s.t < 1.4 or 2.0 < s.t < 2.8)
 
 
 def test_a_brief_reliable_blip_inside_an_unreliable_region_stays_unscored():

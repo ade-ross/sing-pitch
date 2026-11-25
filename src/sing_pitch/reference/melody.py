@@ -16,7 +16,7 @@ _NOTES_CACHE: dict[tuple, list[Note]] = {}     # (song, line digest, Minimum not
 _NOTES_CACHE_MAX = 64
 
 MIN_CONFIDENCE = 0.3      # RMVPE activation below this = reference unreliable (04-rmvpe notes)
-FILL_GAP_S = 0.12         # a dip shorter than this between two reliable frames is a consonant, not a stretch
+FILL_GAP_S = 0.3          # a dip shorter than this between two reliable frames is an s, t or breath, not a stretch
 MIN_SCORED_S = 0.12       # a reliable run shorter than this is a blip: too short to judge a voice against
 INTERP_MAX_STEP = 1.0     # semitones: two neighbouring frames closer than this are read between (a glide, vibrato)
 

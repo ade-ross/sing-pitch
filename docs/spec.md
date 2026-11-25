@@ -181,8 +181,11 @@ he does not play guitar while using it.
   and cache path). History lists the Takes (newest first) with a Replay button and double-click; the main window then
   replays that Take with its saved Reference, song, Octave, Notes and Speed on the controls, and puts the controls back
   when the replay ends. Nothing is remembered or stretched by a replay; a missing song or a running Take says so.
-- **Unscored stretches:** reference frames with RMVPE confidence under 0.3, smoothed: dips shorter than 0.12 s between
-  reliable frames are filled, reliable runs shorter than 0.12 s are dropped. Greyed on the live and replay plot, left
+- **Unscored stretches:** reference frames with RMVPE confidence under 0.3, smoothed: dips shorter than 0.3 s between
+  reliable frames are filled and scored (an s, t or breath inside a phrase has no pitch: on TULIP these gaps have
+  confidence ~0 and their energy centred near 7 kHz; 0.12 s left 78 grey stripes inside sung phrases, 0.3 s leaves 19,
+  each 0.3-0.6 s long; Simone, 2026-11-25), reliable runs shorter than 0.12 s are dropped. Greyed on the
+  live and replay plot, left
   out of all five numbers and of Steadiness.
 - **Centred plot:** the now-line sits in the middle of the plot: the last 4 s on its left (the voice and the Reference),
   the next 4 s on its right (the Reference, its Guide lines and Unscored bands, never the voice). The right half is
