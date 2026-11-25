@@ -16,6 +16,7 @@ from sing_pitch.ui import MainWindow
 LONG_TITLE = "Ed Sheeran - Shape of You (Official Music Video) [Remastered 4K HD] feat. Someone Else"
 LONG_SECTION = "The very long Section name that nobody would ever type but a YouTube-length one might be"
 LONG_DEVICE = "Aggregate Device with a Very Long Name: Scarlett 18i20 USB Audio Interface (Input and Output 1-8)"
+WORD = "Y" * 400            # no spaces at all: a word-wrapped label would ask for its whole width (#66)
 LONG = "A very long message that goes on and on and on, much wider than any window could ever be " * 4
 NOTES = [(-900, 0.6), (-500, 0.6), (-200, 0.8)]
 
@@ -105,7 +106,7 @@ class Watch:
             self.first = now          # report each change once, not every step after it
 
 
-def walk(win, check):
+def walk(win, check, take_id=None):
     """Every state: `check(what)` is called after each one."""
     w = win
     sections = w.section_box
@@ -130,6 +131,11 @@ def walk(win, check):
     for ref in ("Key", "Nearest note", "Melody"):
         w.reference_box.setCurrentText(ref)
         check(f"Reference {ref} with an output warning")
+    for text in (LONG, WORD, "Output is " + WORD + ", which looks like speakers."):
+        w.output_label.setText(text)
+        w.output_label.setVisible(True), w.headphones_button.setVisible(True)
+        check(f"output note {text[:20]}")
+    w.update_output_warning()
     w.refresh_devices()
     check("Refresh")
     w.drone_box.setChecked(True)
@@ -215,7 +221,8 @@ def walk(win, check):
     w.loop_box.setChecked(False)
 
     # --- status messages ----------------------------------------------------------------------------------------------
-    for text in ("Press Start and sing.", "Singing...", LONG, "Jumped. Take saved: " + LONG, "", "x"):
+    for text in ("Press Start and sing.", "Singing...", LONG, WORD, "line1\nline2\nline3\nline4", "Jumped. Take saved: " + LONG,
+                 "Saved Section \"" + "Q" * 150 + "\".", "", "x"):
         w.summary_label.setText(text)
         check(f"status {text[:20]}")
     w.save_section_button.click()
@@ -248,3 +255,13 @@ def walk(win, check):
     w.history_window.hide()
     check("History hidden")
     w.history_window.close()
+    if take_id is not None:                      # replay: the Take's settings come on the controls and go again
+        w.reference_box.setCurrentText("Nearest note")
+        w.replay_take(take_id)
+        check("replay started")
+        w.tolerance_slider.setValue(60)
+        for _ in range(5):
+            w.tick()
+        check("replaying")
+        w.toggle_replay()
+        check("replay stopped")

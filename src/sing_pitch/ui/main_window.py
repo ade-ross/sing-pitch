@@ -59,6 +59,7 @@ SECTION_NAME_MIN_W = 90                          # the Section name field never 
 # minimum size (set by the rows) is not raised for it.
 DEFAULT_SIZE = (1000, 800)
 ROW_SPACING = 8
+JUMPED_MESSAGE_MS = 5000                         # how long "Jumped. Take saved: ..." stays: a new Take is running
 PLOT_MIN_H = 200                                 # the plot is never squeezed below this, even at the minimum window size
 SCREEN_MARGIN = (0, 60)                          # room the window frame and the menu bar / Dock take from the screen
 Y_VOICE_S = 2.0       # the voice's median over this many seconds decides where the vertical range sits
@@ -210,6 +211,11 @@ class MainWindow(QtWidgets.QWidget):
         self._speed_timer.setSingleShot(True)
         self._speed_timer.setInterval(SPEED_DEBOUNCE_MS)
         self._speed_timer.timeout.connect(self._prepare_speed)
+        self._jumped_text = ""                       # "Jumped. Take saved: ..." as said, until it has been on show a while
+        self._jumped_timer = QtCore.QTimer(self)
+        self._jumped_timer.setSingleShot(True)
+        self._jumped_timer.setInterval(JUMPED_MESSAGE_MS)
+        self._jumped_timer.timeout.connect(self._jumped_expired)
         self._tempo_finder = TempoFinder(tempo_detector, self)
         self._tempo_finder.done.connect(self._tempo_found)
         self._detected_bpm: float | None = None      # the chosen song's tempo.json (None = not known yet)
@@ -536,6 +542,18 @@ class MainWindow(QtWidgets.QWidget):
         room = screen.availableGeometry()
         return (min(DEFAULT_SIZE[0], room.width() - SCREEN_MARGIN[0]),
                 min(DEFAULT_SIZE[1], room.height() - SCREEN_MARGIN[1]))
+
+    def _say_jumped(self, text: str) -> None:
+        """A jump saved the Take before it; a new Take is running. Said for a few seconds, then the line says what is
+        true now: it must not outlive what it describes."""
+        self.summary_label.setText(text)
+        self._jumped_text = text
+        self._jumped_timer.start()
+
+    def _jumped_expired(self) -> None:
+        if self._jumped_text and self.summary_label.text() == self._jumped_text:    # not if something else was said
+            self.summary_label.setText("Singing..." if self._runner is not None else "")
+        self._jumped_text = ""
 
     def _describe_controls(self) -> None:
         """A tooltip on every control (the ones with a longer story to tell were given theirs where they are built)."""
@@ -2032,8 +2050,10 @@ class MainWindow(QtWidgets.QWidget):
                 self._stop()
                 return
             for record in self._runner.drain_saved():
-                self.summary_label.setText(pass_text(record) if record.pass_index is not None
-                                           else f"Jumped. Take saved: {describe(record)}")
+                if record.pass_index is not None:
+                    self.summary_label.setText(pass_text(record))
+                else:
+                    self._say_jumped(f"Jumped. Take saved: {describe(record)}")
                 if record.pass_index is not None and record.summary.n_scored:
                     self._last_pass_pct = record.summary.pct_in_tune
             b = self._backing
