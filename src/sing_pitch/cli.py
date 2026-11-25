@@ -79,7 +79,7 @@ def calibrate_main(argv: list[str], make_run=None, output_name: str | None = Non
         print(f"error: heard {result.matched} of 8 answers. Try again, louder, closer to the mic.", file=sys.stderr)
         return 1
     settings = Settings.load(home or config.data_dir())
-    settings.set_latency(output, result.latency_s)
+    settings.set_latency(output, result.latency_s, on_clocks=result.on_clocks)
     settings.save()
     print(f"{output}: {1000 * result.latency_s:.0f} ms ({result.matched}/8 answers, spread "
           f"{1000 * result.spread_s:.0f} ms). Saved as the default for Melody Takes.")

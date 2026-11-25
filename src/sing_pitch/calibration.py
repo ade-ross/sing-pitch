@@ -2,6 +2,7 @@
 from click to answer (on the same clocks a Melody Take uses) becomes the Take's latency offset. Pure numpy."""
 from __future__ import annotations
 
+import dataclasses
 from dataclasses import dataclass
 
 import numpy as np
@@ -33,6 +34,7 @@ class Calibration:
     latency_s: float | None     # None = not enough answers heard
     matched: int                # clicks with an answer
     spread_s: float             # median absolute deviation of the delays: how even the answers were
+    on_clocks: bool = False     # measured on the device timestamps: the DAC-to-ADC loop (Settings.latency_on_clocks)
 
 
 def _onsets(recording: np.ndarray, sample_rate: int) -> np.ndarray:
@@ -114,7 +116,8 @@ class CalibrationRun:
                 if log is not None:      # the same clock a Melody Take is aligned on, latency 0: a click's own time
                     devices = device_times(getattr(self._player, "output_times", None),
                                            getattr(self._source, "times", None))
-                    self._clock = LogClock(log, 0.0, log.rendered_s - end, devices, aligned_at_s=end)
+                    self._clock = LogClock(log, 0.0, log.rendered_s - end, devices, aligned_at_s=end,
+                                           loop_latency=True)
             elif self._clock is not None and not self._clock.aligned and log.rendered_s > 0:
                 self._song_at_zero = self._player.position_s() - end      # nothing was played at the first chunk
                 self._clock.realign(log.rendered_s - end, end)
@@ -132,12 +135,13 @@ class CalibrationRun:
         finally:
             self._player.stop()
         recording = np.concatenate(self._chunks) if self._chunks else np.zeros(0, np.float32)
-        # click times on the input clock; the delay found is the Take's loop latency. With device timestamps each click
-        # is placed where it was really heard (#49: a block lost during the clicks would otherwise add to the latency);
-        # without, by counting frames. With nothing lost both give the same number, so either is a Take's latency.
+        # click times on the input clock; the delay found is the Take's latency. With device timestamps each click is
+        # placed where it left the DAC (#49: a lost block cannot add to it; #62: nor can the phase of the first mic
+        # callback), so the number is the DAC-to-ADC loop (on_clocks). Without, by counting frames, as before #62.
         clicks = np.asarray(self.click_times, dtype=np.float64)
-        if self._clock is not None and self._clock.timed:
+        timed = self._clock is not None and self._clock.timed
+        if timed:    # each click where it left the DAC, on the input clock: the delay found is the pure loop (#62)
             on_input = np.array([self._clock.to_voice(c) for c in clicks])
         else:
             on_input = clicks - self._song_at_zero
-        return measure_latency(recording, self._sr, on_input)
+        return dataclasses.replace(measure_latency(recording, self._sr, on_input), on_clocks=timed)

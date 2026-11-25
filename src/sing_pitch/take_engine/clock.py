@@ -159,7 +159,7 @@ class StreamTimeline:
             self._append(stream_s, host_s)
             return
         tol = self.tolerance_s
-        jump = host_s - (self._h[n - 1] + stream_s - self._s[n - 1])
+        jump = float(host_s - (self._h[n - 1] + stream_s - self._s[n - 1]))
         if self._tentative is not None:          # this block decides the tentative anchor before it
             step, self._tentative = self._tentative, None
             if abs(jump) <= tol:                  # confirmed: the step lasts
@@ -170,7 +170,7 @@ class StreamTimeline:
                 return
             self._n = n = n - 1                   # retracted: it was a spike; judge this block by the old model
             self.spikes += 1
-            jump = host_s - (self._h[n - 1] + stream_s - self._s[n - 1])
+            jump = float(host_s - (self._h[n - 1] + stream_s - self._s[n - 1]))
         self._residual(jump)
         if abs(jump) <= tol:
             self._pending = None

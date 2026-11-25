@@ -1600,11 +1600,12 @@ class MainWindow(QtWidgets.QWidget):
         except Exception as exc:
             self.summary_label.setText(f"Cannot start: {exc}")
             return
-        backing, latency = None, 0.0
+        backing, latency, loop_latency = None, 0.0, False
         try:
             if reference.kind == "melody":
                 output, _ = self._current_output()
                 latency = self._settings.latency_for(output)
+                loop_latency = self._settings.is_loop_latency(output)
                 percent = self.speed_box.value()
                 stems = None if percent == 100 else self._stems_for_start(reference.song_id, percent)
                 if percent != 100 and stems is None:          # starts by itself once ready (QA #32)
@@ -1621,7 +1622,8 @@ class MainWindow(QtWidgets.QWidget):
                 self._speed_playing = percent
             config = self._score_config()
             self._runner = LiveRunner(self._input_factory(index), self._tracker, reference, self._home,
-                                      backing=backing, latency_s=latency, octave=self._octave_setting(), config=config)
+                                      backing=backing, latency_s=latency, octave=self._octave_setting(), config=config,
+                                      loop_latency=loop_latency)
             self._runner.start()
         except Exception as exc:
             self._runner = None
@@ -1646,6 +1648,9 @@ class MainWindow(QtWidgets.QWidget):
         self.summary_label.setText("Singing...")
         if reference.kind == "melody" and not self._settings.is_calibrated(self._current_output()[0]):
             self.summary_label.setText(f"Singing... (latency not calibrated for this output: using {latency:.2f} s)")
+        elif reference.kind == "melody" and self._settings.needs_recalibration(self._current_output()[0]):
+            self.summary_label.setText("Singing... (this output's latency was calibrated before the sync fix: "
+                                       "Calibrate latency once more for exact sync)")
         if reference.kind == "key" and self.drone_box.isChecked():
             try:
                 self._drone = self._drone_factory(**self._output_kwargs())
@@ -1744,7 +1749,7 @@ class MainWindow(QtWidgets.QWidget):
         if result.latency_s is None:
             self.summary_label.setText(f"Calibration failed: heard {result.matched} of 8 answers. Try again, louder.")
             return
-        self._settings.set_latency(output, result.latency_s)
+        self._settings.set_latency(output, result.latency_s, on_clocks=result.on_clocks)
         self._settings.save()
         self.summary_label.setText(
             f"Latency for {output or DEFAULT_OUTPUT}: {1000 * result.latency_s:.0f} ms "
