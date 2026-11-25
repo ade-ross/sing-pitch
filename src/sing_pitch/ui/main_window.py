@@ -1881,7 +1881,7 @@ class MainWindow(QtWidgets.QWidget):
                 return song
             song_end, rate = backing.position_s(), getattr(backing, "speed", 1.0)
         x_end = fold.to_view(x_end)                      # paused: the fold the pause stands at
-        ahead = x >= x_end
+        ahead = x >= x_end - 1e-6                        # at a pause's fold both sides are the fold, give or take rounding
         duration = getattr(backing, "duration_s", None)
         loop = getattr(backing, "loop", None)
         loop_end = None if loop is None else min(loop.end_s, duration if duration is not None else loop.end_s)
