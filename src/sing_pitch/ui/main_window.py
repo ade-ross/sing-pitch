@@ -63,6 +63,7 @@ UNSCORED_COLOUR = "#8a8a8a"   # sung where the Reference has nothing reliable: s
 BRUSH = {b: pg.mkBrush(c) for b, c in BAND_COLOUR.items()}
 BRUSH[None] = pg.mkBrush(UNSCORED_COLOUR)
 UNSCORED_SPAN_BRUSH = pg.mkBrush(138, 138, 138, 70)   # Unscored stretch of the Melody, greyed on the plot
+TOLERANCE_BAND_BRUSH = pg.mkBrush(93, 173, 226, 70)   # the Tolerance around the blue line: the same blue, see-through
 REFERENCE_PEN = pg.mkPen("#5dade2", width=4)
 VERDICT_PEN = {b: pg.mkPen(c, width=4) for b, c in BAND_COLOUR.items()}   # Notes mode: a bar whose note has its verdict
 GUIDE_PEN = pg.mkPen(93, 173, 226, 150, width=2)    # the Reference an octave above and below: clear, but fainter and thinner than the blue line
@@ -203,6 +204,8 @@ class MainWindow(QtWidgets.QWidget):
         self._y_drawn = 60.0
         self._y_ticks_from: tuple[int, int] | None = None
         self._ahead = np.empty(0)                    # MIDI of the Reference coming in the right half, as drawn
+        self._band_line: tuple[np.ndarray, np.ndarray] | None = None   # (x, MIDI) the Tolerance band is drawn around
+        self._replay_tolerance: float | None = None  # a replay's: the Tolerance its Take was saved with (else the slider's)
         self._note_tally: NoteTally | None = None   # Notes mode per note: the running Take's (or replay's) notes
         self._verdicts: dict[int, Band] = {}        # ...and the verdict of each note that has ended
         self._verdicts_since = -math.inf            # voice time the running Take (this Pass) began: verdicts apply after
@@ -404,6 +407,11 @@ class MainWindow(QtWidgets.QWidget):
         self._unscored = pg.BarGraphItem(x0=[], x1=[], y0=[], y1=[], brush=UNSCORED_SPAN_BRUSH, pen=None)
         self._unscored.setZValue(-5)
         plot.addItem(self._unscored)
+        self._tolerance_band = QtWidgets.QGraphicsPathItem()    # one path for the whole band, under the lines and dots
+        self._tolerance_band.setPen(pg.mkPen(93, 173, 226, 120, width=1))
+        self._tolerance_band.setBrush(TOLERANCE_BAND_BRUSH)
+        self._tolerance_band.setZValue(-4)
+        plot.addItem(self._tolerance_band, ignoreBounds=True)
         self._guide_curves = [plot.plot(pen=GUIDE_PEN, connect="finite") for _ in (12, -12)]   # Guide lines
         self._ref_curve = plot.plot(pen=REFERENCE_PEN, connect="finite")
         self._verdict_curves = {b: plot.plot(pen=pen, connect="finite") for b, pen in VERDICT_PEN.items()}
@@ -530,6 +538,7 @@ class MainWindow(QtWidgets.QWidget):
         self.tolerance_label.setText(f"±{cents} c")
         self._settings.tolerance_cents = cents
         self._settings.save()
+        self._draw_band()
 
     def _score_config(self) -> ScoreConfig:
         """How the next Take is scored: the Tolerance set (and the default Timing window)."""
@@ -1315,6 +1324,7 @@ class MainWindow(QtWidgets.QWidget):
         for w, _ in self._replay_locked:          # what the replay shows cannot be changed meanwhile
             w.setEnabled(False)
         self._replay, self._replay_clock, self._replay_take_id = replay, replay_clock, take_id
+        self._replay_tolerance = config.green_cents
         self._replay_started = time.monotonic()
         self._show_melody(reference, latency, octave_k)
         self._start_note_tally(reference, config)
@@ -1393,7 +1403,8 @@ class MainWindow(QtWidgets.QWidget):
         finished." beside them when it ran out."""
         self._timer.stop()
         numbers = self._take_numbers(self._replay_take_id)
-        self._replay = self._replay_clock = self._replay_take_id = None
+        self._replay = self._replay_clock = self._replay_take_id = self._replay_tolerance = None
+        self._draw_band()
         if self._visited is not None:
             self._show_settings(self._visited)                    # the controls as they were before the replay
             self._visited = None
@@ -1442,6 +1453,8 @@ class MainWindow(QtWidgets.QWidget):
             curve.setData([], [])
         self._show_labels([])
         self._unscored.setOpts(x0=[], x1=[], y0=[], y1=[])
+        self._band_line = None
+        self._draw_band()
         self.timeline.set_melody(self._melody, getattr(self._backing, "duration_s", None))
         self.timeline.setVisible(self._melody is not None)
         if self._melody is not None:
@@ -1749,10 +1762,30 @@ class MainWindow(QtWidgets.QWidget):
         self._ahead = (midi + shift)[coming]
         for curve, d in zip(self._guide_curves, (12, -12)):
             curve.setData(x, guide + shift + d)
+        self._band_line = (x, guide + shift)             # the band covers every bar, judged or not, and no Guide line
+        self._draw_band()
         edges = np.flatnonzero(np.diff(np.concatenate([[0], unscored.astype(np.int8), [0]])))
         starts, ends = edges[::2], edges[1::2]
         self._unscored.setOpts(x0=x[starts], x1=x[ends - 1] + DRAW_STEP_S, y0=[0.0] * len(starts),
                                y1=[127.0] * len(starts))
+
+    def _draw_band(self) -> None:
+        """The Tolerance as a soft band: exactly +- the Tolerance (cents, a hundredth of a semitone each) around the
+        blue line as last drawn, as ONE path with a closed piece per unbroken stretch of the line (so it breaks where
+        the line does: Unscored stretches, gaps between bars). A replay shows its Take's Tolerance, else the slider's."""
+        path = QtGui.QPainterPath()
+        if self._band_line is not None:
+            x, y = self._band_line
+            half = (self.tolerance_slider.value() if self._replay_tolerance is None else self._replay_tolerance) / 100
+            edges = np.flatnonzero(np.diff(np.concatenate([[0], np.isfinite(y).astype(np.int8), [0]])))
+            xs, ys, gap = [], [], np.array([np.nan])
+            for a, b in zip(edges[::2], edges[1::2]):
+                if b - a > 1:                            # one sample has no width
+                    xs += [x[a:b], x[a:b][::-1], gap]    # the upper edge there, then the lower edge back
+                    ys += [y[a:b] + half, y[a:b][::-1] - half, gap]
+            if xs:
+                path = pg.functions.arrayToQPath(np.concatenate(xs), np.concatenate(ys), connect="finite")
+        self._tolerance_band.setPath(path)
 
     def _note_bars(self, x: np.ndarray, song: np.ndarray, midi: np.ndarray, octaves: np.ndarray,
                    shift: np.ndarray) -> np.ndarray:

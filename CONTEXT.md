@@ -79,6 +79,7 @@ _Avoid_: zone, tolerance
 
 **Tolerance**:
 How far from the target pitch still counts as in tune, set by Simone (±10 to ±100 cents, default ±25); it sets the green Band, and yellow reaches twice the Tolerance.
+The plot shows it as a soft band of the Melody's blue around the Melody line (and the note bars), broken where the line is, with no band on the Guide lines; it grows and shrinks with the slider, and a replay shows the Tolerance its Take was saved with.
 _Avoid_: range, threshold, leniency
 
 **Timing window**:
