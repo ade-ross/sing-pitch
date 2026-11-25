@@ -80,12 +80,15 @@ def _install_probe():
     def counting_step(self) -> None:                 # hub thread
         frame = self._frame
         _Probe.max_streams = max(_Probe.max_streams, len(self._outputs))
+        asked = {id(p): not p.transport.playing for ref in _Probe.players if (p := ref()) is not None}
         step(self)
         peak = 0.0
         if self._recording:
             peak = float(np.abs(self._recording[-1]).max())
             self._recording.clear()                  # only the peak is kept: a long run would fill the memory
-        live = tuple((not p.transport.playing, p.position_s(), p.loop is not None)
+        # paused = asked to pause before this step AND still after it: a Space pressed during the step is a resume or
+        # a pause that may or may not have been seen by the block rendered in it
+        live = tuple((asked.get(id(p), False) and not p.transport.playing, p.position_s(), p.loop is not None)
                      for ref in _Probe.players if (p := ref()) is not None and p._stream is not None)
         _Probe.rows.append((frame, peak, len(self._outputs), live))
 
