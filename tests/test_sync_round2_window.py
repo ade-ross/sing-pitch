@@ -165,3 +165,22 @@ def test_a_clean_run_has_no_dropout_note(tmp_path):
         qa.wait(2.0)
         qa.stop_take()
         assert "dropout" not in qa.summary()
+
+
+def test_a_jump_followed_by_mic_losses_files_every_frame_under_the_right_take(tmp_path):
+    """#63 end to end: the routing on host time files every frame under its Take with mic chunks lost around a jump.
+    A guard, not a proof: in this fake a loss rarely falls inside the latency between the jump and its answer, so the
+    old cut passed it too; test_stamps_round2 holds the exact case (the #61 review's) that the old cut fails."""
+    from sing_pitch.take_store import saved_song_times
+
+    with window(tmp_path, "overflow=0.15:40", repeats=5) as qa:
+        qa.start_take()
+        qa.wait(7.0)
+        qa.seek(10.0)
+        qa.wait(6.5)
+        qa.stop_take()
+        rows = qa.takes()
+    assert len(rows) == 2
+    old = [s for s in saved_song_times(tmp_path, rows[0]["id"]) if s is not None]
+    new = [s for s in saved_song_times(tmp_path, rows[1]["id"]) if s is not None]
+    assert max(old) < 7.5 and min(new) >= 10.0 - 1e-6

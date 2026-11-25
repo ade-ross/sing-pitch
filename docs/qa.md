@@ -43,6 +43,16 @@ hardware:
 | real-time deadlines | `deadline=OUT_MS:IN_MS` | when the hub thread runs late (the GIL held elsewhere), an output step more than OUT_MS late is lost (underflow), a mic step more than IN_MS late too (overflow); without it the hub just catches up |
 | UI stall | `ui_stall=EVERY_S:MS[:sleep]` | the UI thread is blocked MS (wall clock) every EVERY_S app seconds, holding the GIL (default: like a slow C++ paint) or sleeping |
 
+Device shapes (#62, #63 review), off by default:
+
+| shape | spec | what the fake does |
+| --- | --- | --- |
+| render ahead | `render=AHEAD_MS` | the output renders whole blocks of its blocksize (1024 for the Backing) and keeps AHEAD_MS rendered ahead of what plays, like a real device; without it the fake renders one step just in time and the render frontier at the first mic chunk is always exactly what plays |
+| mic start phase | `mic_phase=1` | every mic start hears its first chunk 0-3 steps late, at random: with `render`, each Take meets the output's blocks at another phase |
+| late first chunks | `mic_late=MS` | the mic's first chunks reach the app MS late, in one burst, with true stamps |
+| stamp jitter | `jitter=OUT_US:IN_US` | Gaussian noise (SD) on the reported DAC / ADC stamps only |
+| reported latency step | `latency_step=AT_S:MS` | from AT_S after the output started its reported DAC stamps are MS later (negative: earlier); the audio is unchanged |
+
 Join them with commas: `--fake-faults "deadline=20:60,ui_stall=1:150"` is the realistic one, a GIL hog that makes
 both sides lose blocks by different amounts. `QA(home, faults="underflow=0.5:40")` (or a `testmode.Faults`) does the
 same in a script; `qa.hub.lost_out_steps` / `lost_in_steps` count what the faults cost.
@@ -92,6 +102,9 @@ with QA(home, mic="songs/x/vocals.wav", time_scale=1.0) as qa:   # mic="echo" is
   `running`.
 - State: `song_position()`, `summary()`, `takes()` (takes.csv rows), `plot_data()` (voice line, reference line,
   now-line, x range), `screenshot(path)`.
+- Audio health: every Stop appends a row to `<home>/audio_health.csv` (`sing_pitch.audio_health`): lost output blocks
+  and mic chunks with their time, steps back and spikes of the stamps, anchors, stamp jitter p50/p99 (20 us bins),
+  block sizes, device names, reported latencies, tick p50/p99, window size changes. `audio_health.read(home)` reads it.
 - Sync: `display_error_s()` = song time under the centre line minus song time heard at that moment (the fake output's
   own record of what it played when, one output latency ago), measured right after a redraw; `glitches()` = lost
   output blocks and mic chunks as the window's clocks saw them, and what the fake really lost.
