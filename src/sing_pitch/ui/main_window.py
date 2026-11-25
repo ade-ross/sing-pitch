@@ -264,6 +264,7 @@ class MainWindow(QtWidgets.QWidget):
         self._melody_latency = 0.0
         self._replay_clock: SongClock | None = None  # the replayed Take's own song times, for drawing the reference
         self._unpaused_text = "Singing..."           # what the status line said before the pause text replaced it
+        self._speed_hint = ""                        # the "70 % from the next Pass" text on show, if any
         self._hint_under = ""                        # ... and before the text-field hint did
         self._replay_paused_at: float | None = None  # monotonic time a replay was paused at (None = running)
         self._runner: LiveRunner | None = None
@@ -1090,6 +1091,22 @@ class MainWindow(QtWidgets.QWidget):
             self.summary_label.setText(PAUSED_TEXT)
         elif not paused and shown == PAUSED_TEXT:
             self.summary_label.setText(self._unpaused_text)
+
+    def _show_speed_hint(self) -> None:
+        """In a loop a Speed change applies from the next Pass: until then the box says the new Speed while the old one
+        plays, so the label says "70 % from the next Pass"."""
+        backing, hint = self._backing, ""
+        playing = getattr(backing, "speed_playing", None)
+        if playing is not None and getattr(backing, "loop", None) is not None:
+            asked = round(100 * backing.speed)
+            if asked != round(100 * playing):
+                hint = f"{asked} % from the next Pass"
+        shown = self.speed_label.text()
+        if hint and shown in ("", self._speed_hint):
+            self.speed_label.setText(hint)
+        elif not hint and shown == self._speed_hint:
+            self.speed_label.setText("")
+        self._speed_hint = hint
 
     def _leave_text_fields(self) -> None:
         """Keyboard focus out of any text field: from here on Space and the arrows belong to the song."""
@@ -2078,6 +2095,7 @@ class MainWindow(QtWidgets.QWidget):
             self.timeline.set_playhead(self._backing.position_s())
             self._show_loop()
             self._show_pause()
+            self._show_speed_hint()
         if not self._t:
             return
         fold = self._fold()

@@ -104,6 +104,11 @@ class BackingPlayer:
     def speed(self) -> float:
         return 1.0 if self._stretched is None else self._stretched[0]
 
+    @property
+    def speed_playing(self) -> float:
+        """The Speed of the block rendered last: differs from `speed` (asked) until a loop's next Pass applies it."""
+        return self._transport.speed
+
     def set_loop(self, loop: Loop | None) -> None:
         """Loop a Section (transport.Loop) from the next block, starting at its Lead-in; None stops looping. Stays for
         the next start(). Pass events go to on_event. Any thread."""
