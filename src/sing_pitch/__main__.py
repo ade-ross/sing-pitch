@@ -20,8 +20,10 @@ def main(argv: list[str] | None = None) -> int:
 
     from .pitch.swiftf0 import SwiftF0Tracker
     from .ui import MainWindow
+    from .ui.app_icon import app_icon
 
     app = QtWidgets.QApplication.instance() or QtWidgets.QApplication(sys.argv)
+    app.setWindowIcon(app_icon())          # the Dock icon on macOS
     hub, kwargs = None, {}
     if flags.any:                  # test mode: fake mic and/or null output (docs/qa.md)
         from .config import data_dir
