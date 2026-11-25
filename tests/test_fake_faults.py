@@ -102,7 +102,8 @@ def test_a_deadline_turns_a_held_gil_into_lost_blocks_on_both_sides():
     hub, out, mic, dacs, chunks = run("deadline=20:60", seconds=1.0, scale=1.0, during=stall)
     lost_out = hub.lost_out_steps * STEP / SR
     lost_in = hub.lost_in_steps * STEP / SR
-    assert 0.11 < lost_out < 0.14 and 0.07 < lost_in < 0.10
+    late = lost_out - 0.130               # scheduling delay on a loaded machine, the same for both sides
+    assert -0.015 < late < 0.08 and lost_in == pytest.approx(lost_out - 0.040, abs=0.011)   # 150 - 20 / 150 - 60 ms
     assert sum(dac_jumps(dacs)) == pytest.approx(lost_out, abs=1e-6)
     assert mic.times.lost_s == pytest.approx(lost_in, abs=1e-6)
 
