@@ -12,6 +12,7 @@ from sing_pitch.audio_input import ArrayInput
 from sing_pitch.pitch.swiftf0 import SwiftF0Tracker
 from sing_pitch.playback.outputs import output_devices
 from sing_pitch.ui import MainWindow
+from sing_pitch.ui.main_window import FIELD_HINT, PAUSED_TEXT
 
 LONG_TITLE = "Ed Sheeran - Shape of You (Official Music Video) [Remastered 4K HD] feat. Someone Else"
 LONG_SECTION = "The very long Section name that nobody would ever type but a YouTube-length one might be"
@@ -176,6 +177,10 @@ def walk(win, check, take_id=None):
     for b in (w.speed_70_button, w.speed_85_button, w.speed_100_button):
         b.click()
         check(f"preset {b.text()}")
+    for text in ("85 % from the next Pass", "100 % from the next Pass", "preparing 100 % … 100 % from the next Pass"):
+        w.speed_label.setText(text)                      # in a loop the label says so while the old Speed plays (#72)
+        check(f"speed message {text[:25]}")
+    w.speed_label.setText("")
 
     # --- Sections: marks, names, collisions, loop, Count-in -----------------------------------------------------
     w.timeline.section_marked.emit(0.2, 0.9)
@@ -221,7 +226,7 @@ def walk(win, check, take_id=None):
     w.loop_box.setChecked(False)
 
     # --- status messages ----------------------------------------------------------------------------------------------
-    for text in ("Press Start and sing.", "Singing...", LONG, WORD, "line1\nline2\nline3\nline4", "Jumped. Take saved: " + LONG,
+    for text in ("Press Start and sing.", "Singing...", PAUSED_TEXT, FIELD_HINT, LONG, WORD, "line1\nline2\nline3\nline4", "Jumped. Take saved: " + LONG,
                  "Saved Section \"" + "Q" * 150 + "\".", "", "x"):
         w.summary_label.setText(text)
         check(f"status {text[:20]}")
@@ -235,19 +240,58 @@ def walk(win, check, take_id=None):
     check("calibration running")
     w.finish_calibration()
     check("calibration finished")
+    # --- the Melody and Tolerance band previewed before Start (#71): every control that redraws it ---------------
     w.reference_box.setCurrentText("Melody")
+    check("preview: Melody")
+    w.timeline.section_marked.emit(0.3, 1.2)
+    check("preview: Section marked")
+    for v in (10, 50, 100):
+        w.tolerance_slider.setValue(v)
+        check(f"preview: Tolerance {v}")
+    for k in range(w.octave_box.count()):
+        w.octave_box.setCurrentIndex(k)
+        check(f"preview: Octave {w.octave_box.currentText()}")
+    for notes in (False, True):
+        w.notes_box.setChecked(notes)
+        check(f"preview: Notes {notes}")
+    for i in range(w.song_box.count()):
+        w.song_box.setCurrentIndex(i)
+        check(f"preview: song {i}")
+    w.clear_section()
+    check("preview: Section cleared")
+    w._set_start_waiting(True)                           # a Start waiting for its Speed says "Cancel start" (#72)
+    check("Start waiting: Cancel start")
+    w._set_start_waiting(False)
+    check("Start no longer waiting")
     w.toggle()
     check("Start (Melody)")
     for _ in range(5):
         w.tick()
         QtWidgets.QApplication.processEvents()
     check("Take running")
+    w.tolerance_slider.setValue(30)
+    check("Tolerance moved mid-Take")
+    w.section_name_edit.setFocus()
+    w.field_focus_changed(w.section_name_edit, True)     # brown field and the hint on the status line (#72)
+    check("text field focused mid-Take: brown hint")
+    w.tick()
+    check("hint, tick")
+    w.field_focus_changed(w.section_name_edit, False)
+    w.section_name_edit.clearFocus()
+    check("text field left")
     w.toggle_pause()
     check("Pause")
+    w.section_name_edit.setText(LONG_SECTION)
+    w.field_focus_changed(w.section_name_edit, True)
+    check("hint while paused")
+    w.field_focus_changed(w.section_name_edit, False)
+    w.section_name_edit.setText("")
     w.toggle_pause()
     check("Play")
     w.toggle()
     check("Stop")
+    w.tolerance_slider.setValue(70)
+    check("Tolerance after Stop: the preview replaces the Take's plot")
     w.open_history()
     check("History opened")
     w.history_window.reload()
