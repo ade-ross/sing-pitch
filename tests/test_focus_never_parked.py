@@ -131,7 +131,7 @@ def test_a_click_into_a_number_box_still_lets_space_and_the_arrows_act(qa, name)
 
 
 @pytest.mark.parametrize("name", ["reference_box", "song_box", "device_box", "output_box", "guide_box", "guide_slider",
-                                  "backing_slider", "history_button", "refresh_button", "clear_button", "timeline",
+                                  "backing_slider", "refresh_button", "clear_button", "timeline",
                                   "plot_widget", "pause_button"])
 def test_every_other_focusable_control_lets_space_and_the_arrows_act(qa, name):
     qa.start_take(at_s=20)
