@@ -394,6 +394,37 @@ class LiveRunner:
         clock = self.song_clock
         return clock.drawn() if isinstance(clock, LogClock) else clock
 
+    # --- for the audio health record (audio_health.py) ------------------------------------------------------------
+    @property
+    def saved(self) -> list[TakeRecord]:
+        """Takes saved so far in this run."""
+        return list(self._saved)
+
+    @property
+    def loop_latency(self) -> bool:
+        return self._loop_latency
+
+    @property
+    def calibrated_latency_s(self) -> float:
+        return self._latency_s
+
+    @property
+    def output_times(self):
+        return getattr(self._backing, "output_times", None)
+
+    @property
+    def input_times(self):
+        return getattr(self._source, "times", None)
+
+    @property
+    def output_latency_s(self) -> float | None:
+        return getattr(self._backing, "reported_latency_s", None)
+
+    @property
+    def input_latency_s(self) -> float | None:
+        value = getattr(self._source, "latency_s", None)
+        return None if value is None else float(value)
+
     @property
     def glitches(self) -> tuple[int, int]:
         """(lost output blocks, lost mic chunks) the device timestamps showed so far in this run (0, 0 untimed)."""

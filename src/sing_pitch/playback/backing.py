@@ -63,6 +63,7 @@ class BackingPlayer:
         self._transport = self._new_transport()
         self._stream = None
         self.output_times = StreamTimeline()    # DAC time of the rendered frames (see start)
+        self.reported_latency_s: float | None = None
         self.on_event: Callable[[TransportEvent], None] | None = None   # runs in the audio callback: only hand over
 
     def _new_transport(self) -> Transport:
@@ -179,7 +180,7 @@ class BackingPlayer:
                     times.flagged += 1
                 dac = time_info.outputBufferDacTime if time_info is not None else 0.0
                 if dac > 0:                # 0: the driver had no timestamp for this block
-                    times.add(log.rendered_s, dac)
+                    times.add(log.rendered_s, dac, frames)
             block = transport.render(frames)
             outdata[:] = block.audio
             if block.events and self.on_event is not None:
@@ -193,6 +194,8 @@ class BackingPlayer:
         times = self.output_times = StreamTimeline(getattr(stream, "clock", PORTAUDIO))
         self._stream = stream
         stream.start()
+        latency = getattr(stream, "latency", None)      # what the driver reports (the health record)
+        self.reported_latency_s = float(latency) if isinstance(latency, (int, float)) else None
 
     def stop(self) -> None:
         """Silence: the stream is stopped and closed whatever the device does. A device that fails to stop (earbuds

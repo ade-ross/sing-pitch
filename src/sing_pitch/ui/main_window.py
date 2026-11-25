@@ -15,6 +15,8 @@ from ..audio_input import AudioInput, SoundDeviceInput, list_inputs, pick_input
 from ..config import SAMPLE_RATE, TOLERANCE_RANGE, TOLERANCE_STEP, ScoreConfig, data_dir
 from ..calibration import CalibrationRun
 from ..library import Library, PlayerSettings, player_settings
+from .. import audio_health
+from ..audio_health import dropout_note
 from ..live import LiveRunner, Playback
 from ..music import NOTE_NAMES, note_name
 from ..pitch import PitchTracker
@@ -44,6 +46,7 @@ from .tempo_find import TempoFinder
 PAST_S = 4.0          # the plot is centred on now: this much of the voice and the Reference behind the now-line...
 FUTURE_S = 4.0        # ...and this much of the Reference ahead of it
 TICK_MS = 33          # ~30 Hz redraw
+PLAYHEAD_HOLD_S = 0.15  # after a click on the Timeline the playhead stays there this long past the latency (heard)
 SPEED_MIN, SPEED_MAX, SPEED_STEP = 50, 120, 5     # Speed in percent of the original
 REFERENCE_TEXT = {"nearest": "Nearest note", "key": "Key", "melody": "Melody"}    # reference.kind -> the box's text
 SPEED_PRESETS = (70, 85, 100)    # the buttons beside the Speed box
@@ -189,6 +192,8 @@ class MainWindow(QtWidgets.QWidget):
         self._drone: DronePlayer | None = None
         self._backing_factory = backing_factory
         self._backing: Playback | None = None
+        self._playhead_hold = (0.0, 0.0)               # (song time, monotonic until): see _playhead_heard
+        self._health_ui = audio_health.UiStats()     # tick times and size changes of the running Take
         self._output_info = output_info                  # the system default output: (name, kind)
         self._input_devices, self._output_devices, self._output_kind_of = input_devices, output_devices, output_kind_of
         self._calibration_player_factory = calibration_player_factory
@@ -699,6 +704,8 @@ class MainWindow(QtWidgets.QWidget):
         if not inside:                                 # Pass starts there
             self._set_loop_box(False)
         self.timeline.set_playhead(song_s)
+        latency = getattr(self._runner, "_latency_s", 0.0) if self._runner is not None else 0.0
+        self._playhead_hold = (float(song_s), time.monotonic() + latency + PLAYHEAD_HOLD_S)
         self._show_loop()
 
     # --- Sections and the loop ---------------------------------------------------------------------------------
@@ -1658,6 +1665,7 @@ class MainWindow(QtWidgets.QWidget):
             except Exception as exc:  # the Take goes on without the Drone
                 self._drone = None
                 self.summary_label.setText(f"Singing... (Drone unavailable: {exc})")
+        self._health_ui = audio_health.UiStats()
         self._timer.start(TICK_MS)
 
     def _stop(self) -> None:
@@ -1673,6 +1681,7 @@ class MainWindow(QtWidgets.QWidget):
             record, error = None, str(exc)    # the text, not exc: a local holding it is a cycle via its traceback
         self._backing = None
         dropped = getattr(self._runner, "dropped", None)
+        dropouts = self._write_health(record, error)
         self._runner = None
         self._show_loop()
         self.pause_button.setEnabled(False)
@@ -1686,8 +1695,26 @@ class MainWindow(QtWidgets.QWidget):
         self.tolerance_slider.setEnabled(True)
         self._reference_changed()
         self.replay_button.setEnabled(True)
-        self.summary_label.setText(stop_text(None if record is dropped else record, dropped) if record
-                                   else f"The Take failed: {error}")
+        self.summary_label.setText((stop_text(None if record is dropped else record, dropped) if record
+                                    else f"The Take failed: {error}") + dropout_note(dropouts))
+
+    def _write_health(self, record, error) -> int:
+        """Append the run's audio health record to <home>/audio_health.csv; returns its audio dropouts (lost output
+        blocks + lost mic chunks). Never stops a Stop."""
+        runner = self._runner
+        if runner is None:
+            return 0
+        try:
+            output, _ = self._current_output()
+            row = audio_health.row(runner, self._health_ui, input_name=self.device_box.currentText(),
+                                   output_name=output or DEFAULT_OUTPUT,
+                                   take_ids=[r.id for r in runner.saved] + ([] if record is None or
+                                                                           record is runner.dropped else [record.id]),
+                                   error=error)
+            audio_health.append(self._home, row)
+            return int(row["lost_out_blocks"] or 0) + int(row["lost_in_chunks"] or 0)
+        except Exception:
+            return 0
 
     def ingest(self, scores: list[FrameScore]) -> None:
         fold = self._fold()
@@ -1973,7 +2000,26 @@ class MainWindow(QtWidgets.QWidget):
             if item.isVisible():
                 item.setVisible(False)
 
+    def _playhead_heard(self, now: float, fold: PauseFold) -> None:
+        """The Timeline playhead on the song heard, the one under the now-line (not the rendered position, ahead by the
+        output latency). Paused, that is where the player stands, so both stand still on one song time. Right after a
+        click on the Timeline it stays on the click until the jump is heard (no step back and forth)."""
+        target, until = self._playhead_hold
+        if time.monotonic() < until:
+            self.timeline.set_playhead(target)
+            return
+        song = float(self._song_times(np.array([now]), fold)[0])
+        if np.isfinite(song):
+            self.timeline.set_playhead(song)
+
+    def _health_tick(self, started: float) -> None:
+        """Tick duration and window size changes for the audio health record (audio_health.py)."""
+        if self._runner is None:
+            return
+        self._health_ui.tick(time.perf_counter() - started, (self.width(), self.height()))
+
     def tick(self, drain_only: bool = False) -> None:
+        tick_started = time.perf_counter()
         if self._runner is not None:
             try:
                 scores = self._runner.drain()
@@ -2001,9 +2047,10 @@ class MainWindow(QtWidgets.QWidget):
             if song_s is not None:
                 self.timeline.set_playhead(song_s)
         if self._backing is not None and not drain_only:
-            self.timeline.set_playhead(self._backing.position_s())
+            self.timeline.set_playhead(self._backing.position_s())     # until a song is heard (just below)
             self._show_loop()
             self._show_pause()
+        self._health_tick(tick_started)
         if not self._t:
             return
         fold = self._fold()
@@ -2017,6 +2064,8 @@ class MainWindow(QtWidgets.QWidget):
                            size=[11 if o else 6 for o in out])
         now = fold.to_view(self._now_voice())
         self._set_now(now)
+        if self._backing is not None and not drain_only:
+            self._playhead_heard(now, fold)
         self._close_notes(fold)
         self._draw_melody(now)
         self._follow_y()
