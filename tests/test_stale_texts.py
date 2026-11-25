@@ -88,3 +88,20 @@ def test_the_tempo_note_goes_when_the_reference_is_not_melody(qtbot, tmp_path):
     assert win.tempo_label.text() == ""
     win.reference_box.setCurrentText("Nearest note")
     assert win.tempo_label.text() == ""
+
+
+def test_the_jumped_message_goes_after_a_few_seconds_and_the_line_says_what_is_true_now(qtbot, tmp_path):
+    win, _ = section_window(qtbot, tmp_path)
+    win._jumped_timer.setInterval(30)
+    win._say_jumped("Jumped. Take saved: something")
+    assert win.summary_label.text() == "Jumped. Take saved: something"
+    qtbot.waitUntil(lambda: win.summary_label.text() == "", timeout=2000)
+
+
+def test_a_jumped_message_that_was_replaced_is_left_alone(qtbot, tmp_path):
+    win, _ = section_window(qtbot, tmp_path)
+    win._jumped_timer.setInterval(30)
+    win._say_jumped("Jumped. Take saved: something")
+    win.summary_label.setText("Pass 2 of X: In tune 80%")
+    qtbot.wait(150)
+    assert win.summary_label.text() == "Pass 2 of X: In tune 80%"

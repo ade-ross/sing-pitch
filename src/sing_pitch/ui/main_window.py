@@ -59,6 +59,10 @@ SECTION_NAME_MIN_W = 90                          # the Section name field never 
 # First-launch size: on the macOS style the five control rows take about 270 px, so 620 left the plot about 150 px; the
 # minimum size (set by the rows) is not raised for it.
 DEFAULT_SIZE = (1000, 800)
+ROW_SPACING = 8
+JUMPED_MESSAGE_MS = 5000                         # how long "Jumped. Take saved: ..." stays: a new Take is running
+PLOT_MIN_H = 200                                 # the plot is never squeezed below this, even at the minimum window size
+SCREEN_MARGIN = (0, 60)                          # room the window frame and the menu bar / Dock take from the screen
 Y_VOICE_S = 2.0       # the voice's median over this many seconds decides where the vertical range sits
 Y_LOOK_S = 6.0        # a move of the vertical range also looks this many seconds beyond the right half
 Y_EASE = 0.3          # share of the way to the new centre covered per redraw (about 0.3 s for a move)
@@ -231,7 +235,7 @@ class MainWindow(QtWidgets.QWidget):
         super().__init__()
         collect_on_the_ui_thread_only()       # the worker threads below must never finalise a Qt object (gui_gc.py)
         self.setWindowTitle("sing-pitch")
-        self.resize(*DEFAULT_SIZE)
+        self.resize(*self._first_size())
         self._tracker, self._home, self._input_factory = tracker, home or data_dir(), input_factory
         self._drone_factory = drone_factory
         self._drone: DronePlayer | None = None
@@ -255,6 +259,11 @@ class MainWindow(QtWidgets.QWidget):
         self._speed_timer.setSingleShot(True)
         self._speed_timer.setInterval(SPEED_DEBOUNCE_MS)
         self._speed_timer.timeout.connect(self._prepare_speed)
+        self._jumped_text = ""                       # "Jumped. Take saved: ..." as said, until it has been on show a while
+        self._jumped_timer = QtCore.QTimer(self)
+        self._jumped_timer.setSingleShot(True)
+        self._jumped_timer.setInterval(JUMPED_MESSAGE_MS)
+        self._jumped_timer.timeout.connect(self._jumped_expired)
         self._tempo_finder = TempoFinder(tempo_detector, self)
         self._tempo_finder.done.connect(self._tempo_found)
         self._detected_bpm: float | None = None      # the chosen song's tempo.json (None = not known yet)
@@ -351,12 +360,13 @@ class MainWindow(QtWidgets.QWidget):
         self.cancel_overwrite_button.clicked.connect(self._forget_overwrite)
         self.overwrite_button.setToolTip("Replace the saved Section with this name by the current mark.")
         self.cancel_overwrite_button.setToolTip("Keep the saved Section; change the name to save the mark separately.")
-        self.overwrite_button.hide()
-        self.cancel_overwrite_button.hide()
         self.section_name_edit.textChanged.connect(self._forget_overwrite)
         self.section_name_edit.textChanged.connect(self._forget_section_message)
         self.rename_section_button = QtWidgets.QPushButton("Rename")
         self.rename_section_button.clicked.connect(self.rename_section)
+        # Overwrite and Cancel take the places of Save and Rename while a Save waits for the answer: the row never grows
+        self._save_slot, self._rename_slot = (self._stacked(a, b) for a, b in (
+            (self.save_section_button, self.overwrite_button), (self.rename_section_button, self.cancel_overwrite_button)))
         self.delete_section_button = QtWidgets.QPushButton("Delete")
         self.delete_section_button.clicked.connect(self.delete_section)
         self.loop_box = QtWidgets.QCheckBox("Loop (L)")
@@ -459,11 +469,14 @@ class MainWindow(QtWidgets.QWidget):
             QtGui.QShortcut(QtGui.QKeySequence(key), self, activated=slot)    # bound method: a lambda keeps self alive
         self.calibrate_button = QtWidgets.QPushButton("Calibrate latency")
         self.calibrate_button.clicked.connect(self.start_calibration)
-        self.output_label = QtWidgets.QLabel("")
-        self.output_label.setWordWrap(True)
+        self.output_label = ElidedLabel(takes_the_rest=True, lines=2)
         self.output_label.setStyleSheet("color: #e67e22;")
         self.headphones_button = QtWidgets.QPushButton("These are headphones")
         self.headphones_button.clicked.connect(self.confirm_headphones)
+        for w in (self.headphones_button, self.output_label):
+            keep_room = w.sizePolicy()
+            keep_room.setRetainSizeWhenHidden(True)       # the notice row keeps its height with or without the notice
+            w.setSizePolicy(keep_room)
         self.reference_box.currentTextChanged.connect(self._reference_changed)
         self.song_box.currentIndexChanged.connect(self._preview_song)
         self._reference_changed()
@@ -478,8 +491,7 @@ class MainWindow(QtWidgets.QWidget):
         self.note_label.setStyleSheet("font-size: 32px; font-weight: bold;")
         self.note_label.setFixedSize(NOTE_LABEL_WIDTH, 48)
         self.note_label.setAlignment(QtCore.Qt.AlignRight | QtCore.Qt.AlignVCenter)
-        self.summary_label = QtWidgets.QLabel(self._library_notice or "Press Start and sing.")
-        self.summary_label.setWordWrap(True)
+        self.summary_label = ElidedLabel(self._library_notice or "Press Start and sing.", lines=2)   # any text: same size (#66)
 
         song_axis = SongTimeAxis()
         self.plot_widget = pg.PlotWidget(background="#1e1e1e", axisItems={"bottom": song_axis})
@@ -531,21 +543,18 @@ class MainWindow(QtWidgets.QWidget):
         mix.addWidget(self.tempo_label, 1)
         mix.setSpacing(10)
         sections = QtWidgets.QHBoxLayout()
-        for w in (QtWidgets.QLabel("Section"), self.section_box, self.section_name_edit, self.save_section_button,
-                  self.rename_section_button, self.delete_section_button, self.clear_button, self.loop_box,
+        for w in (QtWidgets.QLabel("Section"), self.section_box, self.section_name_edit, self._save_slot,
+                  self._rename_slot, self.delete_section_button, self.clear_button, self.loop_box,
                   self.between_box, self.bpm_box, self.beats_box):
             sections.addWidget(w)
         sections.setSpacing(6)
-        sections.addWidget(self.overwrite_button)
-        sections.addWidget(self.cancel_overwrite_button)
         sections.setStretchFactor(self.section_box, 1)       # a wider window shows more of a Section's name
         sections.addStretch(1)
         warn = QtWidgets.QHBoxLayout()                  # how it is scored: Octave, Notes, Tolerance (QA #46: off the mix row)
         for w in (QtWidgets.QLabel("Octave"), self.octave_box, self.notes_box, self.note_length_slider,
                   self.note_length_label, QtWidgets.QLabel("Tolerance"), self.tolerance_slider, self.tolerance_label):
             warn.addWidget(w)
-        warn.addWidget(self.output_label, 1)
-        warn.addWidget(self.headphones_button)
+        warn.addStretch(1)
         warn.addWidget(self.note_label)                 # a fixed width: what is sung never resizes the window (#35)
         layout = QtWidgets.QVBoxLayout(self)
         layout.addLayout(devices)
@@ -553,18 +562,52 @@ class MainWindow(QtWidgets.QWidget):
         layout.addLayout(mix)
         layout.addLayout(sections)
         layout.addLayout(warn)
+        notice = QtWidgets.QHBoxLayout()                # why this Output may not suit a Melody Take, and its button
+        notice.addWidget(self.output_label, 1)
+        notice.addWidget(self.headphones_button)
+        layout.addLayout(notice)
         layout.addWidget(self.plot_widget, 1)
         layout.addWidget(self.timeline)
         layout.addWidget(self.summary_label)
 
         self._focus_keeper = _FocusKeeper(self)
         QtWidgets.QApplication.instance().installEventFilter(self._focus_keeper)
+
+        self.plot_widget.setMinimumHeight(PLOT_MIN_H)       # the plot keeps a usable height at the smallest window
+        layout.setSpacing(ROW_SPACING)                      # a fixed gap (the style's differs per pair of widgets), so
+        shown = not self.timeline.isHidden()               # the Timeline's room is exactly its height plus one gap
+        self._plot_min_h, self._timeline_room = PLOT_MIN_H, max(self.timeline.minimumSize().height(), self.timeline.minimumSizeHint().height()) + ROW_SPACING
+        self._show_timeline(shown)
+
         self._timer = QtCore.QTimer(self)
         self._timer.setTimerType(QtCore.Qt.PreciseTimer)
         self._timer.timeout.connect(self.tick)
         self._describe_controls()
         self._name_widgets()
         self._restore_last_choice()
+
+    @staticmethod
+    def _first_size() -> tuple[int, int]:
+        """The first-launch size: DEFAULT_SIZE, clamped to the screen the window opens on (a 1280x720 laptop)."""
+        screen = QtGui.QGuiApplication.primaryScreen()
+        if screen is None:
+            return DEFAULT_SIZE
+        room = screen.availableGeometry()
+        return (min(DEFAULT_SIZE[0], room.width() - SCREEN_MARGIN[0]),
+                min(DEFAULT_SIZE[1], room.height() - SCREEN_MARGIN[1]))
+
+    def _say_jumped(self, text: str) -> None:
+        """A jump saved the Take before it; a new Take is running. Said for a few seconds, then the line says what is
+        true now: it must not outlive what it describes."""
+        self.summary_label.setText(text)
+        self._jumped_text = text
+        self._jumped_timer.start()
+
+    def _jumped_expired(self) -> None:
+        if self._jumped_text and self.summary_label.text() == self._jumped_text:    # not if something else was said
+            self.summary_label.setText("Singing..." if self._runner is not None else "")
+            self._show_pause()                       # paused meanwhile: the line says so, not "Singing..."
+        self._jumped_text = ""
 
     def _describe_controls(self) -> None:
         """A tooltip on every control (the ones with a longer story to tell were given theirs where they are built)."""
@@ -728,6 +771,19 @@ class MainWindow(QtWidgets.QWidget):
         self.update_output_warning()
         self._speed_changed()
 
+    def _show_timeline(self, visible: bool) -> None:
+        """Show or hide the Timeline without changing the window's minimum size: hidden, its room goes to the plot's
+        minimum height (a window whose minimum changes with the Reference resizes itself, #52)."""
+        if not hasattr(self, "_timeline_room"):              # before the layout is built
+            self.timeline.setVisible(visible)
+            return
+        if visible:                    # the plot gives its extra room back first, so the minimum never stands higher
+            self.plot_widget.setMinimumHeight(self._plot_min_h)
+            self.timeline.setVisible(True)
+        else:
+            self.timeline.setVisible(False)
+            self.plot_widget.setMinimumHeight(self._plot_min_h + self._timeline_room)
+
     def _preview_song(self, *_) -> None:
         """Idle with Melody chosen: the Timeline shows the chosen song's reference melody. Not while a Take runs."""
         if self._runner is not None or self._replay is not None:
@@ -739,7 +795,7 @@ class MainWindow(QtWidgets.QWidget):
             except Exception:       # a song that cannot be read: Start says why
                 melody = None
         self.timeline.set_melody(melody)
-        self.timeline.setVisible(melody is not None)
+        self._show_timeline(melody is not None)
         self.reload_sections()
 
     def seek(self, song_s: float) -> None:
@@ -846,8 +902,8 @@ class MainWindow(QtWidgets.QWidget):
         taken = next((s for s in store.saved() if s.name == name), None)
         if taken is not None and self.section_box.currentData() != name:
             self._pending_overwrite = (name, *span)      # another Section has this name: ask, inline, before replacing it
-            self.overwrite_button.show()
-            self.cancel_overwrite_button.show()
+            self._save_slot.layout().setCurrentWidget(self.overwrite_button)
+            self._rename_slot.layout().setCurrentWidget(self.cancel_overwrite_button)
             self.summary_label.setText(f"A Section called {name} already exists ({taken.start_s:.1f}-{taken.end_s:.1f} s). "
                                        f"Overwrite it with the new mark ({span[0]:.1f}-{span[1]:.1f} s), or Cancel?")
             return
@@ -867,6 +923,18 @@ class MainWindow(QtWidgets.QWidget):
         if pending is not None and store is not None:
             self._save_section(store, pending[0], pending[1:])
 
+    @staticmethod
+    def _stacked(shown: QtWidgets.QWidget, other: QtWidgets.QWidget) -> QtWidgets.QWidget:
+        """A slot that holds two buttons in one place (the wider one sets its size): what is shown there can change
+        without the row, or the window, changing size (#52)."""
+        slot = QtWidgets.QWidget()
+        stack = QtWidgets.QStackedLayout(slot)
+        stack.setContentsMargins(0, 0, 0, 0)
+        stack.addWidget(shown)
+        stack.addWidget(other)
+        stack.setCurrentWidget(shown)
+        return slot
+
     def _say_about_section(self, text: str) -> None:
         self.summary_label.setText(text)
         self._section_message = text
@@ -883,8 +951,8 @@ class MainWindow(QtWidgets.QWidget):
         if self._pending_overwrite is not None:
             self._pending_overwrite = None
             self.summary_label.setText("")
-        self.overwrite_button.hide()
-        self.cancel_overwrite_button.hide()
+        self._save_slot.layout().setCurrentWidget(self.save_section_button)
+        self._rename_slot.layout().setCurrentWidget(self.rename_section_button)
 
     def rename_section(self) -> None:
         store, old, new = self._sections(), self.section_box.currentData(), self.section_name_edit.text().strip()
@@ -1242,7 +1310,7 @@ class MainWindow(QtWidgets.QWidget):
         button.setChecked(percent == 100)
         button.setFocusPolicy(QtCore.Qt.NoFocus)                 # so + and - stay shortcuts of the window
         button.setToolTip(f"Set the Speed to {percent} %: the same as typing it in the box")
-        button.setFixedWidth(44)
+        button.setFixedWidth(52)                                  # "100 %" needs 45 on the macOS style (#68)
         return button
 
     def _preset_70(self) -> None:
@@ -1537,26 +1605,28 @@ class MainWindow(QtWidgets.QWidget):
         return {"reference": REFERENCE_TEXT.get(reference.kind, "Nearest note"), "song": row["song_id"] or None,
                 "key": reference if reference.kind == "key" else None,
                 "octave": octave.k if octave.mode == "pinned" else None, "notes": notes == "on",
-                "length": player_settings.DEFAULT_MIN_NOTE_S if length is None else length, "speed": row_settings(row)[2]}
+                "length": player_settings.DEFAULT_MIN_NOTE_S if length is None else length, "speed": row_settings(row)[2],
+                "tolerance": saved_config(self._home, take_id).green_cents}
 
     def _replay_controls(self) -> tuple[QtWidgets.QWidget, ...]:
         """The controls a replay puts its Take's settings on, and those that would act on them (Speed presets, the
         Count-in's tempo): greyed while it runs."""
         return (self.reference_box, self.song_box, self.key_box, self.octave_box, self.speed_box,
                 self.speed_70_button, self.speed_85_button, self.speed_100_button, self.between_box, self.bpm_box,
-                self.beats_box)
+                self.beats_box, self.tolerance_slider)
 
     def _controls_now(self) -> dict:
         return {"reference": self.reference_box.currentText(), "song": self.song_box.currentData(),
                 "key": self.key_box.currentData(), "octave": self.octave_box.currentData(),
-                "notes": self.notes_box.isChecked(), "length": self._note_length(), "speed": self.speed_box.value()}
+                "notes": self.notes_box.isChecked(), "length": self._note_length(), "speed": self.speed_box.value(),
+                "tolerance": self.tolerance_slider.value()}
 
     def _show_settings(self, settings: dict) -> dict:
         """Put these settings on the controls without anything reacting to them (nothing remembered, nothing
         stretched, no preview). Returns the settings that were there, to put back."""
         before = self._controls_now()
         boxes = (self.reference_box, self.song_box, self.key_box, self.octave_box, self.notes_box,
-                 self.note_length_slider, self.speed_box)
+                 self.note_length_slider, self.speed_box, self.tolerance_slider)
         for box in boxes:
             box.blockSignals(True)
         self.reference_box.setCurrentText(settings["reference"])
@@ -1568,8 +1638,10 @@ class MainWindow(QtWidgets.QWidget):
         self.notes_box.setChecked(settings["notes"])
         self.note_length_slider.setValue(slider_of_length(settings["length"]))
         self.speed_box.setValue(settings["speed"])
+        self.tolerance_slider.setValue(settings["tolerance"])      # a replay shows its Take's Tolerance; nothing is saved
         for box in boxes:
             box.blockSignals(False)
+        self.tolerance_label.setText(f"±{self.tolerance_slider.value()} c")
         self.note_length_label.setText(format_length(self._note_length()))
         self._sync_speed_presets()
         return before
@@ -1689,7 +1761,7 @@ class MainWindow(QtWidgets.QWidget):
         self._band_line = None
         self._draw_band()
         self.timeline.set_melody(self._melody, getattr(self._backing, "duration_s", None))
-        self.timeline.setVisible(self._melody is not None)
+        self._show_timeline(self._melody is not None)
         if self._melody is not None:
             _, midi = self._melody.midi_line()
             if np.isfinite(midi).any():
@@ -2083,8 +2155,10 @@ class MainWindow(QtWidgets.QWidget):
                 self._stop()
                 return
             for record in self._runner.drain_saved():
-                self.summary_label.setText(pass_text(record) if record.pass_index is not None
-                                           else f"Jumped. Take saved: {describe(record)}")
+                if record.pass_index is not None:
+                    self.summary_label.setText(pass_text(record))
+                else:
+                    self._say_jumped(f"Jumped. Take saved: {describe(record)}")
                 if record.pass_index is not None and record.summary.n_scored:
                     self._last_pass_pct = record.summary.pct_in_tune
             b = self._backing

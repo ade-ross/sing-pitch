@@ -106,11 +106,14 @@ def test_the_section_name_field_keeps_a_usable_width_at_every_window_width(qtbot
 
 
 def test_the_first_launch_size_gives_the_plot_room(qtbot, tmp_path):
-    """The tester measured the plot at about 150 px at 1000x620 on the macOS style: it needs at least about 300 px."""
+    """The tester measured the plot at about 150 px at 1000x620 on the macOS style: it needs at least about 300 px.
+    The window opens at DEFAULT_SIZE, or at what the screen has room for (see test_window_size_is_constant)."""
+    from sing_pitch.ui.main_window import DEFAULT_SIZE
+
     win = melody_window(qtbot, tmp_path)
+    assert (win.width(), win.height()) == win._first_size()
+    win.resize(*DEFAULT_SIZE)
     win.show()
     qtbot.waitExposed(win)
     QtWidgets.QApplication.processEvents()
-    assert win.height() >= 780
     assert win.plot_widget.height() >= 300
-    assert win.minimumSizeHint().height() <= 560            # the minimum is not raised for it

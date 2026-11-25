@@ -68,7 +68,7 @@ def test_a_take_saved_before_this_fix_with_nothing_scored_is_never_the_replay_ta
 def test_stop_in_a_dropped_last_pass_says_so_and_shows_the_pass_that_was_kept(tmp_path):
     singing_song(tmp_path, notes=NOTES * 3, tail_s=3.0)
     configure_latency(tmp_path, 0.12)
-    with QA(tmp_path, mic="echo", time_scale=SCALE) as qa:
+    with QA(tmp_path, mic="echo", time_scale=1.0) as qa:      # the tracker thread keeps up whatever the load
         qa.set("reference_box", "Melody")
         qa.set("guide_box", True)
         qa.set("guide_slider", 100)
@@ -77,13 +77,12 @@ def test_stop_in_a_dropped_last_pass_says_so_and_shows_the_pass_that_was_kept(tm
         qa.mark_section(1.0, 9.0)
         qa.set("loop_box", True)
         qa.start_take()
-        qa.wait_until(lambda: len(qa.takes()) == 1, timeout_s=60)             # Pass 1 saved at the wrap
-        qa.wait_until(lambda: "Pass 2" in qa.text("loop_label"), timeout_s=10)
-        qa.wait(2.5)                                                          # the Lead-in (1 s here) and about 1.5 s of Pass 2
-        qa.stop_take()
+        qa.wait_until(lambda: len(qa.takes()) == 1, timeout_s=120)             # Pass 1 saved at the wrap
+        qa.wait_until(lambda: "Pass 2" in qa.text("loop_label"), timeout_s=60)
+        qa.stop_take()                  # at once: Pass 2 has scored nothing yet, however slow or fast the machine is (#69)
         assert len(qa.takes()) == 1 and qa.takes()[0]["pass_index"] == "1"
         text = qa.summary()
-        assert text.startswith("Pass 2 of 1.0-9.0 s not saved: only "), text
+        assert text.startswith("Pass 2 of 1.0-9.0 s not saved: "), text
         assert "Last saved: Pass 1 of 1.0-9.0 s: In tune" in text, text
         assert qa.takes()[0]["id"] in text
         qa.click("replay_button")                                             # the replay target is Pass 1
@@ -102,3 +101,21 @@ def test_stop_with_nothing_sung_says_nothing_was_saved_and_replay_has_nothing_to
         assert qa.summary() == "No voiced sound heard. The Take is not saved."
         qa.click("replay_button")
         assert qa.summary() == "No saved Take to replay yet."
+
+
+def test_the_stop_line_says_how_much_was_sung_in_a_dropped_pass_and_in_a_dropped_empty_one():
+    from sing_pitch.ui.main_window import stop_text
+
+    # the text is built from the Pass, the Section and the scored frames of the two records
+    class S:
+        def __init__(self, n):
+            self.n_scored, self.pct_in_tune, self.median_abs_cents, self.tendency = n, 80.0, 5.0, "centred"
+
+    class R:
+        def __init__(self, n, pass_index, rid="r"):
+            self.summary, self.pass_index, self.section_name, self.id = S(n), pass_index, "Chorus", rid
+            self.tolerance_cents = 25.0
+
+    assert stop_text(R(10, 1), R(120, 2)).startswith("Pass 2 of Chorus not saved: only 1.9 s sung.   |   Last saved: Pass 1 of Chorus")
+    assert stop_text(R(10, 1), R(0, 2)).startswith("Pass 2 of Chorus not saved: nothing sung.")
+    assert stop_text(None, R(0, None)) == "No voiced sound heard. The Take is not saved."
