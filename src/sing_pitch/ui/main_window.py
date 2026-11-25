@@ -134,6 +134,16 @@ def _volume_slider(tip: str) -> QtWidgets.QSlider:
     return slider
 
 
+class _SpaceIsNotText(QtCore.QObject):
+    """Event filter for a number box: a Space typed there is not text for it, so the window's Space shortcut gets it."""
+
+    def eventFilter(self, obj, event) -> bool:
+        if event.type() == QtCore.QEvent.ShortcutOverride and event.key() == QtCore.Qt.Key_Space:
+            event.ignore()
+            return True
+        return False
+
+
 class MainWindow(QtWidgets.QWidget):
     def __init__(
         self,
@@ -185,7 +195,7 @@ class MainWindow(QtWidgets.QWidget):
         self._melody: Melody | None = None           # drawn beside the live line during Melody Takes and replays
         self._melody_latency = 0.0
         self._replay_clock: SongClock | None = None  # the replayed Take's own song times, for drawing the reference
-        self._paused = False
+        self._replay_paused_at: float | None = None  # monotonic time a replay was paused at (None = running)
         self._runner: LiveRunner | None = None
         self._replay: Replay | None = None
         self._visited: dict | None = None            # the controls as they were before a replay put a Take's on them
@@ -245,6 +255,7 @@ class MainWindow(QtWidgets.QWidget):
                             (QtCore.Qt.Key_Right, self.jump_forward)):    # bound methods: a lambda keeps self alive
             shortcut = QtGui.QShortcut(QtGui.QKeySequence(key), self)
             shortcut.setContext(QtCore.Qt.WindowShortcut)
+            shortcut.setAutoRepeat(key != QtCore.Qt.Key_Space)    # a held Space would flip pause and play again and again
             shortcut.activated.connect(action)
         self.timeline.section_marked.connect(self._section_marked)
         self.timeline.section_changed.connect(self._section_edited)
@@ -293,6 +304,7 @@ class MainWindow(QtWidgets.QWidget):
         self.bpm_box.setToolTip("The song's tempo for the Count-in, detected at import; type your own if it is wrong "
                                 "(30–300, remembered for this song); 0 or empty goes back to the detected tempo")
         self.bpm_box.editingFinished.connect(self.bpm_box.clearFocus)    # keys go back to the window
+        self.bpm_box.installEventFilter(_SpaceIsNotText(self.bpm_box))   # Space pauses even from this box
         self.beats_box = QtWidgets.QSpinBox()
         self.beats_box.setRange(*player_settings.BEATS_PER_BAR_RANGE)
         self.beats_box.setValue(4)
@@ -946,14 +958,42 @@ class MainWindow(QtWidgets.QWidget):
             base = self._backing.position_s() if pending is None else pending
             self.seek(max(0.0, base + seconds))
 
+    @property
+    def _paused(self) -> bool:
+        """Is the song paused: the player's own answer (the Transport's), or a replay's. The window keeps no flag."""
+        if self._backing is not None:
+            return bool(getattr(self._backing, "paused", False))     # a player that cannot pause is never paused
+        return self._replay_paused_at is not None
+
     def toggle_pause(self) -> None:
-        """Space: pause or resume the song of the running Melody Take. The Take goes on; the plot stands still while
-        the song is paused (singing then is neither drawn nor scored) and goes on from the same place on resume."""
-        if self._backing is None:
+        """Space: pause or resume the song of the running Melody Take, or the replay on show. The Take goes on; the plot
+        stands still while the song is paused (singing then is neither drawn nor scored) and goes on from the same
+        place on resume. What is paused is read from the player, so Space always flips what is really happening."""
+        if self._backing is not None:
+            (self._backing.play if self._paused else self._backing.pause)()
+        elif self._replay is not None:
+            self._toggle_replay_pause()
+        else:
             return
-        self._paused = not self._paused
-        (self._backing.pause if self._paused else self._backing.play)()
-        self.pause_button.setText("Play" if self._paused else "Pause")
+        self._show_pause()
+
+    def _show_pause(self) -> None:
+        """The Pause button says what the player is doing (also when something else changed it)."""
+        text = "Play" if self._paused else "Pause"
+        if self.pause_button.text() != text:
+            self.pause_button.setText(text)
+
+    def _toggle_replay_pause(self) -> None:
+        now = time.monotonic()
+        if self._replay_paused_at is None:
+            self._replay_paused_at = now
+        else:
+            self._replay_started += now - self._replay_paused_at     # the replay goes on from where it stood
+            self._replay_paused_at = None
+
+    def _replay_elapsed(self) -> float:
+        """Seconds of the replayed Take shown so far: standing still while it is paused."""
+        return (time.monotonic() if self._replay_paused_at is None else self._replay_paused_at) - self._replay_started
 
     def _apply_gains(self, *_) -> None:
         """Slider and checkbox changes reach the player at once, also mid-Take; it ramps them within a block."""
@@ -1120,7 +1160,7 @@ class MainWindow(QtWidgets.QWidget):
             self.summary_label.setText(f"Not started: {failed}" if failed else "Start cancelled.")
         elif percent == 100 or (self._speed_ready and self._speed_ready[:2] == (song_id, percent)):
             self._start_waiting = False
-            self._start()
+            self._start_or_undo()
         else:
             self.summary_label.setText(f"Starting when {percent} % is ready… (Start again to cancel)")
 
@@ -1315,7 +1355,9 @@ class MainWindow(QtWidgets.QWidget):
         for w, _ in self._replay_locked:          # what the replay shows cannot be changed meanwhile
             w.setEnabled(False)
         self._replay, self._replay_clock, self._replay_take_id = replay, replay_clock, take_id
-        self._replay_started = time.monotonic()
+        self._replay_started, self._replay_paused_at = time.monotonic(), None
+        self.pause_button.setEnabled(True)               # Space pauses a replay too
+        self._show_pause()
         self._show_melody(reference, latency, octave_k)
         self._start_note_tally(reference, config)
         self._t.clear(), self._midi.clear(), self._band.clear(), self._out.clear(), self._oct.clear()
@@ -1394,6 +1436,9 @@ class MainWindow(QtWidgets.QWidget):
         self._timer.stop()
         numbers = self._take_numbers(self._replay_take_id)
         self._replay = self._replay_clock = self._replay_take_id = None
+        self._replay_paused_at = None
+        self.pause_button.setEnabled(False)
+        self._show_pause()
         if self._visited is not None:
             self._show_settings(self._visited)                    # the controls as they were before the replay
             self._visited = None
@@ -1422,6 +1467,41 @@ class MainWindow(QtWidgets.QWidget):
         self.history_window.show()
         self.history_window.raise_()
 
+    def closeEvent(self, event) -> None:
+        """Closing the window is Stop, and more: the Take is ended and saved as Stop does, a replay and a calibration
+        end, a Speed being prepared is forgotten, History closes with it (it is a window of its own, so the app would
+        otherwise live on with the song playing from a hidden window). The worker thread is stopped here, before any
+        Qt object goes. Each step is tried even if one before it fails."""
+        for step in (self._close_take, self._close_replay, self._close_calibration, self._close_speed_work,
+                     self._close_history):
+            try:
+                step()
+            except Exception:
+                pass
+        super().closeEvent(event)
+
+    def _close_take(self) -> None:
+        if self._runner is not None:
+            self._stop()
+
+    def _close_replay(self) -> None:
+        if self._replay is not None:
+            self._end_replay()
+
+    def _close_calibration(self) -> None:
+        if self._calibration is not None:
+            run, self._calibration = self._calibration, None
+            run.finish()
+
+    def _close_speed_work(self) -> None:
+        self._start_waiting = False
+        self._speed_timer.stop()
+        self._speed_job = None                   # a stretch still running finishes into the cache; nobody listens
+
+    def _close_history(self) -> None:
+        if self.history_window is not None:
+            self.history_window.close()
+
     def toggle(self) -> None:
         if self._replay is not None:
             return
@@ -1430,9 +1510,19 @@ class MainWindow(QtWidgets.QWidget):
             self.summary_label.setText("Start cancelled.")
             return
         if self._runner is None:
-            self._start()
+            self._start_or_undo()
         else:
             self._stop()
+
+    def _start_or_undo(self) -> None:
+        """Start; if anything fails once the Backing is already playing, stop it again: a Take that is half set up is
+        worse than none (the song would play on with nothing showing it and nothing to pause it)."""
+        try:
+            self._start()
+        except Exception as exc:
+            if self._runner is not None:
+                self._stop()
+            self.summary_label.setText(f"Could not start: {exc}")
 
     def _show_melody(self, reference: Reference, latency_s: float, octave_k: int = 0) -> None:
         self._melody = reference if reference.kind == "melody" else None
@@ -1483,13 +1573,13 @@ class MainWindow(QtWidgets.QWidget):
             self._runner = None
             self.summary_label.setText(f"Could not open the input or the output: {exc}")
             return
-        self._backing, self._paused = backing, False
+        self._backing = backing
         self._last_pass_pct = None
         self._show_loop()
         self._show_melody(reference, latency, self._octave_setting().k)
         self._start_note_tally(reference, config)
-        self.pause_button.setText("Pause")
         self.pause_button.setEnabled(backing is not None)
+        self._show_pause()
         self._t.clear(), self._midi.clear(), self._band.clear(), self._out.clear(), self._oct.clear()
         self._oct_known = False
         self._set_now(0.0)
@@ -1526,6 +1616,7 @@ class MainWindow(QtWidgets.QWidget):
         self._runner = None
         self._show_loop()
         self.pause_button.setEnabled(False)
+        self._show_pause()
         self.button.setText("Start")
         self.device_box.setEnabled(True)
         self.output_box.setEnabled(True)
@@ -1665,7 +1756,7 @@ class MainWindow(QtWidgets.QWidget):
         if self._runner is not None:
             return max(newest, self._runner.heard_t)
         if self._replay is not None:
-            return max(newest, self._replay.origin_s + time.monotonic() - self._replay_started)
+            return max(newest, self._replay.origin_s + self._replay_elapsed())
         return newest
 
     def _octaves_at(self, x: np.ndarray, fold: PauseFold | None = None) -> np.ndarray:
@@ -1817,7 +1908,7 @@ class MainWindow(QtWidgets.QWidget):
                 self._stop()            # the song is over (plus time for the late voice to arrive)
                 return
         elif self._replay is not None:
-            elapsed = time.monotonic() - self._replay_started
+            elapsed = self._replay_elapsed()
             self.ingest(self._replay.advance(elapsed))
             song_s = self._replay_clock(self._replay.origin_s + elapsed)       # the playhead follows the replayed song
             if song_s is not None:
@@ -1825,6 +1916,7 @@ class MainWindow(QtWidgets.QWidget):
         if self._backing is not None and not drain_only:
             self.timeline.set_playhead(self._backing.position_s())
             self._show_loop()
+            self._show_pause()
         if not self._t:
             return
         fold = self._fold()

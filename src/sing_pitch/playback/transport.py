@@ -286,6 +286,12 @@ class Transport:
         return self._want_playing
 
     @property
+    def paused(self) -> bool:
+        """Pause was asked for (and play not since): from the next block the song is silent and stands still. The one
+        answer to "is the song paused": the window, the Pause button and the plot all read it, none keeps its own."""
+        return not self._want_playing
+
+    @property
     def position_s(self) -> float:
         """Song time of the next frame to render."""
         return self._n / self._sr

@@ -26,8 +26,13 @@ def collect_and_report_live_qt_garbage() -> collections.Counter:
         gc.collect()
     finally:
         gc.set_debug(debug)
-    found = collections.Counter(type(o).__name__ for o in gc.garbage
-                                if isinstance(o, (QObject, QGraphicsItem)) and shiboken6.isValid(o))
+    found: collections.Counter = collections.Counter()
+    for o in gc.garbage:
+        try:
+            if isinstance(o, (QObject, QGraphicsItem)) and shiboken6.isValid(o):
+                found[type(o).__name__] += 1
+        except ReferenceError:      # a weakref.proxy whose target went with it (numba keeps some while it compiles)
+            pass
     gc.garbage.clear()
     gc.collect()                                  # now free them, here
     return found

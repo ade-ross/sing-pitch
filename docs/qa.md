@@ -83,5 +83,17 @@ measures that gap in. If the fake rendered 1024-frame blocks ahead, a perfect si
 real vocal with vibrato that alone cost 25 points of % in tune (63 % instead of 88 %). Rendering one step at a time
 makes a fake latency of L exactly a calibrated latency of L (`tests/test_fake_audio.py` checks it to the frame).
 
+## The pause hunt
+
+`tests/pause_fuzz.py` drives the window with seeded random user actions (Start, Space, the Pause button, Space with a
+control focused, Space several times at once, seek, arrows, Sections, Loop, Lead-in/Count-in, Speed, Guide vocal, resize,
+replay, Stop, Calibrate) on a song whose backing is an audible tone and a file mic that keeps singing through every
+pause. After each action it checks: at most one output stream open (none without a Take); the Pause button, the
+window's pause state and the Transport agree with what the user did; while paused (after the plot has settled) the
+recorded output is silent and the song position, Timeline playhead, now-line and x range stand still and no frame
+sung during the pause is scored or drawn; after a resume the song goes on from where it stood. A failing run prints
+its action list. `tests/test_pause_random.py` runs three fixed seeds in the suite; by hand:
+`cd tests && PYTHONPATH=. uv run --project .. python pause_fuzz.py <first seed> <how many> <steps>`.
+
 Not covered: the real mic and speakers, device lists (test mode shows one fake input and the system-default fake
 output), and the headphones check (the fake output counts as headphones).
