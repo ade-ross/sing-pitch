@@ -54,8 +54,19 @@ class Faults:
       hub catches up, as before #49).
     - ui_stall_every_s, ui_stall_ms, ui_stall_gil: the UI thread is blocked that long every so often (UiStall), holding
       the GIL (a slow C++ paint) or not (a sleep).
+    Device shapes (#62, #63 review), also off by default:
+    - render_ahead_ms: the output renders whole blocks of its `blocksize` (the Backing asks 1024) and keeps this much
+      rendered ahead of what plays, like a real device, instead of one hub step just in time. The render frontier read
+      at the first mic chunk then lies anywhere within a block (the phase), as on CoreAudio. Do not combine with
+      underflow or deadline: a lost step does not move blocks already stamped.
+    - mic_late_ms: the mic's first chunks reach the app this late, in one burst (a first callback held up at Start);
+      their stamps stay true.
+    - jitter_out_us, jitter_in_us: Gaussian noise (SD) on the reported DAC / ADC stamps only; the audio is on time.
+    - latency_step_at_s, latency_step_ms: from that many seconds after the output started, its reported DAC stamps are
+      this much later (negative: earlier), the audio unchanged: a reported latency that changes (e.g. Bluetooth).
     Spec string for --fake-faults and QA(faults=...): "underflow=EVERY_S:MS,overflow=EVERY_S:MS,drift=PPM,
-    deadline=OUT_MS:IN_MS,ui_stall=EVERY_S:MS[:sleep]", any subset."""
+    deadline=OUT_MS:IN_MS,ui_stall=EVERY_S:MS[:sleep],render=AHEAD_MS,mic_late=MS,jitter=OUT_US:IN_US,
+    latency_step=AT_S:MS", any subset."""
 
     underflow_every_s: float | None = None
     underflow_ms: float = 0.0
@@ -67,6 +78,12 @@ class Faults:
     ui_stall_every_s: float | None = None
     ui_stall_ms: float = 0.0
     ui_stall_gil: bool = True
+    render_ahead_ms: float | None = None
+    mic_late_ms: float = 0.0
+    jitter_out_us: float = 0.0
+    jitter_in_us: float = 0.0
+    latency_step_at_s: float | None = None
+    latency_step_ms: float = 0.0
 
     @classmethod
     def parse(cls, spec: str | Faults | None) -> Faults:
@@ -84,6 +101,15 @@ class Faults:
                 elif name == "deadline":
                     kw["deadline_out_ms"] = float(args[0])
                     kw["deadline_in_ms"] = float(args[1]) if len(args) > 1 else float(args[0])
+                elif name == "render":
+                    kw["render_ahead_ms"] = float(args[0])
+                elif name == "mic_late":
+                    kw["mic_late_ms"] = float(args[0])
+                elif name == "jitter":
+                    kw["jitter_out_us"] = float(args[0])
+                    kw["jitter_in_us"] = float(args[1]) if len(args) > 1 else float(args[0])
+                elif name == "latency_step":
+                    kw["latency_step_at_s"], kw["latency_step_ms"] = float(args[0]), float(args[1])
                 elif name == "ui_stall":
                     kw["ui_stall_every_s"], kw["ui_stall_ms"] = float(args[0]), float(args[1])
                     kw["ui_stall_gil"] = not (len(args) > 2 and args[2] == "sleep")
@@ -140,6 +166,7 @@ class FakeOutputStream:
         self._at = 0                              # frames of _block already played
         self._played = 0                          # stream frames played so far
         self._carry = 0.0                         # drift: the fraction of a stream frame owed to the next step
+        self._buf = np.zeros((0, channels), np.float32)   # render_ahead: rendered, not yet played
         self.played = StreamTimeline(hub)
         self.played.TOLERANCE_S = 1e-7
         self.failed: Exception | None = None
@@ -158,21 +185,41 @@ class FakeOutputStream:
     def close(self) -> None:
         pass
 
+    def _call(self, block: np.ndarray, dac: float) -> None:
+        if self.failed is not None:
+            return
+        f, sr = self._hub.faults, self._hub.sample_rate
+        if f.jitter_out_us:
+            dac += self._hub._rng.normal(0.0, f.jitter_out_us * 1e-6)
+        if f.latency_step_at_s is not None and self.started_frame is not None \
+                and dac - self.started_frame / sr >= f.latency_step_at_s:
+            dac += f.latency_step_ms / 1000
+        try:
+            self._callback(block, len(block), TimeInfo(self._hub.now_s, dac=dac), None)
+        except Exception as exc:    # PortAudio would abort the stream: stay silent, say why once
+            self.failed = exc
+            print(f"fake output: callback failed: {exc!r}", file=sys.stderr)
+            block[:] = 0
+
     def _pull(self, frames: int, hub_frame: int, rate: float) -> np.ndarray:
-        """The next `frames` stream frames, calling back for new blocks just in time (hub thread)."""
+        """The next `frames` stream frames, calling back for new blocks just in time, or `blocksize` blocks kept
+        render_ahead_ms ahead (hub thread)."""
+        ahead = self._hub.faults.render_ahead_ms
+        sr = self._hub.sample_rate
+        if ahead is not None:
+            need = frames + round(ahead / 1000 * sr)
+            while len(self._buf) < need:
+                block = np.zeros((self.blocksize, self.channels), np.float32)
+                self._call(block, (hub_frame + len(self._buf) / rate) / sr)
+                self._buf = np.concatenate([self._buf, block])
+            out, self._buf = self._buf[:frames], self._buf[frames:]
+            return out
         out = np.empty((frames, self.channels), np.float32)
         done = 0
         while done < frames:
             if self._at >= len(self._block):
                 block = np.zeros((frames - done, self.channels), np.float32)
-                if self.failed is None:
-                    dac = (hub_frame + done / rate) / self._hub.sample_rate
-                    try:
-                        self._callback(block, len(block), TimeInfo(self._hub.now_s, dac=dac), None)
-                    except Exception as exc:    # PortAudio would abort the stream: stay silent, say why once
-                        self.failed = exc
-                        print(f"fake output: callback failed: {exc!r}", file=sys.stderr)
-                        block[:] = 0
+                self._call(block, (hub_frame + done / rate) / sr)
                 self._block, self._at = block, 0
             n = min(frames - done, len(self._block) - self._at)
             out[done : done + n] = self._block[self._at : self._at + n]
@@ -213,6 +260,8 @@ class FakeMic:
         self._on_chunk: Callable[[np.ndarray], None] | None = None
         self._origin = 0          # hub frame where the source's offset_s is heard, before the delay
         self._delivered = 0       # samples handed to on_chunk since start()
+        self._late_until: int | None = None     # mic_late: hub frame the first chunks are held back until
+        self._held: list = []
         self.times = StreamTimeline(hub)    # hub time each delivered sample was heard at (like an ADC timestamp)
 
     def start(self, on_chunk: Callable[[np.ndarray], None]) -> None:
@@ -220,13 +269,25 @@ class FakeMic:
 
         self._on_chunk = on_chunk
         self._delivered, self.times = 0, StreamTimeline(self._hub)
+        self._late_until, self._held = None, []
         self._hub._add_input(self)
 
     def _deliver(self, frame: int, chunk: np.ndarray) -> None:
-        """Hand the chunk heard from hub frame `frame` on to the app (hub thread)."""
-        self.times.add(self._delivered / self.sample_rate, frame / self.sample_rate)
-        self._delivered += len(chunk)
-        self._on_chunk(chunk)
+        """Hand the chunk heard from hub frame `frame` on to the app (hub thread); while mic_late holds the first
+        chunks back, keep them and hand them all over at once when it ends."""
+        if self._late_until is None:
+            self._late_until = frame + round(self._hub.faults.mic_late_ms / 1000 * self.sample_rate)
+        if frame < self._late_until:
+            self._held.append((frame, chunk))
+            return
+        held, self._held = self._held, []
+        for f, c in held + [(frame, chunk)]:
+            adc = f / self.sample_rate
+            if self._hub.faults.jitter_in_us:
+                adc += self._hub._rng.normal(0.0, self._hub.faults.jitter_in_us * 1e-6)
+            self.times.add(self._delivered / self.sample_rate, adc, len(c))
+            self._delivered += len(c)
+            self._on_chunk(c)
 
     def stop(self) -> None:
         self._hub._remove(self)
@@ -254,6 +315,7 @@ class FakeAudioHub:
                  record: bool = False, faults: Faults | str | None = None):
         self.sample_rate, self.step, self.time_scale = sample_rate, step, float(time_scale)
         self.faults = Faults.parse(faults)
+        self._rng = np.random.default_rng(0)     # stamp jitter
         self._underflow = _Periodic(self.faults.underflow_every_s, self.faults.underflow_ms, sample_rate, step)
         self._overflow = _Periodic(self.faults.overflow_every_s, self.faults.overflow_ms, sample_rate, step)
         self.lost_out_steps = self.lost_in_steps = 0     # steps the faults cost (for tests and the QA report)
