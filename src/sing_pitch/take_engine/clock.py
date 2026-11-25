@@ -61,71 +61,202 @@ class StreamTimeline:
     count never sees (output underflow: everything after is heard later than counted), a chunk lost before its callback
     ran is a gap the count closes (input overflow: everything after was sung later than counted), and two devices'
     crystals drift apart. The timeline keeps anchors (stream seconds by frame count, host seconds); from an anchor on,
-    the stream runs one second per second. add() is called once per block with that block's own timestamp: a block
-    within TOLERANCE_S of where the last anchor puts it adds nothing (a steady stream stays one anchor); a lost block or
-    slow drift adds one. A jump of more than GLITCH_S is a lost block or chunk: counted in `glitches`, its length in
-    `lost_s`. No anchors: host time = stream time (frame counting, how a stream without timestamps keeps time).
+    the stream runs one second per second. add() is called once per block with that block's own timestamp and decides
+    against the model (the last anchor) what the stamp says. No anchors: host time = stream time (frame counting).
 
-    One audio thread adds, any thread reads: the host list is appended before the stream list, and readers use only the
-    first len(stream list) entries."""
+    How a stamp is read (#63 review: Bluetooth and the real mic were never measured, so jitter must not hurt):
+    - The residual (stamp minus model) of every block feeds a jitter estimate: sigma = 1.4826 x the median of the
+      block-to-block residual differences over the last JITTER_WINDOW blocks / sqrt 2 (differences, so drift and steps
+      do not count as jitter). The tolerance is max(TOLERANCE_S, JITTER_K x sigma).
+    - Within the tolerance: nothing changes (jitter, or drift too small to matter yet).
+    - Later than the model by more: a tentative anchor at once (a lost block must show before the next one), which the
+      next block confirms (it agrees with the new anchor within the tolerance and not with the old model) or retracts
+      (the stamp was a spike, counted in `spikes`). A confirmed jump of more than max(GLITCH_S, 2 x tolerance)
+      is lost audio: `glitches`, its length in `lost_s`; smaller ones are drift (a drift step is about one tolerance).
+    - Earlier than the model by more: never lost audio. It must repeat in the next block (a lasting step: the reported
+      latency changed, e.g. a Bluetooth renegotiation, or drift) before an anchor is made; one alone is a spike. A
+      confirmed backward step beyond max(GLITCH_S, 2 x tolerance) is counted in `steps_back` / `steps_back_s`. The
+      anchor's host time is kept after the previous anchor's (a step back larger than the time since it would otherwise fold
+      host time back on itself): the frames reported as played twice are mapped to the newer ones.
+    - An anchor stands on one stamp, so with jitter it may sit off by up to the tolerance: when a whole window of
+      residuals against it has a median off by more than BIAS_S, it is re-anchored on that median (`corrections`;
+      this also follows slow drift, about one anchor per window when the clocks drift 50 ppm or more).
+    So jitter alone adds next to no anchors, a spike at most one tentative one that is taken back, and anchors grow only
+    with real lasting steps and drift (at most one per window). Lookups search preallocated arrays (no copy per call), so a paint costs the same after an hour.
 
-    TOLERANCE_S = 0.0005
-    GLITCH_S = 0.002
+    One audio thread adds, any thread reads: an entry is written before the count that publishes it, and readers read
+    the count first."""
+
+    TOLERANCE_S = 0.0005       # the tolerance never goes below this
+    JITTER_K = 5.0             # ...and is this many sigmas of the measured jitter above it
+    JITTER_WINDOW = 256        # blocks the jitter is measured over
+    GLITCH_S = 0.002           # a confirmed jump beyond max(this, 2 x tolerance) is lost audio (or a step back)
+    BIAS_S = 0.00025           # a full window whose median residual is off by more than this (or 5 standard errors of
+                               # that median, if more) re-anchors on the median
+    HIST_STEP_S = 20e-6        # |residual| histogram for the health record: 20 us bins up to 100 ms
+    HIST_BINS = 5000
 
     def __init__(self, clock: object = PORTAUDIO):
         self.clock = clock          # what the host times are measured on (has now()); timelines on different clocks
-        self._stream: list[float] = []  # cannot be compared
-        self._host: list[float] = []
+        self._s = np.empty(64)      # cannot be compared
+        self._h = np.empty(64)
+        self._n = 0
+        self._tentative: float | None = None     # the jump of the last anchor while it waits for its confirmation
+        self._pending: tuple[float, float, float] | None = None    # a backward step waiting for its repeat
+        self._res = np.zeros(self.JITTER_WINDOW)
+        self._res_n = 0
+        self._since = 0             # blocks since the last anchor
+        self.corrections = 0        # re-anchorings on a window's median (bias of a noisy anchor, slow drift)
+        self._sigma = 0.0
+        self.hist = np.zeros(self.HIST_BINS + 1, np.int64)
         self.glitches = 0
         self.lost_s = 0.0
+        self.steps_back = 0
+        self.steps_back_s = 0.0
+        self.spikes = 0
         self.flagged = 0            # blocks the driver itself flagged (PortAudio status: underflow / overflow)
+        self.blocks = 0
+        self.frames_min: int | None = None
+        self.frames_max: int | None = None
 
     def __len__(self) -> int:
-        return len(self._stream)
+        return self._n
 
-    def add(self, stream_s: float, host_s: float) -> None:
-        """The block starting at stream time stream_s met the hardware at host time host_s."""
-        n = len(self._stream)
-        if n:
-            jump = host_s - (self._host[n - 1] + stream_s - self._stream[n - 1])
-            if abs(jump) <= self.TOLERANCE_S:
+    # --- the writer ------------------------------------------------------------------------------------------------
+    @property
+    def tolerance_s(self) -> float:
+        return max(self.TOLERANCE_S, self.JITTER_K * self._sigma)
+
+    @property
+    def jitter_s(self) -> float:
+        """The stamps' jitter (sigma) measured over the last JITTER_WINDOW blocks."""
+        return self._sigma
+
+    def _append(self, stream_s: float, host_s: float) -> None:
+        n = self._n
+        if n == len(self._s):
+            s, h = np.empty(2 * n), np.empty(2 * n)
+            s[:n], h[:n] = self._s, self._h
+            self._h, self._s = h, s          # a reader holding the old arrays still has its n entries in them
+        if n and host_s <= self._h[n - 1]:
+            host_s = self._h[n - 1] + 1e-6
+        self._s[n], self._h[n] = stream_s, host_s
+        self._n = n + 1
+        self._since = 0
+
+    def _residual(self, r: float) -> None:
+        self._res[self._res_n % self.JITTER_WINDOW] = r
+        self._res_n += 1
+        a = abs(r)
+        self.hist[min(int(a / self.HIST_STEP_S), self.HIST_BINS)] += 1
+        if self._res_n % 8 == 0 and self._res_n > 2:
+            k = min(self._res_n, self.JITTER_WINDOW)          # in time order, the newest last
+            r = np.roll(self._res, -(self._res_n % self.JITTER_WINDOW))[-k:]
+            # block-to-block differences: drift (a slow ramp) and steps (one outlier) drop out, jitter stays
+            self._sigma = 1.4826 * float(np.median(np.abs(np.diff(r)))) / np.sqrt(2)
+
+    def add(self, stream_s: float, host_s: float, frames: int | None = None) -> None:
+        """The block starting at stream time stream_s met the hardware at host time host_s (see the class doc)."""
+        stream_s, host_s = float(stream_s), float(host_s)
+        self.blocks += 1
+        if frames is not None:
+            self.frames_min = frames if self.frames_min is None else min(self.frames_min, frames)
+            self.frames_max = frames if self.frames_max is None else max(self.frames_max, frames)
+        n = self._n
+        if n == 0:
+            self._append(stream_s, host_s)
+            return
+        tol = self.tolerance_s
+        jump = float(host_s - (self._h[n - 1] + stream_s - self._s[n - 1]))
+        if self._tentative is not None:          # this block decides the tentative anchor before it
+            step, self._tentative = self._tentative, None
+            if abs(jump) <= tol < abs(jump + step):   # confirmed: it fits the new anchor and not the old model
+                self._residual(jump)
+                if step > max(self.GLITCH_S, 2 * tol):
+                    self.glitches += 1
+                    self.lost_s += step
                 return
-            if jump > self.GLITCH_S:
-                self.glitches += 1
-                self.lost_s += jump
-        self._host.append(float(host_s))
-        self._stream.append(float(stream_s))
+            self._n = n = n - 1                   # retracted: it was a spike; judge this block by the old model
+            self.spikes += 1
+            jump = float(host_s - (self._h[n - 1] + stream_s - self._s[n - 1]))
+        self._residual(jump)
+        if abs(jump) <= tol:
+            if self._pending is not None:         # a step back that did not last
+                self.spikes += 1
+                self._pending = None
+            self._since += 1
+            if self._since >= self.JITTER_WINDOW:     # every residual of the window is against this anchor
+                med = float(np.median(self._res))
+                if abs(med) > max(self.BIAS_S, 5 * 1.2533 * self._sigma / np.sqrt(self.JITTER_WINDOW)):
+                    self._append(stream_s, host_s - jump + med)
+                    self.corrections += 1
+            return
+        if jump > 0:                              # later than the model: tentative at once
+            self._pending = None
+            self._append(stream_s, host_s)
+            self._tentative = jump
+            return
+        pending, self._pending = self._pending, None
+        if pending is not None and abs(jump - pending[2]) <= tol:    # a step back that lasts
+            self._append(pending[0], pending[1])
+            if -pending[2] > max(self.GLITCH_S, 2 * tol):
+                self.steps_back += 1
+                self.steps_back_s += -pending[2]
+            return
+        if pending is not None:
+            self.spikes += 1
+        self._pending = (stream_s, host_s, jump)
+
+    # --- readers -----------------------------------------------------------------------------------------------------
+    def _arrays(self):
+        n = self._n                               # the count first: the arrays hold at least n entries
+        return n, self._s, self._h
 
     def host(self, stream_s):
         """Host time of stream time stream_s (scalar or array): from the last anchor at or before it."""
-        n = len(self._stream)
+        n, s, h = self._arrays()
         if n == 0:
             return stream_s
         if np.ndim(stream_s):
-            s = np.asarray(stream_s, dtype=np.float64)
-            stream, host = np.array(self._stream[:n]), np.array(self._host[:n])
-            i = np.maximum(np.searchsorted(stream, s, side="right") - 1, 0)
-            return host[i] + (s - stream[i])
-        i = max(0, bisect.bisect_right(self._stream, stream_s, 0, n) - 1)
-        return self._host[i] + (stream_s - self._stream[i])
+            x = np.asarray(stream_s, dtype=np.float64)
+            i = np.maximum(np.searchsorted(s[:n], x, side="right") - 1, 0)
+            return h[i] + (x - s[i])
+        i = max(0, int(np.searchsorted(s[:n], stream_s, side="right")) - 1)
+        return float(h[i] + (stream_s - s[i]))
 
     def stream(self, host_s):
         """Stream time at host time host_s (scalar or array). Between a lost block's end and the next anchor nothing
         met the hardware: the stream stands at the next anchor's frame (an output plays silence, an input hears
         nothing) until then."""
-        n = len(self._stream)
+        n, s, h = self._arrays()
         if n == 0:
             return host_s
         if np.ndim(host_s):
-            h = np.asarray(host_s, dtype=np.float64)
-            stream, host = np.array(self._stream[:n]), np.array(self._host[:n])
-            i = np.maximum(np.searchsorted(host, h, side="right") - 1, 0)
-            s = stream[i] + (h - host[i])
-            nxt = np.append(stream[1:], np.inf)
-            return np.minimum(s, nxt[i])
-        i = max(0, bisect.bisect_right(self._host, host_s, 0, n) - 1)
-        s = self._stream[i] + (host_s - self._host[i])
-        return min(s, self._stream[i + 1]) if i + 1 < n else s
+            x = np.asarray(host_s, dtype=np.float64)
+            i = np.maximum(np.searchsorted(h[:n], x, side="right") - 1, 0)
+            nxt = np.append(s[1:n], np.inf)
+            return np.minimum(s[i] + (x - h[i]), nxt[i])
+        i = max(0, int(np.searchsorted(h[:n], host_s, side="right")) - 1)
+        v = float(s[i] + (host_s - h[i]))
+        return min(v, float(s[i + 1])) if i + 1 < n else v
+
+    def residual_percentile_s(self, q: float) -> float | None:
+        """The q-th percentile of |stamp - model| over every block so far (20 us resolution); None without blocks."""
+        total = int(self.hist.sum())
+        if total == 0:
+            return None
+        k = int(np.searchsorted(np.cumsum(self.hist), q / 100 * total))
+        return (k + 0.5) * self.HIST_STEP_S
+
+    def health(self) -> dict:
+        """What the stamps showed, for the audio health record (audio_health.py)."""
+        p50, p99 = self.residual_percentile_s(50), self.residual_percentile_s(99)
+        return dict(blocks=self.blocks, anchors=self._n, glitches=self.glitches, lost_s=round(self.lost_s, 4),
+                    steps_back=self.steps_back, steps_back_s=round(self.steps_back_s, 4), spikes=self.spikes,
+                    flagged=self.flagged, jitter_p50_us=None if p50 is None else round(1e6 * p50),
+                    jitter_p99_us=None if p99 is None else round(1e6 * p99), corrections=self.corrections,
+                    frames_min=self.frames_min,
+                    frames_max=self.frames_max)
 
 
 _COUNTING = StreamTimeline(clock=None)      # no anchors: host time = frame count
@@ -145,22 +276,33 @@ class LogClock:
 
     devices = (output, input) StreamTimelines (see device_times): then voice time and output time meet on the host
     clock instead of by counting frames, so a lost output block, a dropped mic chunk or the two devices drifting apart
-    no longer shift the song against the voice for the rest of the Take (#49). The calibrated latency keeps its meaning:
-    at the alignment (the first mic chunk, aligned_at_s = its end in voice time) the gap between the output's next frame
-    and the input's newest sample is taken in host time instead of in counted frames, so with no glitch both ways give
-    the same mapping; loop_s is the latency left once that gap is taken out (host seconds from a frame leaving the
-    output to the voice answering it entering the input). A timeline without a timestamp yet (the output's first block
-    lost, or not played before the first mic chunk) leaves the clock counting until both have one; the gap is then
-    read from the timestamps, which place the frame rendered next at the alignment where it was really heard."""
+    no longer shift the song against the voice for the rest of the Take (#49). loop_s is then the host seconds from a
+    frame leaving the output (its DAC time) to the voice answering it entering the input (its ADC time).
+
+    What latency_s means depends on how it was calibrated:
+    - loop_latency=True (calibrated on the device timestamps, #62): latency_s IS that loop. Nothing depends on when the
+      first mic callback ran, so no Take starts with a random offset.
+    - False (a latency calibrated by counting frames, before #62, or no timestamps at all): latency_s also holds the gap
+      between the output's render frontier and the input's newest sample at the alignment (the first mic chunk,
+      aligned_at_s = its end in voice time). Timed, that gap is taken out once, as read at the alignment, so the old
+      number keeps its old meaning (and its random 0-21 ms, which only a recalibration removes).
+    A timeline without a timestamp yet leaves the clock counting until both have one (see _settle).
+
+    The plot draws on its own axis (#63, plot_t, PlotClock): host time minus a constant fixed at the alignment, so it
+    equals voice time while nothing is lost, and a lost mic chunk is a gap in the voice line instead of a step of the
+    whole plot. Cuts between Takes are kept as host times (answer_host) and voice frames compared on their capture
+    host time (voice_host), so a mic chunk lost after the cut was computed cannot move it."""
 
     def __init__(self, log: SongLog, latency_s: float, output_at_input_zero_s: float,
-                 devices: tuple[StreamTimeline, StreamTimeline] | None = None, aligned_at_s: float = 0.0):
+                 devices: tuple[StreamTimeline, StreamTimeline] | None = None, aligned_at_s: float = 0.0,
+                 loop_latency: bool = False):
         self._log = log
         self.latency_s = latency_s
+        self.loop_latency = loop_latency
         self._lock = threading.RLock()                        # alignment and settling may race (audio vs tracker)
         self._alignment = (output_at_input_zero_s, aligned_at_s)
         self._devices = devices
-        self._map = self._mapping(_COUNTING, _COUNTING)      # (output, input, loop_s): one attribute, swapped whole
+        self._map = self._mapping(_COUNTING, _COUNTING)      # (output, input, loop_s, host0): swapped whole
         self.offset_s = aligned_at_s - self.to_output(aligned_at_s)    # = latency_s - output_at_input_zero_s untimed
         self._settle()
 
@@ -187,10 +329,13 @@ class LogClock:
             self.offset_s = aligned_at_s - self.to_output(aligned_at_s)
         self._settle()
 
-    def _mapping(self, out: StreamTimeline, inp: StreamTimeline) -> tuple[StreamTimeline, StreamTimeline, float]:
+    def _mapping(self, out: StreamTimeline, inp: StreamTimeline):
         output_at_zero, at = self._alignment
-        gap = out.host(output_at_zero + at) - inp.host(at)
-        return out, inp, self.latency_s - gap
+        if self.loop_latency and out is not _COUNTING:
+            loop = self.latency_s
+        else:
+            loop = self.latency_s - (out.host(output_at_zero + at) - inp.host(at))
+        return out, inp, loop, inp.host(at) - at
 
     def _settle(self) -> None:
         """Switch to the device timestamps once both timelines have one (any thread; idempotent)."""
@@ -204,26 +349,26 @@ class LogClock:
             self._devices = None
             self.offset_s = self._alignment[1] - self.to_output(self._alignment[1])
 
+    def _current(self):
+        if self._devices is not None:
+            self._settle()
+        return self._map
+
     @property
     def timed(self) -> bool:
         """The song is read through the device timestamps (not by counting frames)."""
-        if self._devices is not None:
-            self._settle()
-        return self._map[0] is not _COUNTING
+        return self._current()[0] is not _COUNTING
 
     @property
     def loop_s(self) -> float:
-        return self._map[2]
+        return self._current()[2]
 
-    def to_output(self, t):
-        """Output time (the Transport's frame count) answered by voice time t (scalar or array). Timed, never past what
-        has been rendered: a block whose callback has not run yet cannot be playing, so while one is late (the GIL held
-        elsewhere) the song waits at the last frame handed over, as the silence in the headphones does, instead of
-        running on until the late block's timestamp shows the gap."""
-        if self._devices is not None:
-            self._settle()
-        out, inp, loop_s = self._map
-        o = out.stream(inp.host(t) - loop_s)
+    def _output_at_host(self, h):
+        """Output time heard at host capture time h (scalar or array). Timed, never past what has been rendered: a
+        block whose callback has not run yet cannot be playing, so while one is late (the GIL held elsewhere) the song
+        waits at the last frame handed over, as the silence in the headphones does."""
+        out, _, loop_s, _ = self._current()
+        o = out.stream(h - loop_s)
         if out is _COUNTING:
             return o
         rendered = getattr(self._log, "rendered_s", None)
@@ -231,33 +376,66 @@ class LogClock:
             return o
         return np.minimum(o, rendered) if np.ndim(o) else float(min(o, rendered))
 
+    def to_output(self, t):
+        """Output time (the Transport's frame count) answered by voice time t (scalar or array)."""
+        return self._output_at_host(self.voice_host(t))
+
+    def voice_host(self, t):
+        """Host time voice time t was captured at (voice time itself, counting)."""
+        return self._current()[1].host(t)
+
+    def answer_host(self, output_s: float) -> float:
+        """Host capture time of the voice that answers output time output_s (a Transport event): a cut between Takes
+        is kept as this and compared with voice_host(frame), so a mic chunk lost meanwhile cannot move it (#63)."""
+        out, _, loop_s, _ = self._current()
+        return float(out.host(output_s) + loop_s)
+
     def to_voice(self, output_s):
-        """Voice time that answers output time output_s (a Transport event, the end of what is rendered)."""
+        """Voice time that answers output time output_s, as the input timeline reads now (a time in the future is
+        extrapolated: prefer answer_host where a later mic loss matters)."""
         if output_s == np.inf:
             return np.inf
-        if self._devices is not None:
-            self._settle()
-        out, inp, loop_s = self._map
-        return inp.stream(out.host(output_s) + loop_s)
+        return self._current()[1].stream(self.answer_host(output_s))
+
+    def voice_at_host(self, host_s: float) -> float:
+        return float(self._current()[1].stream(host_s))
 
     def voice_now(self) -> float | None:
         """The voice time being sung now (its sample enters the mic now): the input stream read on the host clock now.
-        None untimed (the caller counts received samples)."""
+        None untimed. Runs ahead during a mic loss (see plot_now for drawing)."""
         if not self.timed:
             return None
         inp = self._map[1]
         return float(inp.stream(inp.clock.now()))
 
+    # --- the plot's axis (#63) ---------------------------------------------------------------------------------------
+    def plot_t(self, t):
+        """Voice time t on the plot's axis: its capture host time minus the origin (= t while nothing is lost)."""
+        _, inp, _, host0 = self._current()
+        return inp.host(t) - host0
+
+    def plot_of_host(self, host_s: float) -> float:
+        return host_s - self._current()[3]
+
+    def plot_now(self) -> float | None:
+        """Now on the plot's axis: the host clock now minus the origin. Moves with the clock, never backwards, whatever
+        the mic loses. None untimed."""
+        if not self.timed:
+            return None
+        _, inp, _, host0 = self._map
+        return float(inp.clock.now()) - host0
+
+    def drawn(self) -> PlotClock:
+        """This clock read on the plot's axis (what the window draws with)."""
+        return PlotClock(self)
+
+    # --- voice time ------------------------------------------------------------------------------------------------
     def __call__(self, t: float) -> float | None:
         return self._log.song_time(self.to_output(t))
 
     def song_times(self, t: np.ndarray) -> np.ndarray:
         """__call__ over an array of voice times, NaN where paused (for drawing: one pass, not a call per point)."""
-        many = getattr(self._log, "song_times", None)
-        out = self.to_output(np.asarray(t, dtype=np.float64))
-        if many is not None:
-            return many(out)
-        return np.array([np.nan if (s := self._log.song_time(o)) is None else s for o in out], dtype=np.float64)
+        return _song_times(self._log, self.to_output(np.asarray(t, dtype=np.float64)))
 
     def tail(self) -> tuple[float, float | None, float] | None:
         """(voice time, song time, rate) where the rendered song ends, for projecting the song that is still to be
@@ -273,6 +451,47 @@ class LogClock:
     def paused_spans(self) -> list[tuple[float, float]]:
         """(start, end) voice times the song was paused (end inf = still paused): the voice there answers nothing."""
         return [(self.to_voice(start), self.to_voice(end)) for start, end in self._log.paused_spans()]
+
+
+def _song_times(log, output_s: np.ndarray) -> np.ndarray:
+    many = getattr(log, "song_times", None)
+    if many is not None:
+        return many(output_s)
+    return np.array([np.nan if (s := log.song_time(o)) is None else s for o in output_s], dtype=np.float64)
+
+
+class PlotClock:
+    """A LogClock on the plot's axis (LogClock.plot_t): the same song clock interface (call, song_times, tail,
+    paused_spans, offset_s) with plot time in place of voice time. Untimed the two axes are the same."""
+
+    def __init__(self, clock: LogClock):
+        self._c = clock
+
+    @property
+    def offset_s(self) -> float:
+        return self._c.offset_s
+
+    def _host(self, u):
+        return np.asarray(u, dtype=np.float64) + self._c._current()[3] if np.ndim(u) else u + self._c._current()[3]
+
+    def __call__(self, u: float) -> float | None:
+        return self._c._log.song_time(self._c._output_at_host(self._host(u)))
+
+    def song_times(self, u: np.ndarray) -> np.ndarray:
+        return _song_times(self._c._log, self._c._output_at_host(self._host(np.asarray(u, dtype=np.float64))))
+
+    def tail(self) -> tuple[float, float | None, float] | None:
+        tail = self._c._log.tail()
+        if tail is None:
+            return None
+        u = self._c.plot_of_host(self._c.answer_host(tail[0]))
+        now = self._c.plot_now()
+        return (u if now is None else max(u, now), tail[1], tail[2])
+
+    def paused_spans(self) -> list[tuple[float, float]]:
+        c = self._c
+        return [(c.plot_of_host(c.answer_host(a)), np.inf if b == np.inf else c.plot_of_host(c.answer_host(b)))
+                for a, b in c._log.paused_spans()]
 
 
 class SampledClock:

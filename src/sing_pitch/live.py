@@ -174,8 +174,10 @@ class LiveRunner:
 
     def __init__(self, source: AudioInput, tracker: PitchTracker, reference: Reference, home: Path,
                  backing: Playback | None = None, latency_s: float = 0.0, octave: OctaveSetting = AUTO,
-                 config: ScoreConfig = DEFAULT_SCORE_CONFIG):
+                 config: ScoreConfig = DEFAULT_SCORE_CONFIG, loop_latency: bool = False):
+        """loop_latency: latency_s was calibrated on the device timestamps (the DAC-to-ADC loop, see LogClock)."""
         self._source = source
+        self._loop_latency = loop_latency
         self._config = config                     # every Take of the run is scored with it (Tolerance, Timing window)
         self._tracker = tracker
         self._reference = reference
@@ -186,7 +188,7 @@ class LiveRunner:
         self._chunks: queue.SimpleQueue = queue.SimpleQueue()
         self._scores: queue.SimpleQueue = queue.SimpleQueue()
         self._take: LiveTake | None = None
-        self._cuts: list[tuple[float, PassTag | None, int | None]] = []   # (input time, tag of the next Take, its
+        self._cuts: list[tuple[float, PassTag | None, int | None]] = []   # (host time, tag of the next Take, its
                                                               # Speed percent or None = as before) of boundaries not
                                                               # yet reached by the frames (worker only)
         self._speed_pct = 100                     # Speed of the running Take (worker only)
@@ -200,6 +202,7 @@ class LiveRunner:
         self._error: Exception | None = None      # what killed the worker, if anything
         self._run_started = datetime.now()        # wall clock at input time 0: a cut's Take starts at this + its time
         self._received = 0                        # mic samples delivered so far (audio thread writes, UI reads)
+        self._heard = -math.inf                   # the largest heard_t given out
 
     def start(self) -> None:
         """Open the Backing and the input, then start the worker: a Start that fails leaves no thread behind."""
@@ -211,6 +214,7 @@ class LiveRunner:
         self._guide = [(-math.inf, getattr(self._backing, "current_gains", (1.0, 0.0))[1])]
         self._run_started = datetime.now()
         self._received = 0
+        self._heard = -math.inf
         self._take = LiveTake(self._tracker, self._reference, self._source.sample_rate, started_at=self._run_started,
                               octave=self._octave, config=self._config)
         if self._backing is None:
@@ -233,7 +237,8 @@ class LiveRunner:
                 if clock is None:
                     devices = device_times(getattr(self._backing, "output_times", None),
                                            getattr(self._source, "times", None))
-                    clock = LogClock(log, self._latency_s, log.rendered_s - end, devices, aligned_at_s=end)
+                    clock = LogClock(log, self._latency_s, log.rendered_s - end, devices, aligned_at_s=end,
+                                     loop_latency=self._loop_latency)
                     self._chunks.put(("align", clock))
                 elif not clock.aligned and log.rendered_s > 0:     # nothing was played at the first chunk
                     clock.realign(log.rendered_s - end, end)
@@ -297,7 +302,7 @@ class LiveRunner:
             output_s, tag, pct = value  # Take to close, so the first Take simply takes its tag and Speed
             pct, self._speed_next = pct if pct is not None else self._speed_next, None
             if isinstance(self._take.song_clock, LogClock):
-                self._cuts.append((self._take.song_clock.to_voice(output_s), tag, pct))
+                self._cuts.append((self._take.song_clock.answer_host(output_s), tag, pct))
             else:
                 self._take.pass_tag = tag
                 self._speed_pct = pct if pct is not None else self._speed_pct
@@ -305,23 +310,27 @@ class LiveRunner:
     def _route(self, frames: list[PitchFrame]) -> list[FrameScore]:
         """Tracker frames to the current Take; at each pending jump the Take is closed and the next one opened."""
         scores: list[FrameScore] = []
-        while self._cuts and frames:
-            first_after = next((i for i, f in enumerate(frames) if f.t >= self._cuts[0][0]), None)
+        clock = self._take.song_clock
+        while self._cuts and frames:                # compared on capture host time: a mic loss after the cut was
+            cut = self._cuts[0][0]                  # computed cannot move it (#63); counting, host time = voice time
+            first_after = next((i for i, f in enumerate(frames) if clock.voice_host(f.t) >= cut), None)
             if first_after is None:
                 break
             scores += self._take.push_frames(frames[:first_after])
             frames = frames[first_after:]
-            at, tag, pct = self._cuts.pop(0)
-            self._next_take(tag, pct, at)
+            host, tag, pct = self._cuts.pop(0)
+            self._next_take(tag, pct, clock.voice_at_host(host), clock.plot_of_host(host))
         return scores + self._take.push_frames(frames)
 
     def _with_settings(self, record: TakeRecord) -> TakeRecord:
         guide, gain = _guide_settings(self._guide, record.frames)
         return dataclasses.replace(record, guide_vocal=guide, guide_gain=gain, speed_pct=self._speed_pct)
 
-    def _next_take(self, tag: PassTag | None = None, speed_pct: int | None = None, at: float = 0.0) -> None:
-        """Close the running Take and open the next one at voice time `at`: it started at the run start + `at` (not
-        when the worker got here), so Takes cut a few seconds apart get their own started_at and id."""
+    def _next_take(self, tag: PassTag | None = None, speed_pct: int | None = None, at: float = 0.0,
+                   plot_at: float | None = None) -> None:
+        """Close the running Take and open the next one at voice time `at` (plot_at on the plot's axis, for
+        drain_cuts): it started at the run start + `at` (not when the worker got here), so Takes cut a few seconds apart
+        get their own started_at and id."""
         old, clock = self._take, self._take.song_clock
         record = self._with_settings(old.close())
         if speed_pct is not None:
@@ -333,7 +342,7 @@ class LiveRunner:
         self._take = LiveTake(self._tracker, self._reference, self._source.sample_rate, song_clock=clock,
                               reset_tracker=False, pass_tag=tag, octave=self._octave, config=self._config,
                               started_at=self._run_started + timedelta(seconds=max(0.0, at)))
-        self._cut_news.put(at)           # before any score of the new Take is handed over (see drain_cuts)
+        self._cut_news.put(at if plot_at is None else plot_at)   # before any score of the new Take is handed over
 
     def drain_saved(self) -> list[TakeRecord]:
         """Takes saved at a jump or a loop wrap since the last call (the last Take of the run comes from stop())."""
@@ -345,7 +354,7 @@ class LiveRunner:
                 return out
 
     def drain_cuts(self) -> list[float]:
-        """Voice times of the Take boundaries (jumps, loop wraps, Speed changes) the worker has passed since the last
+        """Times on the plot's axis (see drain) of the Take boundaries (jumps, loop wraps, Speed changes) the worker has passed since the last
         call, oldest first. A boundary is listed before any score after it reaches drain(): call this after drain()
         and every score of the new Take drained so far has its boundary here."""
         out: list[float] = []
@@ -368,18 +377,56 @@ class LiveRunner:
 
     @property
     def heard_t(self) -> float:
-        """The voice time of what is in the headphones now. With device timestamps (a timed LogClock): the voice time
-        being captured now, read on the host clock at the moment of asking, so it moves smoothly between mic chunks and
-        does not depend on when a callback or the worker last ran (#49). Without: the newest mic sample's time plus the
+        """The time of what is in the headphones now, on the plot's axis (see drain). With device timestamps (a timed
+        LogClock): the host clock now, so it moves smoothly between mic chunks, does not depend on when a callback or
+        the worker last ran (#49) and never goes back when the mic loses a chunk (#63). Without: the newest mic sample's time plus the
         input's own latency. The calibrated latency is the output part plus the input part, so in song terms this is
         the rendered output minus the output part of the latency. Every tracker frame is older than this by the
         tracker's look-ahead (SwiftF0: ~0.18 s) and the queueing, so the plot's now-line is drawn here, not at the
         newest frame."""
         clock = self.song_clock
-        now = clock.voice_now() if isinstance(clock, LogClock) else None
-        if now is not None:
-            return now
-        return self._received / self._source.sample_rate + getattr(self._source, "latency_s", 0.0)
+        now = clock.plot_now() if isinstance(clock, LogClock) else None
+        if now is None:
+            now = self._received / self._source.sample_rate + getattr(self._source, "latency_s", 0.0)
+        self._heard = max(self._heard, now)       # never back, also when the clock switches from counting to stamps
+        return self._heard
+
+    @property
+    def draw_clock(self) -> SongClock | None:
+        """The song clock on the plot's axis (LogClock.drawn): what the window draws the Reference with."""
+        clock = self.song_clock
+        return clock.drawn() if isinstance(clock, LogClock) else clock
+
+    # --- for the audio health record (audio_health.py) ------------------------------------------------------------
+    @property
+    def saved(self) -> list[TakeRecord]:
+        """Takes saved so far in this run."""
+        return list(self._saved)
+
+    @property
+    def loop_latency(self) -> bool:
+        return self._loop_latency
+
+    @property
+    def calibrated_latency_s(self) -> float:
+        return self._latency_s
+
+    @property
+    def output_times(self):
+        return getattr(self._backing, "output_times", None)
+
+    @property
+    def input_times(self):
+        return getattr(self._source, "times", None)
+
+    @property
+    def output_latency_s(self) -> float | None:
+        return getattr(self._backing, "reported_latency_s", None)
+
+    @property
+    def input_latency_s(self) -> float | None:
+        value = getattr(self._source, "latency_s", None)
+        return None if value is None else float(value)
 
     @property
     def glitches(self) -> tuple[int, int]:
@@ -389,6 +436,9 @@ class LiveRunner:
         return (out.glitches if out is not None else 0, inp.glitches if inp is not None else 0)
 
     def drain(self) -> list[FrameScore]:
+        """Scores made since the last call, their times on the plot's axis: capture host time minus a fixed origin
+        (LogClock.plot_t), which is voice time while nothing is lost; after a lost mic chunk the voice that follows is
+        placed where it was sung, leaving a gap, so the plot never steps back (#63). Saved Takes keep voice time."""
         out: list[FrameScore] = []
         while True:
             try:
@@ -397,6 +447,10 @@ class LiveRunner:
                 break
         if not out and self._error is not None:       # the scores made before the crash are shown first
             raise self._error
+        clock = self.song_clock
+        if out and isinstance(clock, LogClock) and clock.timed:
+            plot = clock.plot_t(np.array([s.t for s in out]))
+            out = [dataclasses.replace(s, t=float(u)) for s, u in zip(out, plot)]
         return out
 
     def _pop_error(self) -> Exception:

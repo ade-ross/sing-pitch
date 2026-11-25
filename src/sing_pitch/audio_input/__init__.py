@@ -53,6 +53,7 @@ class SoundDeviceInput:
         self.sample_rate = sample_rate
         self._blocksize = blocksize
         self._stream = None
+        self._latency = 0.0
         self.times = StreamTimeline()
 
     def start(self, on_chunk: Callable[[np.ndarray], None]) -> None:
@@ -70,7 +71,7 @@ class SoundDeviceInput:
                 times.flagged += 1
             adc = time_info.inputBufferAdcTime if time_info is not None else 0.0
             if adc > 0:                    # 0: the driver had no timestamp for this block
-                times.add(received / rate, adc)
+                times.add(received / rate, adc, frames)
             received += frames
             on_chunk(indata[:, 0].copy())  # buffer is reused by PortAudio
 
@@ -79,11 +80,12 @@ class SoundDeviceInput:
             dtype="float32", latency="low", callback=callback,
         )
         self._stream.start()
+        self._latency = float(getattr(self._stream, "latency", 0.0) or 0.0)
 
     @property
     def latency_s(self) -> float:
-        """The input latency PortAudio reports (mic -> callback), 0 before start()."""
-        return 0.0 if self._stream is None else float(self._stream.latency)
+        """The input latency PortAudio reports (mic -> callback), 0 before start(); kept after stop()."""
+        return self._latency
 
     def stop(self) -> None:
         if self._stream is not None:
