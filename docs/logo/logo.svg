@@ -1,0 +1,34 @@
+<svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 512 512" width="512" height="512">
+<defs><linearGradient id="bg" x1="0" y1="0" x2="0" y2="1"><stop offset="0" stop-color="#22305a"/><stop offset="1" stop-color="#0c1020"/></linearGradient><filter id="glow" x="-50%" y="-50%" width="200%" height="200%"><feGaussianBlur stdDeviation="9"/></filter><clipPath id="r"><rect width="512" height="512" rx="114"/></clipPath></defs>
+<g clip-path="url(#r)">
+<rect width="512" height="512" fill="url(#bg)"/>
+<line x1="0" x2="512" y1="110" y2="110" stroke="#ffffff" stroke-opacity="0.05" stroke-width="2"/>
+<line x1="0" x2="512" y1="148" y2="148" stroke="#ffffff" stroke-opacity="0.05" stroke-width="2"/>
+<line x1="0" x2="512" y1="186" y2="186" stroke="#ffffff" stroke-opacity="0.05" stroke-width="2"/>
+<line x1="0" x2="512" y1="224" y2="224" stroke="#ffffff" stroke-opacity="0.05" stroke-width="2"/>
+<line x1="0" x2="512" y1="262" y2="262" stroke="#ffffff" stroke-opacity="0.05" stroke-width="2"/>
+<line x1="0" x2="512" y1="300" y2="300" stroke="#ffffff" stroke-opacity="0.05" stroke-width="2"/>
+<line x1="0" x2="512" y1="338" y2="338" stroke="#ffffff" stroke-opacity="0.05" stroke-width="2"/>
+<line x1="0" x2="512" y1="376" y2="376" stroke="#ffffff" stroke-opacity="0.05" stroke-width="2"/>
+<line x1="0" x2="512" y1="414" y2="414" stroke="#ffffff" stroke-opacity="0.05" stroke-width="2"/>
+<rect x="300" y="0" width="212" height="512" fill="#000" fill-opacity="0.22"/>
+<rect x="52" y="347" width="122" height="50" rx="25" fill="#5dade2" fill-opacity="0.20"/>
+<line x1="58" x2="168" y1="372" y2="372" stroke="#5dade2" stroke-width="30" stroke-linecap="round"/>
+<rect x="186" y="247" width="102" height="50" rx="25" fill="#5dade2" fill-opacity="0.20"/>
+<line x1="192" x2="282" y1="272" y2="272" stroke="#5dade2" stroke-width="30" stroke-linecap="round"/>
+<rect x="312" y="143" width="86" height="50" rx="25" fill="#5dade2" fill-opacity="0.20"/>
+<line x1="318" x2="392" y1="168" y2="168" stroke="#5dade2" stroke-width="30" stroke-linecap="round"/>
+<rect x="408" y="211" width="56" height="50" rx="25" fill="#5dade2" fill-opacity="0.20"/>
+<line x1="414" x2="458" y1="236" y2="236" stroke="#5dade2" stroke-width="30" stroke-linecap="round"/>
+<line x1="300" x2="300" y1="62" y2="450" stroke="#f5f5f5" stroke-opacity="0.9" stroke-width="9" stroke-linecap="round"/>
+<g filter="url(#glow)" opacity="0.55"><circle cx="50.0" cy="403.7" r="14" fill="#f1c40f"/><circle cx="78.0" cy="379.8" r="14" fill="#2ecc71"/><circle cx="106.0" cy="368.1" r="14" fill="#2ecc71"/><circle cx="134.0" cy="375.2" r="14" fill="#2ecc71"/><circle cx="162.0" cy="371.9" r="14" fill="#2ecc71"/><circle cx="190.0" cy="310.8" r="14" fill="#e74c3c"/><circle cx="218.0" cy="280.3" r="14" fill="#2ecc71"/><circle cx="246.0" cy="268.4" r="14" fill="#2ecc71"/><circle cx="274.0" cy="277.0" r="14" fill="#2ecc71"/></g>
+<circle cx="50.0" cy="403.7" r="12.5" fill="#f1c40f"/>
+<circle cx="78.0" cy="379.8" r="12.5" fill="#2ecc71"/>
+<circle cx="106.0" cy="368.1" r="12.5" fill="#2ecc71"/>
+<circle cx="134.0" cy="375.2" r="12.5" fill="#2ecc71"/>
+<circle cx="162.0" cy="371.9" r="12.5" fill="#2ecc71"/>
+<circle cx="190.0" cy="310.8" r="12.5" fill="#e74c3c"/>
+<circle cx="218.0" cy="280.3" r="12.5" fill="#2ecc71"/>
+<circle cx="246.0" cy="268.4" r="12.5" fill="#2ecc71"/>
+<circle cx="274.0" cy="277.0" r="12.5" fill="#2ecc71"/>
+</g><rect x="1.5" y="1.5" width="509" height="509" rx="113" fill="none" stroke="#ffffff" stroke-opacity="0.14" stroke-width="3"/></svg>

@@ -1,6 +1,8 @@
-# sing-pitch
+<p align="center"><img src="docs/logo/logo.svg" width="160" alt="sing-pitch logo: voice dots landing on melody notes"></p>
 
-Sing along with a song and see, live, how close your voice is to the original singer's melody.
+<h1 align="center">sing-pitch</h1>
+
+<p align="center">Sing along with a song and see, live, how close your voice is to the original singer's melody.</p>
 
 You pick a song, put on headphones and press Start. The song plays, and the app draws the singer's melody as a blue
 line and your voice as dots on top of it: green when you are in tune, yellow when you are a little off, red when you
