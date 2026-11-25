@@ -266,8 +266,9 @@ class Transport:
 
     @staticmethod
     def _same_section(a: Loop | None, b: Loop | None) -> bool:
-        """Both loop the same Section: only what plays between Passes may differ."""
-        return a is not None and b is not None and (a.start_s, a.end_s, a.name) == (b.start_s, b.end_s, b.name)
+        """Both loop the same stretch of song: what plays between Passes and the name (saving the unsaved mark only
+        names it) may differ, and apply from the next Pass."""
+        return a is not None and b is not None and (a.start_s, a.end_s) == (b.start_s, b.end_s)
 
     def _fit_loop(self, loop: Loop) -> Loop | None:
         """The loop clamped to the song and at least MIN_LOOP_S long (the whole song if it is shorter); None for a
