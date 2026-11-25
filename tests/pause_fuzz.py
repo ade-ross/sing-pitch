@@ -9,22 +9,40 @@ Speed, Guide vocal, resize, replay, Stop ...). After every action the invariants
   plot (now-line, x range) and the count of scored frames do not move, even though the mic keeps singing;
 - after a resume the song goes on from where it stood and everything moves again.
 
+The strong checks (what a weaker version missed against deliberately broken Transports, tests/pause_mutants.py):
+the output of EVERY audio step is recorded, so the whole length of each pause must be silent (not a window after a
+settle); the window is sampled every ~8 ms through the whole pause (playhead, now-line, x range, drawn and scored frames
+sung while paused, song position), not at two instants; the song time a resume starts from is compared exactly with
+the one paused at; fault injection (underflow, overflow, clock drift, UI stalls: testmode.Faults) and resize storms are
+part of the action set. Choosing a Section or marking one while looping moves the song on purpose (the pause interval
+is closed there); saving a Section must not move it.
+
 run(seed, steps) returns the violations with the action list that led to them. Used by tests/test_pause_random.py (a
 short, fixed set of seeds) and by hand: `uv run python tests/pause_fuzz.py <first seed> <count> <steps>`."""
 from __future__ import annotations
 
+import os
 import random
+import shutil
 import sys
 import tempfile
+import time
+import weakref
 from pathlib import Path
 
 import numpy as np
 import soundfile as sf
 from qa_helpers import NOTES, configure_latency, singing_song
 
+from PySide6 import QtCore
+
 from sing_pitch.qa import QA
 
 SCALE = 4.0
+SR = 48000
+STEP = 256             # frames the fake audio hub plays at a time
+FAULTS = "underflow=2.3:50,overflow=2.9:40,drift=300,ui_stall=1.7:80"     # a rough device, for the runs with faults
+START_WAIT_S = 12.0    # app seconds a Start may wait for its Speed before the hunt presses Start again to cancel it
 SETTLE_S = 0.9         # app seconds after a pause before everything must stand still (tracker look-ahead + latency)
 WATCH_S = 0.6          # ... and the stretch it is watched over
 LONGEST_WAIT_S = 1.0   # longest wait between two actions
@@ -46,46 +64,70 @@ class _Probe:
     """What the hunt records, from patches on the classes (not on the instances: a closure on the window, the hub or the
     runner would make a reference cycle, and a Qt object in a cycle is freed by gc on any thread, see handoff-segfault)."""
 
-    max_streams = 0                  # most output streams the hub played in one step
+    max_streams = 0                       # most output streams the hub played in one step
     scored: dict[int, list[float]] = {}   # per runner (its id): voice time of every scored frame (with a Band) it handed over
+    rows: list = []                       # per audio step: (first frame, peak of the mix, streams open, live players)
+    players: list = []                    # weak refs to every BackingPlayer started
 
 
 def _install_probe():
     from sing_pitch.live import LiveRunner
+    from sing_pitch.playback import BackingPlayer
     from sing_pitch.testmode import FakeAudioHub
 
-    step, drain = FakeAudioHub._step, LiveRunner.drain
+    step, drain, start = FakeAudioHub._step, LiveRunner.drain, BackingPlayer.start
 
     def counting_step(self) -> None:                 # hub thread
+        frame = self._frame
         _Probe.max_streams = max(_Probe.max_streams, len(self._outputs))
         step(self)
+        peak = 0.0
+        if self._recording:
+            peak = float(np.abs(self._recording[-1]).max())
+            self._recording.clear()                  # only the peak is kept: a long run would fill the memory
+        live = tuple((not p.transport.playing, p.position_s(), p.loop is not None)
+                     for ref in _Probe.players if (p := ref()) is not None and p._stream is not None)
+        _Probe.rows.append((frame, peak, len(self._outputs), live))
 
     def recording_drain(self) -> list:
         out = drain(self)
         _Probe.scored.setdefault(id(self), []).extend(s.t for s in out if s.band is not None)
         return out
 
-    FakeAudioHub._step, LiveRunner.drain = counting_step, recording_drain
-    _Probe.max_streams, _Probe.scored = 0, {}
+    def registering_start(self) -> None:
+        _Probe.players.append(weakref.ref(self))
+        return start(self)
+
+    FakeAudioHub._step, LiveRunner.drain, BackingPlayer.start = counting_step, recording_drain, registering_start
+    _Probe.max_streams, _Probe.scored, _Probe.rows, _Probe.players = 0, {}, [], []
 
     def restore() -> None:
-        FakeAudioHub._step, LiveRunner.drain = step, drain
+        FakeAudioHub._step, LiveRunner.drain, BackingPlayer.start = step, drain, start
 
     return restore
 
 
 class Hunt:
-    def __init__(self, home: Path, seed: int):
+    def __init__(self, home: Path, seed: int, faults: str | None = None):
         self._restore = _install_probe()
         self.rng = random.Random(seed)
         try:
             self.song = build_song(home)
             self.qa = QA(home, mic=str(self.song.vocals_path), loop_mic=True, time_scale=SCALE,
-                         record_output=home / "out.wav")
+                         record_output=home / "out.wav", faults=faults)    # recording on: the hub keeps each step's mix
+            self.qa._record_output = None            # ... but nothing is written to disk when the run closes
         except BaseException:
             self._restore()
             raise
         self.win, self.hub = self.qa.window, self.qa.hub
+        self.samples: list[tuple] = []
+        self._sampler = QtCore.QTimer()
+        self._sampler.setInterval(8)
+        self._sampler.timeout.connect(self._sample)
+        self._sampler.start()
+        self.iv: dict | None = None                  # the pause being watched: where it began
+        self.resume_check = None
+        self.moved_by_action = False
         self.actions: list[str] = []
         self.violations: list[str] = []
         self.expect_paused = False
@@ -167,7 +209,13 @@ class Hunt:
         self.say("Start")
         self.qa.click("button")
         if self.win._start_waiting:
-            self.qa.wait_until(lambda: self.qa.running or not self.win._start_waiting, timeout_s=30)
+            try:
+                self.qa.wait_until(lambda: self.qa.running or not self.win._start_waiting, timeout_s=START_WAIT_S)
+            except TimeoutError:                       # a slow preparation (a loaded machine): the user cancels
+                self.say("cancel the Start that waits for its Speed")
+                self.qa.click("button")
+                if self.win._start_waiting or self.win.button.text() != "Start":
+                    self.bad(f"the Start button did not cancel a waiting Start (it says {self.win.button.text()!r})")
 
     def a_stop(self) -> None:
         if self.qa.running:
@@ -323,6 +371,25 @@ class Hunt:
         self.win.activateWindow()         # Space belongs to the window that is active: he clicks back to use it
         self.qa._app.processEvents()
 
+    def a_storm(self) -> None:
+        self.say("resize storm")
+        for _ in range(8):
+            self.win.resize(self.rng.randrange(700, 1500), self.rng.randrange(520, 900))
+            self.qa._app.processEvents()
+            time.sleep(0.004)
+
+    def a_gain(self) -> None:
+        self.say("Backing or Guide vocal slider")
+        self.set(self.rng.choice(["guide_slider", "backing_slider"]), self.rng.randrange(0, 101))
+
+    def a_wait(self) -> None:
+        self.say("wait 1.5 s")
+        self.qa.wait(1.5)
+
+    def a_hold(self) -> None:
+        self.say("wait 4 s")
+        self.qa.wait(4.0)
+
     def a_refresh(self) -> None:
         self.say("Refresh devices")
         self.win.refresh_devices()
@@ -336,7 +403,152 @@ class Hunt:
                (6, "a_seek"), (3, "a_arrow"), (4, "a_mark"), (2, "a_save_section"), (3, "a_choose_section"),
                (5, "a_loop"), (3, "a_between"), (4, "a_speed_preset"), (3, "a_speed_key"), (3, "a_guide"),
                (4, "a_resize"), (3, "a_replay"), (2, "a_replay_from_history"), (1, "a_refresh"), (1, "a_calibrate"),
-               (1, "a_history")]
+               (1, "a_history"), (3, "a_storm"), (2, "a_gain")]
+
+    # --- the whole length of every pause ------------------------------------------------------------------------
+    def _sample(self) -> None:
+        """Every ~8 ms of wall time, from the event loop: what the window shows."""
+        w = self.win
+        if w is None:
+            return
+        b = w._backing
+        try:
+            self.samples.append((self.hub._frame, id(self.subject), w.timeline.playhead_s, w._now_line.value(),
+                                 w._plot.viewRange()[0][0], None if b is None else b.position_s(), self._late_drawn(),
+                                 w.pause_button.text(), self._late_scored()))
+        except Exception:
+            pass
+
+    def _open_span(self) -> float | None:
+        """Voice time the song has been paused since (the open paused span of the draw clock); None if not paused."""
+        spans = getattr(self.win._draw_clock(), "paused_spans", lambda: [])()
+        return spans[-1][0] if spans and np.isinf(spans[-1][1]) else None
+
+    def _late_drawn(self) -> int:
+        since = self._open_span()
+        return 0 if since is None else sum(1 for t in list(self.win._t) if t >= since)
+
+    def _late_scored(self) -> int:
+        since = self._open_span()
+        if since is None:
+            return 0
+        n = 0
+        for t in reversed(self.scored_t):
+            if t < since - 1.0:
+                break
+            n += t >= since
+        return n
+
+    def _rows(self, f0: int, f1: int) -> list:
+        return [r for r in _Probe.rows if f0 <= r[0] < f1]
+
+    def _open(self) -> None:
+        """A pause begins being watched (the song is paused, as far as the user has done)."""
+        if self.subject is None or not self.expect_paused:
+            return
+        b = self.backing
+        self.iv = dict(f0=self.hub._frame, sid=id(self.subject), n_stretches=None if b is None else len(b.song_log._start))
+
+    def _close(self, why: str, resumed: bool = False) -> None:
+        """The pause being watched ends (resume, or an action that moves the song): everything from its start on must
+        have been silent and still, the whole way."""
+        iv, self.iv = self.iv, None
+        if iv is None:
+            return
+        f1, b = self.hub._frame, self.backing
+        if id(self.subject) != iv["sid"] and self.subject is not None:
+            return
+        rows = self._rows(iv["f0"] + 3 * STEP, f1)
+        loud = max((r[1] for r in rows), default=0.0)
+        if loud > 1e-6:
+            self.bad(f"SOUND during the pause (whole pause, closed by {why}): peak {loud:.3f} in app "
+                     f"{iv['f0'] / SR:.2f}-{f1 / SR:.2f}")
+        if b is not None:
+            if any(r[3] and not all(p for p, _, _ in r[3]) for r in rows):
+                self.bad(f"a player was not paused during the pause (closed by {why})")
+            positions = [r[3][0][1] for r in rows if r[3]]
+            if positions and max(positions) - min(positions) > 1e-9:
+                self.bad(f"song position moved during the pause {min(positions):.3f}..{max(positions):.3f} "
+                         f"(closed by {why})")
+        ui = [x for x in self.samples if iv["f0"] + int(1.3 * SR) <= x[0] < f1 and x[1] == iv["sid"]]
+        if len(ui) >= 3:
+            self.frozen_checks += 1                    # a pause watched long enough to mean something
+            columns = [(2, "Timeline playhead"), (3, "plot now-line"), (4, "plot x-range")]
+            if b is not None:
+                columns.append((5, "song position"))
+            for k, name in columns:
+                values = [x[k] for x in ui if x[k] is not None]
+                if values and max(values) - min(values) > 1e-6:
+                    self.bad(f"{name} moved during the pause {min(values):.4f}..{max(values):.4f} "
+                             f"({len(ui)} samples, closed by {why})")
+            if max(x[6] for x in ui):
+                self.bad(f"frames sung while paused were drawn (closed by {why})")
+            if max(x[8] for x in ui):
+                self.bad(f"frames sung while paused were scored (closed by {why})")
+        if resumed and b is not None and iv["n_stretches"] is not None:
+            self.resume_check = (b, b.position_s(), iv["n_stretches"])
+
+    def _verify_resume(self) -> None:
+        """The first stretch the song log plays after a pause starts at exactly the song time it was paused at."""
+        if self.resume_check is None:
+            return
+        b, position, n0 = self.resume_check
+        if b is not self.backing:
+            self.resume_check = None
+            return
+        log = b.song_log
+        for i in range(max(0, n0 - 1), len(log._start)):
+            if log._song0[i] is not None and i > 0 and log._song0[i - 1] is None:
+                if abs(log._song0[i] / SR - position) > 2e-3 and not self.moved_by_action:
+                    self.bad(f"resumed at song time {log._song0[i] / SR:.3f}, it was paused at {position:.3f}")
+                self.resume_check = None
+                return
+
+    def _end_scans(self) -> None:
+        """Over the whole run, independent of what the actions said: a player paused for 4 or more audio steps must be
+        silent; the button and the Transport must not disagree for more than 0.35 s; and the reported symptom of #50
+        (Timeline frozen, plot moving, sound playing) must never appear."""
+        run, reported = 0, False
+        for f, peak, _, live in _Probe.rows:
+            if live and all(p for p, _, _ in live):
+                run += 1
+                if run >= 4 and peak > 1e-6 and not reported:
+                    reported = True
+                    self.bad(f"SOUND in the step at app {f / SR:.2f} while every player had been paused for {run} steps")
+            else:
+                run, reported = 0, False
+        by_frame, since = {r[0]: r for r in _Probe.rows}, None
+        for x in self.samples:
+            row = by_frame.get(x[0] - x[0] % STEP) or by_frame.get(x[0])
+            if row is None or not row[3]:
+                since = None
+                continue
+            transport_paused = all(p for p, _, _ in row[3])
+            if transport_paused != (x[7] == "Play"):
+                since = x[0] if since is None else since
+                if x[0] - since > 0.35 * SR:
+                    self.bad(f"the button says {x[7]!r} but the Transport paused={transport_paused} since app "
+                             f"{since / SR:.2f}")
+                    break
+            else:
+                since = None
+        window = int(0.7 * SR)
+        i = 0
+        while i < len(self.samples):
+            j = i
+            while j < len(self.samples) and self.samples[j][0] - self.samples[i][0] < window:
+                j += 1
+            if j >= len(self.samples):
+                break
+            seg = self.samples[i:j]
+            if len({x[1] for x in seg}) == 1:
+                playhead, now = [x[2] for x in seg], [x[3] for x in seg]
+                if max(playhead) - min(playhead) < 1e-9 and max(now) - min(now) > 0.2:
+                    loud = max((r[1] for r in self._rows(seg[0][0], seg[-1][0])), default=0.0)
+                    if loud > 1e-4:
+                        self.bad(f"THE REPORTED SYMPTOM at app {seg[0][0] / SR:.2f}: playhead frozen, now-line moved "
+                                 f"{max(now) - min(now):.2f}, sound peak {loud:.3f}")
+            i = j
 
     # --- invariants -------------------------------------------------------------------------------------------
     def snapshot(self) -> dict:
@@ -357,9 +569,7 @@ class Hunt:
         return spans[-1][0] if spans and np.isinf(spans[-1][1]) else None
 
     def loudest(self, f0: int, f1: int) -> float:
-        step = self.hub.step
-        chunks = self.hub._recording[f0 // step + 1: f1 // step]
-        return float(max((np.abs(c).max() for c in chunks), default=0.0))
+        return max((r[1] for r in self._rows(f0 + 3 * STEP, f1)), default=0.0)
 
     def check_state(self) -> None:
         w, subject = self.win, self.subject
@@ -408,7 +618,6 @@ class Hunt:
         self.settle(subject)
         if self.subject is not subject or not self.expect_paused:
             return
-        self.frozen_checks += 1
         a = self.snapshot()
         self.qa.wait(WATCH_S)
         b = self.snapshot()
@@ -465,16 +674,33 @@ class Hunt:
             if after["now"] == before["now"] and self.win._replay is None:
                 self.bad("the plot's now-line does not move")
 
-    def step(self) -> None:
-        weights, names = zip(*self.ACTIONS)
-        getattr(self, self.rng.choices(names, weights)[0])()
+    SPLITS = {"a_space", "a_space_burst", "a_space_to_focus", "a_pause_button", "a_start", "a_stop", "a_replay",
+              "a_replay_from_history", "a_calibrate", "a_seek", "a_arrow", "a_mark", "a_choose_section", "a_loop",
+              "a_between"}                  # what ends the pause being watched: a resume, or a move of the song
+    MOVES = {"a_seek", "a_arrow", "a_mark", "a_choose_section", "a_loop", "a_between"}    # ... on purpose
+
+    def step(self, name: str | None = None) -> None:
+        if name is None:
+            weights, names = zip(*self.ACTIONS)
+            name = self.rng.choices(names, weights)[0]
+        if name in self.SPLITS:
+            self._close(f"before {name}", resumed=name in ("a_space", "a_space_burst", "a_space_to_focus",
+                                                             "a_pause_button"))
+        self.moved_by_action = name in self.MOVES
+        getattr(self, name)()
         self.qa.wait(self.rng.uniform(0.05, LONGEST_WAIT_S))
         self._sync_expectation()
+        if self.iv is None:
+            self._open()
         self.check_state()
+        self._verify_resume()
         if self.rng.random() < 0.7:
+            lost = self.hub.lost_out_steps
             self.check_frozen()
-            self.check_moving()
+            if self.hub.lost_out_steps - lost < 10:        # a device that dropped blocks is not asked to keep time
+                self.check_moving()
             self.check_state()
+        self._verify_resume()
 
     def check_close(self) -> None:
         """The red close button, in whatever state the window is: everything stops, nothing keeps the app alive."""
@@ -491,37 +717,53 @@ class Hunt:
         if self._visible_windows() - self.visible_before:
             self.bad("after close a window is still visible, the app would not quit")
 
-    def run(self, steps: int) -> None:
+    def run(self, steps: int, script: list[str] | None = None) -> None:
+        """steps random actions, or the given list of action names; then the close, then the scans over the whole run."""
         try:
-            for _ in range(steps):
-                self.step()
+            for name in script if script is not None else [None] * steps:
+                self.step(name)
+            self._close("end of run")
             self.check_close()
+            self._end_scans()
         finally:
+            self._sampler.stop()
+            self._sampler.timeout.disconnect()
+            self._sampler.deleteLater()
+            self._sampler = None
             self.qa.close()
             self._restore()
             self.win = self.hub = self.qa = self.song = None      # nothing of the window outlives the run
 
 
-def run(seed: int, steps: int = 30, home: Path | None = None) -> tuple[list[str], list[str], int]:
-    """(violations, the actions that led to them, how many pauses were watched)."""
+def run(seed: int, steps: int = 30, home: Path | None = None, faults: str | None = None,
+        script: list[str] | None = None) -> tuple[list[str], list[str], int]:
+    """(violations, the actions that led to them, how many pauses were watched). faults: a testmode.Faults spec
+    (FAULTS is a rough device). script: action names to run instead of random ones."""
+    own = home is None
     home = home or Path(tempfile.mkdtemp(prefix=f"pausefuzz{seed}-"))
-    hunt = Hunt(home, seed)
+    hunt = Hunt(home, seed, faults)
     try:
-        hunt.run(steps)
+        hunt.run(steps, script)
     except Exception as exc:                # a crash is a finding too
         hunt.violations.append(f"EXCEPTION {type(exc).__name__}: {exc}")
+    if own:
+        shutil.rmtree(home, ignore_errors=True)
     return hunt.violations, hunt.actions, hunt.frozen_checks
 
 
 if __name__ == "__main__":
     first, count, steps = int(sys.argv[1]), int(sys.argv[2]), int(sys.argv[3])
+    spec = sys.argv[4] if len(sys.argv) > 4 else "none"
+    faults = FAULTS if spec == "faults" else None if spec == "none" else spec
     failed = 0
     for seed in range(first, first + count):
-        violations, actions, watched = run(seed, steps)
-        print(f"seed {seed}: {len(violations)} violation(s), {watched} pauses watched", flush=True)
+        began = time.time()
+        violations, actions, watched = run(seed, steps, faults=faults)
+        print(f"seed {seed}: {len(violations)} violation(s), {watched} pauses watched, {time.time() - began:.0f}s, "
+              f"load {os.getloadavg()[0]:.0f}", flush=True)
         if violations:
             failed += 1
             print("\n".join(violations))
             print("--- actions\n" + "\n".join(actions) + "\n---", flush=True)
-    print(f"{failed} of {count} seeds failed")
+    print(f"{failed} of {count} seeds failed (faults={faults!r})")
     sys.exit(1 if failed else 0)
