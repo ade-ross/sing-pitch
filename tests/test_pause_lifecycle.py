@@ -8,7 +8,7 @@ from types import SimpleNamespace
 
 import numpy as np
 import pytest
-from audio import SR, quiet
+from audio import SR, harmonic, quiet
 from pytest import approx
 from PySide6 import QtCore, QtGui, QtWidgets
 from PySide6.QtTest import QTest
@@ -130,11 +130,13 @@ def test_closing_the_window_mid_take_saves_the_take_stops_the_song_and_closes_hi
     from sing_pitch.take_store import _rows
 
     win, backings = running_window(qtbot, tmp_path)
+    win._input_factory = lambda _i: ArrayInput(harmonic(220.0, 1.0), SR, 256)    # something is sung: a Take with nothing scored is not saved
     win.show()
     win.open_history()
     before = len(tracker_threads())
     win.toggle()
     assert backings[0].started and not backings[0].stopped
+    qtbot.wait(300)                                            # the worker scores what was sung
     assert len(tracker_threads()) == before + 1
     win.close()
     assert backings[0].stopped and win._runner is None
