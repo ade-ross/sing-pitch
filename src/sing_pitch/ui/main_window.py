@@ -300,12 +300,13 @@ class MainWindow(QtWidgets.QWidget):
         self.cancel_overwrite_button.clicked.connect(self._forget_overwrite)
         self.overwrite_button.setToolTip("Replace the saved Section with this name by the current mark.")
         self.cancel_overwrite_button.setToolTip("Keep the saved Section; change the name to save the mark separately.")
-        self.overwrite_button.hide()
-        self.cancel_overwrite_button.hide()
         self.section_name_edit.textChanged.connect(self._forget_overwrite)
         self.section_name_edit.textChanged.connect(self._forget_section_message)
         self.rename_section_button = QtWidgets.QPushButton("Rename")
         self.rename_section_button.clicked.connect(self.rename_section)
+        # Overwrite and Cancel take the places of Save and Rename while a Save waits for the answer: the row never grows
+        self._save_slot, self._rename_slot = (self._stacked(a, b) for a, b in (
+            (self.save_section_button, self.overwrite_button), (self.rename_section_button, self.cancel_overwrite_button)))
         self.delete_section_button = QtWidgets.QPushButton("Delete")
         self.delete_section_button.clicked.connect(self.delete_section)
         self.loop_box = QtWidgets.QCheckBox("Loop (L)")
@@ -409,11 +410,13 @@ class MainWindow(QtWidgets.QWidget):
             QtGui.QShortcut(QtGui.QKeySequence(key), self, activated=slot)    # bound method: a lambda keeps self alive
         self.calibrate_button = QtWidgets.QPushButton("Calibrate latency")
         self.calibrate_button.clicked.connect(self.start_calibration)
-        self.output_label = QtWidgets.QLabel("")
-        self.output_label.setWordWrap(True)
+        self.output_label = ElidedLabel(takes_the_rest=True)
         self.output_label.setStyleSheet("color: #e67e22;")
         self.headphones_button = QtWidgets.QPushButton("These are headphones")
         self.headphones_button.clicked.connect(self.confirm_headphones)
+        keep_room = self.headphones_button.sizePolicy()
+        keep_room.setRetainSizeWhenHidden(True)           # the notice row keeps its height with or without the button
+        self.headphones_button.setSizePolicy(keep_room)
         self.reference_box.currentTextChanged.connect(self._reference_changed)
         self.song_box.currentIndexChanged.connect(self._preview_song)
         self._reference_changed()
@@ -481,21 +484,18 @@ class MainWindow(QtWidgets.QWidget):
         mix.addWidget(self.tempo_label, 1)
         mix.setSpacing(10)
         sections = QtWidgets.QHBoxLayout()
-        for w in (QtWidgets.QLabel("Section"), self.section_box, self.section_name_edit, self.save_section_button,
-                  self.rename_section_button, self.delete_section_button, self.clear_button, self.loop_box,
+        for w in (QtWidgets.QLabel("Section"), self.section_box, self.section_name_edit, self._save_slot,
+                  self._rename_slot, self.delete_section_button, self.clear_button, self.loop_box,
                   self.between_box, self.bpm_box, self.beats_box):
             sections.addWidget(w)
         sections.setSpacing(6)
-        sections.addWidget(self.overwrite_button)
-        sections.addWidget(self.cancel_overwrite_button)
         sections.setStretchFactor(self.section_box, 1)       # a wider window shows more of a Section's name
         sections.addStretch(1)
         warn = QtWidgets.QHBoxLayout()                  # how it is scored: Octave, Notes, Tolerance (QA #46: off the mix row)
         for w in (QtWidgets.QLabel("Octave"), self.octave_box, self.notes_box, self.note_length_slider,
                   self.note_length_label, QtWidgets.QLabel("Tolerance"), self.tolerance_slider, self.tolerance_label):
             warn.addWidget(w)
-        warn.addWidget(self.output_label, 1)
-        warn.addWidget(self.headphones_button)
+        warn.addStretch(1)
         warn.addWidget(self.note_label)                 # a fixed width: what is sung never resizes the window (#35)
         layout = QtWidgets.QVBoxLayout(self)
         layout.addLayout(devices)
@@ -503,9 +503,22 @@ class MainWindow(QtWidgets.QWidget):
         layout.addLayout(mix)
         layout.addLayout(sections)
         layout.addLayout(warn)
+        notice = QtWidgets.QHBoxLayout()                # why this Output may not suit a Melody Take, and its button
+        notice.addWidget(self.output_label, 1)
+        notice.addWidget(self.headphones_button)
+        layout.addLayout(notice)
         layout.addWidget(self.plot_widget, 1)
         layout.addWidget(self.timeline)
         layout.addWidget(self.summary_label)
+
+        shown = not self.timeline.isHidden()               # how much height the Timeline adds to the window's minimum
+        heights = []
+        for visible in (True, False):
+            self.timeline.setVisible(visible)
+            layout.invalidate()
+            heights.append(layout.totalMinimumSize().height())
+        self._plot_min_h, self._timeline_room = self.plot_widget.minimumSizeHint().height(), heights[0] - heights[1]
+        self._show_timeline(shown)
 
         self._timer = QtCore.QTimer(self)
         self._timer.setTimerType(QtCore.Qt.PreciseTimer)
@@ -676,6 +689,19 @@ class MainWindow(QtWidgets.QWidget):
         self.update_output_warning()
         self._speed_changed()
 
+    def _show_timeline(self, visible: bool) -> None:
+        """Show or hide the Timeline without changing the window's minimum size: hidden, its room goes to the plot's
+        minimum height (a window whose minimum changes with the Reference resizes itself, #52)."""
+        if not hasattr(self, "_timeline_room"):              # before the layout is built
+            self.timeline.setVisible(visible)
+            return
+        if visible:                    # the plot gives its extra room back first, so the minimum never stands higher
+            self.plot_widget.setMinimumHeight(self._plot_min_h)
+            self.timeline.setVisible(True)
+        else:
+            self.timeline.setVisible(False)
+            self.plot_widget.setMinimumHeight(self._plot_min_h + self._timeline_room)
+
     def _preview_song(self, *_) -> None:
         """Idle with Melody chosen: the Timeline shows the chosen song's reference melody. Not while a Take runs."""
         if self._runner is not None or self._replay is not None:
@@ -687,7 +713,7 @@ class MainWindow(QtWidgets.QWidget):
             except Exception:       # a song that cannot be read: Start says why
                 melody = None
         self.timeline.set_melody(melody)
-        self.timeline.setVisible(melody is not None)
+        self._show_timeline(melody is not None)
         self.reload_sections()
 
     def seek(self, song_s: float) -> None:
@@ -794,8 +820,8 @@ class MainWindow(QtWidgets.QWidget):
         taken = next((s for s in store.saved() if s.name == name), None)
         if taken is not None and self.section_box.currentData() != name:
             self._pending_overwrite = (name, *span)      # another Section has this name: ask, inline, before replacing it
-            self.overwrite_button.show()
-            self.cancel_overwrite_button.show()
+            self._save_slot.layout().setCurrentWidget(self.overwrite_button)
+            self._rename_slot.layout().setCurrentWidget(self.cancel_overwrite_button)
             self.summary_label.setText(f"A Section called {name} already exists ({taken.start_s:.1f}-{taken.end_s:.1f} s). "
                                        f"Overwrite it with the new mark ({span[0]:.1f}-{span[1]:.1f} s), or Cancel?")
             return
@@ -815,6 +841,18 @@ class MainWindow(QtWidgets.QWidget):
         if pending is not None and store is not None:
             self._save_section(store, pending[0], pending[1:])
 
+    @staticmethod
+    def _stacked(shown: QtWidgets.QWidget, other: QtWidgets.QWidget) -> QtWidgets.QWidget:
+        """A slot that holds two buttons in one place (the wider one sets its size): what is shown there can change
+        without the row, or the window, changing size (#52)."""
+        slot = QtWidgets.QWidget()
+        stack = QtWidgets.QStackedLayout(slot)
+        stack.setContentsMargins(0, 0, 0, 0)
+        stack.addWidget(shown)
+        stack.addWidget(other)
+        stack.setCurrentWidget(shown)
+        return slot
+
     def _say_about_section(self, text: str) -> None:
         self.summary_label.setText(text)
         self._section_message = text
@@ -831,8 +869,8 @@ class MainWindow(QtWidgets.QWidget):
         if self._pending_overwrite is not None:
             self._pending_overwrite = None
             self.summary_label.setText("")
-        self.overwrite_button.hide()
-        self.cancel_overwrite_button.hide()
+        self._save_slot.layout().setCurrentWidget(self.save_section_button)
+        self._rename_slot.layout().setCurrentWidget(self.rename_section_button)
 
     def rename_section(self) -> None:
         store, old, new = self._sections(), self.section_box.currentData(), self.section_name_edit.text().strip()
@@ -1587,7 +1625,7 @@ class MainWindow(QtWidgets.QWidget):
         self._band_line = None
         self._draw_band()
         self.timeline.set_melody(self._melody, getattr(self._backing, "duration_s", None))
-        self.timeline.setVisible(self._melody is not None)
+        self._show_timeline(self._melody is not None)
         if self._melody is not None:
             _, midi = self._melody.midi_line()
             if np.isfinite(midi).any():
