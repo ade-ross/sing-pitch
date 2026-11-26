@@ -204,6 +204,11 @@ class TakeEngine:
             self._refit_at = 2 * len(self._phrase_pairs)
         return self._live_octave, self._live_lag
 
+    @property
+    def live_shift(self) -> tuple[int, float]:
+        """The (Octave shift, timing shift) the newest live frame was scored at: what a display tracker's dots use."""
+        return self._live_octave, self._live_lag
+
     def push(self, frames: Sequence[PitchFrame]) -> list[FrameScore]:
         """Live scoring, one FrameScore per frame. Uses the streaming gate (no look-ahead, no lag);
         stop() applies the full gate, which also drops runs shorter than 48 ms.

@@ -13,6 +13,9 @@ DEFAULT_OUTPUT = "default output"     # the key of an output whose name cannot b
 DEFAULT_LATENCY_S = 0.08     # uncalibrated guess: ~40 ms input + ~40 ms output (02-audio-io); calibrate once
 
 
+TRACKERS = ("accurate", "fast")
+
+
 @dataclass
 class Settings:
     home: Path
@@ -26,6 +29,7 @@ class Settings:
     latency_on_clocks: list[str] = field(default_factory=list)   # outputs whose latency was measured on the device
     # clocks (#62): the DAC-to-ADC loop, the same for every Take. A latency stored before (or without timestamps) also
     # holds the render frontier of its own calibration run, a random 0-21 ms: still used as it was, but stale
+    tracker: str = "accurate"               # the live dots: "accurate" (the neural network) or "fast" (see pitch/fast.py)
 
     @classmethod
     def load(cls, home: Path) -> Settings:
@@ -35,7 +39,8 @@ class Settings:
             return cls(Path(home), {k: float(v) for k, v in raw.get("latency_s", {}).items()},
                        raw.get("last_calibrated"), list(raw.get("headphones", [])), raw.get("output_device"),
                        raw.get("last_reference"), raw.get("last_song"), allowed_tolerance(raw.get("tolerance_cents")),
-                       [str(o) for o in raw.get("latency_on_clocks", [])])
+                       [str(o) for o in raw.get("latency_on_clocks", [])],
+                       raw.get("tracker") if raw.get("tracker") in TRACKERS else "accurate")
         except (OSError, ValueError, AttributeError, TypeError):
             return cls(Path(home))
 
@@ -43,7 +48,8 @@ class Settings:
         self.home.mkdir(parents=True, exist_ok=True)
         data = dict(latency_s=self.latency_s, last_calibrated=self.last_calibrated, headphones=self.headphones,
                     output_device=self.output_device, last_reference=self.last_reference, last_song=self.last_song,
-                    tolerance_cents=self.tolerance_cents, latency_on_clocks=self.latency_on_clocks)
+                    tolerance_cents=self.tolerance_cents, latency_on_clocks=self.latency_on_clocks,
+                    tracker=self.tracker)
         (self.home / "settings.json").write_text(json.dumps(data, indent=2) + "\n")
 
     def is_calibrated(self, output: str | None) -> bool:

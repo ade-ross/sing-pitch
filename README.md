@@ -126,6 +126,10 @@ Settings worth knowing:
   example) and scores you there. Choose a number to fix it.
 - **Notes** turns the melody into flat bars on exact notes, which is easier to read. The slider next to it sets the
   shortest note it draws.
+- **Tracker** (top row) chooses how your pitch is found for the live dots. **Accurate**, a neural network, draws a dot
+  about 0.13 s after you sing. **Fast**, a classic pitch tracker, draws it about 0.03 s after, but more dots land in the
+  wrong place (about 7 in 100 on a real voice, more on very low notes). Your saved score always comes from the neural
+  network, so History compares like with like whichever you choose.
 
 ## Practise one part on repeat
 

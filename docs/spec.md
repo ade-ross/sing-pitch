@@ -204,6 +204,14 @@ he does not play guitar while using it.
   before this have none and are re-scored with t − `latency_offset_s`, as they were scored.
 - **Build order:** Nearest note plus the Take log, then History, then Key plus Drone, then import and stem split, then
   Melody, then Unscored stretches and Octave shift. Each step is usable on its own.
+- **Pitch tracker and latency (2026-11-25/26):** the voice-to-dot delay was ~90 % the neural tracker waiting for
+  future audio (SwiftF0 releases a frame after 10 later 16 ms frames, ~197 ms; its compute is 2.4 ms per run, the
+  devices 5-10 ms). It now waits for 6 frames (~133 ms, 0.7 % of frames over 50 cents from the 10-frame result on a
+  low voice), and the plot redraws at ~52 Hz instead of 30. A **Tracker** box (Input row) offers Accurate (the neural
+  network, default) or Fast (a classic YIN tracker with octave-error rules, pitch/fast.py: dots ~32 ms after the
+  voice, 6.6 % of voiced frames over 50 cents on a real vocal). Simone, 2026-11-26: with Fast the dots come from the
+  fast tracker and the saved Take is still scored from the neural one, so History stays comparable; remembered between
+  sessions, fixed during a Take.
 
 ## Testing Decisions
 

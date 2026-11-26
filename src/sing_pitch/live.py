@@ -17,6 +17,8 @@ from .pitch import PitchFrame, PitchTracker
 from .reference import Reference
 from .take_engine import (AUTO, FrameScore, LogClock, OctaveSetting, PassTag, SongClock, TakeEngine, TakeRecord,
                           device_times)
+from .take_engine.engine import score_frame
+from .take_engine.gate import VoicingGate
 from .take_store import save_take
 
 FRAME_S = 0.016              # one tracker frame
@@ -126,6 +128,10 @@ class LiveTake:
     def pass_tag(self, value: PassTag | None) -> None:
         self._engine.pass_tag = value
 
+    @property
+    def live_shift(self) -> tuple[int, float]:
+        return self._engine.live_shift
+
     def feed(self, chunk: np.ndarray) -> list[FrameScore]:
         return self._engine.push(self._tracker.push(chunk, self._sample_rate))
 
@@ -174,9 +180,15 @@ class LiveRunner:
 
     def __init__(self, source: AudioInput, tracker: PitchTracker, reference: Reference, home: Path,
                  backing: Playback | None = None, latency_s: float = 0.0, octave: OctaveSetting = AUTO,
-                 config: ScoreConfig = DEFAULT_SCORE_CONFIG, loop_latency: bool = False):
-        """loop_latency: latency_s was calibrated on the device timestamps (the DAC-to-ADC loop, see LogClock)."""
+                 config: ScoreConfig = DEFAULT_SCORE_CONFIG, loop_latency: bool = False,
+                 display_tracker: PitchTracker | None = None):
+        """loop_latency: latency_s was calibrated on the device timestamps (the DAC-to-ADC loop, see LogClock).
+        display_tracker: a faster tracker whose frames are the live dots (drain_display), scored at the neural Take's
+        clock, Section and live Octave and timing shift; the saved Takes are still made from `tracker` alone."""
         self._source = source
+        self._display_tracker = display_tracker
+        self._display: queue.SimpleQueue = queue.SimpleQueue()
+        self._display_gate = VoicingGate(config)
         self._loop_latency = loop_latency
         self._config = config                     # every Take of the run is scored with it (Tolerance, Timing window)
         self._tracker = tracker
@@ -217,6 +229,9 @@ class LiveRunner:
         self._heard = -math.inf
         self._take = LiveTake(self._tracker, self._reference, self._source.sample_rate, started_at=self._run_started,
                               octave=self._octave, config=self._config)
+        if self._display_tracker is not None:
+            self._display_tracker.reset()         # its frame times count from the same first sample
+            self._display_gate = VoicingGate(self._config)
         if self._backing is None:
             def on_chunk(chunk: np.ndarray) -> None:      # PortAudio thread
                 self._received += len(chunk)
@@ -284,6 +299,9 @@ class LiveRunner:
                     self._control(*chunk)
                 else:
                     self._scores.put(self._route(self._tracker.push(chunk, self._source.sample_rate)))
+                    if self._display_tracker is not None:
+                        self._display.put(self._score_display(
+                            self._display_tracker.push(chunk, self._source.sample_rate)))
             except Exception as exc:
                 self._error = exc
 
@@ -321,6 +339,18 @@ class LiveRunner:
             host, tag, pct = self._cuts.pop(0)
             self._next_take(tag, pct, clock.voice_at_host(host), clock.plot_of_host(host))
         return scores + self._take.push_frames(frames)
+
+    def _score_display(self, frames: list[PitchFrame]) -> list[FrameScore]:
+        """The display tracker's frames as dots: on the running Take's song clock and Section, at the Octave and
+        timing shift its newest neural frame was scored at, with their own voicing gate. Never saved."""
+        take, out = self._take, []
+        octave, lag = take.live_shift
+        for f in frames:
+            song_t = take.song_clock(f.t)
+            if take.pass_tag is not None and not take.pass_tag.scores(song_t):
+                song_t = None
+            out.append(score_frame(f, self._display_gate.step(f), self._reference, self._config, song_t, octave, lag))
+        return out
 
     def _with_settings(self, record: TakeRecord) -> TakeRecord:
         guide, gain = _guide_settings(self._guide, record.frames)
@@ -435,6 +465,18 @@ class LiveRunner:
         inp = getattr(self._source, "times", None)
         return (out.glitches if out is not None else 0, inp.glitches if inp is not None else 0)
 
+    def drain_display(self) -> list[FrameScore] | None:
+        """The display tracker's dots since the last call, on the plot's axis like drain(); None without one."""
+        if self._display_tracker is None:
+            return None
+        out: list[FrameScore] = []
+        while True:
+            try:
+                out += self._display.get_nowait()
+            except queue.Empty:
+                break
+        return self._on_plot_axis(out)
+
     def drain(self) -> list[FrameScore]:
         """Scores made since the last call, their times on the plot's axis: capture host time minus a fixed origin
         (LogClock.plot_t), which is voice time while nothing is lost; after a lost mic chunk the voice that follows is
@@ -447,6 +489,9 @@ class LiveRunner:
                 break
         if not out and self._error is not None:       # the scores made before the crash are shown first
             raise self._error
+        return self._on_plot_axis(out)
+
+    def _on_plot_axis(self, out: list[FrameScore]) -> list[FrameScore]:
         clock = self.song_clock
         if out and isinstance(clock, LogClock) and clock.timed:
             plot = clock.plot_t(np.array([s.t for s in out]))
