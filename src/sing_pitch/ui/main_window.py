@@ -47,7 +47,7 @@ from .tempo_find import TempoFinder
 
 PAST_S = 4.0          # the plot is centred on now: this much of the voice and the Reference behind the now-line...
 FUTURE_S = 4.0        # ...and this much of the Reference ahead of it
-TICK_MS = 33          # ~30 Hz redraw
+TICK_MS = 16          # ~60 Hz redraw asked, ~52 Hz delivered in the real macOS look (2026-11-26): a dot waits ~10 ms for its redraw, not ~17
 PLAYHEAD_HOLD_S = 1.0   # after a click on the Timeline the playhead stays on it until the jump is heard, at most this
 PLAYHEAD_NEAR_S = 0.05  # ...heard: the song under the now-line within this before the target (or up to 1 s after it)
 SPEED_MIN, SPEED_MAX, SPEED_STEP = 50, 120, 5     # Speed in percent of the original
