@@ -96,3 +96,7 @@ In the green Band. "% in tune" is the share of sung time in green.
 **Steadiness**:
 The spread of pitch (SD in cents) across the stable middle of a held note, with attack and release left out.
 _Avoid_: stability, precision
+
+**Tracker**:
+How the live dots find your pitch: Accurate (the neural network, SwiftF0, ~0.13 s behind the voice) or Fast (a classic pitch tracker, ~0.03 s, more dots in the wrong place). The saved score of a Take always comes from Accurate.
+_Avoid_: pitch engine, detector mode

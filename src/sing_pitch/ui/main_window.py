@@ -31,7 +31,7 @@ from ..reference import Band, Key, Melody, NearestNote, Reference
 from ..reference.melody import NotesMelody
 from ..reference.notes import PER_PHRASE, format_length
 from ..replay import Replay
-from ..settings import DEFAULT_OUTPUT, Settings, allowed_tolerance
+from ..settings import DEFAULT_OUTPUT, TRACKERS, Settings, allowed_tolerance
 from ..take_engine import (AUTO, FrameScore, LinearClock, NoteTally, PauseFold, SampledClock, SongClock, TakeRecord,
                            pinned, project_song_time, replay_scores)
 from ..take_engine.note_scores import scored_per_note
@@ -47,6 +47,15 @@ from .tempo_find import TempoFinder
 
 PAST_S = 4.0          # the plot is centred on now: this much of the voice and the Reference behind the now-line...
 FUTURE_S = 4.0        # ...and this much of the Reference ahead of it
+TRACKER_TEXT = ["Accurate", "Fast"]   # the Tracker box, in settings.TRACKERS order
+
+
+def _fast_tracker() -> PitchTracker:
+    from ..pitch.fast import FastTracker
+
+    return FastTracker()
+
+
 TICK_MS = 16          # ~60 Hz redraw asked, ~52 Hz delivered in the real macOS look (2026-11-26): a dot waits ~10 ms for its redraw, not ~17
 PLAYHEAD_HOLD_S = 1.0   # after a click on the Timeline the playhead stays on it until the jump is heard, at most this
 PLAYHEAD_NEAR_S = 0.05  # ...heard: the song under the now-line within this before the target (or up to 1 s after it)
@@ -236,12 +245,15 @@ class MainWindow(QtWidgets.QWidget):
         output_devices: Callable[[], list[dict]] = list_outputs,
         output_kind_of: Callable[[str], OutputKind] = output_kind,
         tempo_detector: TempoDetector = detect_tempo,
+        fast_tracker_factory: Callable[[], PitchTracker] | None = None,
     ):
         super().__init__()
         collect_on_the_ui_thread_only()       # the worker threads below must never finalise a Qt object (gui_gc.py)
         self.setWindowTitle("sing-pitch")
         self.resize(*self._first_size())
         self._tracker, self._home, self._input_factory = tracker, home or data_dir(), input_factory
+        self._fast_tracker_factory = fast_tracker_factory or _fast_tracker
+        self._fast_tracker: PitchTracker | None = None    # made at the first Fast Take, then kept
         self._drone_factory = drone_factory
         self._drone: DronePlayer | None = None
         self._backing_factory = backing_factory
@@ -469,6 +481,15 @@ class MainWindow(QtWidgets.QWidget):
         self.tolerance_slider.setValue(self._settings.tolerance_cents)
         self.tolerance_label.setText(f"±{self.tolerance_slider.value()} c")
         self.tolerance_slider.valueChanged.connect(self._tolerance_moved)   # bound method: a lambda keeps self alive
+        self.tracker_box = QtWidgets.QComboBox()
+        self.tracker_box.addItems(TRACKER_TEXT)
+        self.tracker_box.setFocusPolicy(QtCore.Qt.NoFocus)
+        self.tracker_box.setToolTip("How your voice's pitch is found for the live dots. Accurate: a neural network, the "
+                                    "dots come ~0.13 s after you sing. Fast: a classic pitch tracker, ~0.03 s, but more "
+                                    "dots in the wrong place, mostly on low notes. The saved score always comes from the "
+                                    "neural network, so History compares like with like. Fixed during a Take.")
+        self.tracker_box.setCurrentIndex(TRACKERS.index(self._settings.tracker))
+        self.tracker_box.currentIndexChanged.connect(self._tracker_chosen)   # bound method: a lambda keeps self alive
         self.notes_box.toggled.connect(self._notes_changed)                # bound methods: a lambda keeps self alive
         self.note_length_slider.valueChanged.connect(self._note_length_moved)
         self.note_length_slider.sliderReleased.connect(self._notes_changed)
@@ -536,7 +557,8 @@ class MainWindow(QtWidgets.QWidget):
         self._set_now(0.0)
 
         devices = QtWidgets.QHBoxLayout()               # two short rows, so the window can be narrow (#25)
-        for w in (QtWidgets.QLabel("Input"), self.device_box, QtWidgets.QLabel("Output"), self.output_box,
+        for w in (QtWidgets.QLabel("Input"), self.device_box, QtWidgets.QLabel("Tracker"), self.tracker_box,
+                  QtWidgets.QLabel("Output"), self.output_box,
                   self.refresh_button, self.calibrate_button):
             devices.addWidget(w)
         devices.setStretchFactor(self.device_box, 1)
@@ -671,6 +693,18 @@ class MainWindow(QtWidgets.QWidget):
         if self.song_box.currentData() is not None:             # "no songs" is not a choice
             self._settings.last_song = self.song_box.currentData()
         self._settings.save()
+
+    def _tracker_chosen(self, index: int) -> None:
+        self._settings.tracker = TRACKERS[index]
+        self._settings.save()
+
+    def _display_tracker(self) -> PitchTracker | None:
+        """The tracker the live dots come from when Fast is chosen (None = the neural tracker's own frames)."""
+        if TRACKERS[self.tracker_box.currentIndex()] != "fast":
+            return None
+        if self._fast_tracker is None:
+            self._fast_tracker = self._fast_tracker_factory()
+        return self._fast_tracker
 
     def _tolerance_moved(self, value: int) -> None:
         """The Tolerance slider moved: keep it on a 5-cent step, show it, remember it for the next Take and window."""
@@ -1857,7 +1891,7 @@ class MainWindow(QtWidgets.QWidget):
             config = self._score_config()
             self._runner = LiveRunner(self._input_factory(index), self._tracker, reference, self._home,
                                       backing=backing, latency_s=latency, octave=self._octave_setting(), config=config,
-                                      loop_latency=loop_latency)
+                                      loop_latency=loop_latency, display_tracker=self._display_tracker())
             self._runner.start()
         except Exception as exc:
             self._runner = None
@@ -1877,7 +1911,7 @@ class MainWindow(QtWidgets.QWidget):
         self.button.setText("Stop")
         for w in (self.device_box, self.output_box, self.refresh_button, self.reference_box, self.key_box, self.drone_box,
                   self.song_box, self.octave_box, self.notes_box, self.note_length_slider, self.calibrate_button,
-                  self.tolerance_slider):
+                  self.tolerance_slider, self.tracker_box):
             w.setEnabled(False)
         self.replay_button.setEnabled(False)
         self.summary_label.setText("Singing...")
@@ -1921,6 +1955,7 @@ class MainWindow(QtWidgets.QWidget):
         self.reference_box.setEnabled(True)
         self.calibrate_button.setEnabled(True)
         self.tolerance_slider.setEnabled(True)
+        self.tracker_box.setEnabled(True)
         self._keep_plot = True                 # the Take just sung stays on the plot until a control is touched
         self._reference_changed()
         self._keep_plot = False
@@ -1946,10 +1981,14 @@ class MainWindow(QtWidgets.QWidget):
         except Exception:
             return 0
 
-    def ingest(self, scores: list[FrameScore]) -> None:
+    def ingest(self, scores: list[FrameScore], dots: list[FrameScore] | None = None) -> None:
+        """scores: the Take's own (neural) scores, which the Notes verdicts count; dots: what to draw instead, when a
+        display tracker made them (Fast)."""
         fold = self._fold()
         if self._note_tally is not None:
             self._tally(scores)
+        if dots is not None:
+            scores = dots
         scores = [s for s in scores if not fold.paused(s.t)]     # sung while the song was paused: not drawn
         for s in scores:
             self._t.append(s.t)
@@ -2255,10 +2294,11 @@ class MainWindow(QtWidgets.QWidget):
         if self._runner is not None:
             try:
                 scores = self._runner.drain()
+                dots = self._runner.drain_display()     # Fast: the dots come from the display tracker
                 cuts = self._runner.drain_cuts()        # after drain(): every drained score's boundary is here
                 if self._note_tally is not None:
                     self._pending_cuts += cuts
-                self.ingest(scores)
+                self.ingest(scores, dots)
             except Exception:           # the worker thread died: stop() ends the Take and reports why
                 self._stop()
                 return
