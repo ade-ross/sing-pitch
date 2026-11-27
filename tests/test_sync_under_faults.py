@@ -86,5 +86,6 @@ def test_every_lost_block_and_chunk_is_counted(tmp_path):
     out_n, out_s = glitches["out"]
     in_n, in_s = glitches["inp"]
     step = 256 / 48000                        # the last loss may not be stamped yet when the snapshot is taken
-    assert out_n >= 5 and abs(out_s - glitches["lost_out_steps"] * step) <= 8 * step
-    assert in_n >= 3 and abs(in_s - glitches["lost_in_steps"] * step) <= 4 * step
+    eps = 1e-9                                # sums of step-sized floats: exactly 4 steps read 4 steps + 1e-16
+    assert out_n >= 5 and abs(out_s - glitches["lost_out_steps"] * step) <= 8 * step + eps
+    assert in_n >= 3 and abs(in_s - glitches["lost_in_steps"] * step) <= 4 * step + eps
