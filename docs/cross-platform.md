@@ -103,8 +103,10 @@ nothing changes (4x); CI sets 1 on both OSes, because GitHub's runners are slowe
 ### Holding the GIL with libc: `testmode.hold_the_gil`
 
 `UiStall` and `test_fake_faults` held the GIL with `ctypes.PyDLL(None).usleep(...)`, the C library's `usleep`, which
-Windows does not have (`ctypes.PyDLL(None)` fails). It is now a pure-Python wait with the switch interval raised past
-it, so CPython never hands the GIL over. The effect is the same (no other Python thread runs), on every OS.
+Windows does not have (`ctypes.PyDLL(None)` fails). `hold_the_gil` now asks for it: where the C library has `usleep`
+(macOS, Linux) it is used as before, so the Mac runs exactly the old test. Without one, a pure-Python wait with the
+switch interval raised past it holds the GIL just as well (Windows, measured: 150 ms held, +3 ms late, 10 of 10). A
+first version used the pure-Python wait everywhere; on GitHub's macOS runner the GIL test then failed 2 runs of 3.
 
 ### No fonts offscreen: `sing_pitch/offscreen.py` (new)
 

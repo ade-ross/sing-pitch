@@ -19,6 +19,7 @@ Selected only by flags (`sing-pitch --fake-mic ...`, see parse_flags) or by the 
 from __future__ import annotations
 
 import argparse
+import ctypes
 import functools
 import math
 import sys
@@ -536,9 +537,14 @@ def window_kwargs(hub: FakeAudioHub, mic: FakeMicFactory | None, fake_output: bo
 
 
 def hold_the_gil(ms: float) -> None:
-    """Keep the GIL for `ms` of wall time, as a slow C++ paint does: no other Python thread runs meanwhile. A pure-
-    Python wait with the switch interval raised past it (CPython then never hands the GIL over), the same on every OS
-    (was libc usleep through ctypes.PyDLL, which Windows has not)."""
+    """Keep the GIL for `ms` of wall time, as a slow C++ paint does: no other Python thread runs meanwhile. With the C
+    library's usleep where there is one (macOS, Linux: ctypes.PyDLL keeps the GIL through the call, as before);
+    without one (Windows has no libc to load), a pure-Python wait with the switch interval raised past it, so CPython
+    never hands the GIL over (measured on Windows: 150 ms held, 10 of 10)."""
+    usleep = _libc_usleep()
+    if usleep is not None:
+        usleep(int(ms * 1000))
+        return
     interval = sys.getswitchinterval()
     sys.setswitchinterval(max(interval, ms / 1000 + 1.0))
     try:
@@ -547,6 +553,13 @@ def hold_the_gil(ms: float) -> None:
             pass
     finally:
         sys.setswitchinterval(interval)
+
+
+def _libc_usleep():
+    try:
+        return ctypes.PyDLL(None).usleep
+    except (OSError, TypeError, AttributeError):    # no C library to load (Windows), or no usleep in it
+        return None
 
 
 class UiStall:
