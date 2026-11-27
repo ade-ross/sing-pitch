@@ -65,6 +65,10 @@ Same measurement, same machine:
 
 The saved Take scored 93.6 % in tune with the change, as without it.
 
+Two minutes on the same laptop with nothing else running: the dots 0.03–0.07 s behind at every 15 s check up to
+120 s, 0.3 s of audio skipped in all (0.25 %), the saved Take 93.3 %. The 40 s run above shared the machine with
+other work. Sung for real on the laptop, two whole songs (~5 min each) with Fast felt in time.
+
 ## Considered, not done
 
 - **A Fast frame every 2 hops instead of every hop.** It would halve Fast's work, but its continuity and octave rules
