@@ -21,7 +21,7 @@ jobs:
       - uses: astral-sh/setup-uv@v6
         with:
           version: "0.9.30"       # writes uv.lock in the format it has (revision 3); newer ones rewrite it
-      - name: Install (without the import extra: the tests use stand-ins for torch and the models)
+      - name: Install           # without the import extra: the tests use stand-ins for torch and the models
         run: uv sync --locked
       - name: Fast tests
         run: uv run pytest -rfE
