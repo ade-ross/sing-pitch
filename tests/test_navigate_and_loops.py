@@ -3,11 +3,12 @@ repeats, remove a loop or a mark. The song is the oracle song three times over (
 exactly what the Guide vocal plays, so every Pass of a Section scores near 100 %."""
 from PySide6 import QtCore, QtWidgets
 from PySide6.QtTest import QTest
+from app_speed import APP_SPEED
 from qa_helpers import NOTES, configure_latency, singing_song
 
 from sing_pitch.qa import QA
 
-SCALE = 4.0
+SCALE = APP_SPEED
 
 
 def echo_singer(home):

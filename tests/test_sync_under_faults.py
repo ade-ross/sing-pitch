@@ -9,11 +9,12 @@ heard at that moment (QA.display_error_s), sampled every 0.2 s of app time. Coun
 off under these faults and the oracle falls to 13-78 %; see ~/Builds/.notes/sing-pitch/handoff-sync.md."""
 import numpy as np
 import pytest
+from app_speed import APP_SPEED
 from qa_helpers import NOTES, configure_latency, singing_song
 
 from sing_pitch.qa import QA
 
-SCALE = 4.0
+SCALE = APP_SPEED
 MEAN_BOUND_S = 0.015      # display error: mean |error| over the Take
 MAX_BOUND_S = 0.030       # ...and no sample beyond this
 ORACLE_PCT = 95.0
