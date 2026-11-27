@@ -1,0 +1,13 @@
+# Temporary: does the GIL fake-fault test pass on GitHub's macOS runner with main's own code?
+name: probe
+on: push
+jobs:
+  probe:
+    runs-on: macos-latest
+    steps:
+      - uses: actions/checkout@v7
+      - uses: astral-sh/setup-uv@v7
+        with:
+          version: "0.9.30"
+      - run: uv sync --locked
+      - run: for i in 1 2 3 4 5; do uv run pytest -q -p no:cacheprovider "tests/test_fake_faults.py::test_a_deadline_turns_a_held_gil_into_lost_blocks_on_both_sides" 2>&1 | tail -1; done
