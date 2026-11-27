@@ -17,8 +17,8 @@ jobs:
     env:
       SING_PITCH_TEST_SPEED: "1"  # CI runners are slower than an Apple Silicon Mac (tests/app_speed.py)
     steps:
-      - uses: actions/checkout@v4
-      - uses: astral-sh/setup-uv@v6
+      - uses: actions/checkout@v7
+      - uses: astral-sh/setup-uv@v7
         with:
           version: "0.9.30"       # writes uv.lock in the format it has (revision 3); newer ones rewrite it
       - name: Install           # without the import extra: the tests use stand-ins for torch and the models

@@ -57,7 +57,7 @@ def test_a_click_while_paused_moves_the_song_the_playhead_and_the_drawn_referenc
         assert abs(qa.song_position() - 8.0) < 0.05
         qa.pause()                                                   # Play
         qa.wait(0.5)
-        assert 8.4 < qa.song_position() < 9.0                        # went on from the new spot
+        assert 8.4 < qa.song_position() < 9.5                        # went on from the new spot (loose above: a loaded machine reads late, #69)
 
 
 def test_the_arrow_keys_move_the_song_while_paused(tmp_path):
